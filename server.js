@@ -30,14 +30,16 @@ app.get('/amadeus', async (req, res) => {
       {
         headers: { Authorization: `Bearer ${accessToken}` },
         params: {
-          originLocationCode: origin,
-          destinationLocationCode: destination,
-          departureDate: date,
-          adults,
-          travelClass,
-          currencyCode: 'INR',
-          max: 10
-        }
+  originLocationCode: origin,
+  destinationLocationCode: destination,
+  departureDate: date,
+  returnDate: req.query.returnDate,
+  adults,
+  travelClass,
+  currencyCode: 'INR',
+  max: 10
+}
+
       }
     );
 
