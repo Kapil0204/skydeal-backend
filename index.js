@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 
-// ---- Kiwi API Flight Search ----
+// ✅ Kiwi API Flight Search
 app.get('/kiwi', async (req, res) => {
   const { origin, destination, date, adults = 1, travelClass = "ECONOMY" } = req.query;
 
@@ -37,7 +37,7 @@ app.get('/kiwi', async (req, res) => {
   }
 });
 
-// ---- ScraperAPI + Cheerio to Fetch MMT Offers ----
+// ✅ Scrape MMT Offers (optional)
 app.get('/offers', async (req, res) => {
   try {
     const targetURL = 'https://www.makemytrip.com/promos/flight-offers.html';
@@ -62,12 +62,12 @@ app.get('/offers', async (req, res) => {
   }
 });
 
-// ---- Health Check ----
+// ✅ Health check
 app.get('/', (req, res) => {
   res.send('SkyDeal backend is running');
 });
 
-// ---- Start Server ----
+// ✅ Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
