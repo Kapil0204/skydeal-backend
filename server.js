@@ -7,10 +7,19 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(cors());
+// === CORS Setup ===
+const allowedOrigins = ['https://skydeal-frontend.vercel.app'];
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
 
-// ---- Amadeus Flight Search ----
-// ----- Amadeus Flight Search (Supports Return Flights) -----
+// ---- Amadeus Flight Search (Supports Return Flights) ----
 app.get('/amadeus', async (req, res) => {
   const {
     origin,
@@ -69,7 +78,6 @@ app.get('/amadeus', async (req, res) => {
   }
 });
 
-
 // ---- ScraperAPI + Cheerio to Fetch MMT Offers ----
 app.get('/offers', async (req, res) => {
   try {
@@ -102,3 +110,4 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
