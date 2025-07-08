@@ -10,31 +10,32 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 
 // ✅ Kiwi API Flight Search
+// ✅ FIXED - changed '/Kiwi' to '/kiwi'
 app.get('/kiwi', async (req, res) => {
   const { origin, destination, date, adults = 1, travelClass = "ECONOMY" } = req.query;
 
- try {
-  const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/roundtrip', {
-    params: {
-      origin: origin,
-      destination: destination,
-      date: date,
-      adults: adults,
-      travelClass: travelClass
-    },
-    headers: {
-      'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
-    }
-  });
+  try {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/roundtrip', {
+      params: {
+        origin,
+        destination,
+        date,
+        adults,
+        travelClass
+      },
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+      }
+    });
 
-  res.json(response.data);
-} catch (error) {
-  console.error('KIWI API ERROR:', error?.response?.data || error.message);  // Add this line
-  res.status(500).json({ error: 'Failed to fetch flights from Kiwi' });
-}
-
+    res.json(response.data);
+  } catch (error) {
+    console.error('KIWI API ERROR:', error?.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch flights from Kiwi' });
+  }
 });
+
 
 // ✅ Scrape MMT Offers (optional)
 app.get('/offers', async (req, res) => {
