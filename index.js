@@ -20,43 +20,39 @@ app.use(cors({
 }));
 
 // 🛫 Flight Search Endpoint (Amadeus)
-app.get('/amadeus', async (req, res) => {
-  const {
-    origin, destination, date: departureDate,
-    returnDate, adults = 1, travelClass = 'ECONOMY',
-    currencyCode = 'INR', max = 10
-  } = req.query;
+app.get('/kiwi', async (req, res) => {
+  const { origin, destination, date, returnDate, adults = 1, travelClass = "M" } = req.query;
 
   try {
-    // 1. Get token
-    const tokenRes = await axios.post(
-      'https://test.api.amadeus.com/v1/security/oauth2/token',
-      new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: process.env.AMADEUS_CLIENT_ID,
-        client_secret: process.env.AMADEUS_CLIENT_SECRET
-      })
-    );
-    const accessToken = tokenRes.data.access_token;
-
-    // 2. Build search params
-    const params = { originLocationCode: origin, destinationLocationCode: destination,
-      departureDate, adults, travelClass, currencyCode, max
+    const options = {
+      method: 'GET',
+      url: 'https://kiwi-com.p.rapidapi.com/v2/search',
+      params: {
+        fly_from: origin,
+        fly_to: destination,
+        date_from: date,
+        date_to: date,
+        return_from: returnDate || '',
+        return_to: returnDate || '',
+        adults,
+        selected_cabins: travelClass,
+        curr: 'INR',
+        limit: 10
+      },
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'kiwi-com.p.rapidapi.com'
+      }
     };
-    if (returnDate) params.returnDate = returnDate;
 
-    // 3. Call Amadeus
-    const flightRes = await axios.get(
-      'https://test.api.amadeus.com/v2/shopping/flight-offers',
-      { headers: { Authorization: `Bearer ${accessToken}` }, params }
-    );
-
-    return res.json(flightRes.data);
-  } catch (err) {
-    console.error('Amadeus API error:', err.message);
-    return res.status(500).json({ error: 'Failed to fetch flight data' });
+    const response = await axios.request(options);
+    res.json(response.data);
+  } catch (error) {
+    console.error('Kiwi API error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch flight data from Kiwi' });
   }
 });
+
 
 // ✈️ Offer Scraper Endpoint
 app.get('/offers', async (req, res) => {
