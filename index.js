@@ -78,5 +78,32 @@ app.get('/offers', async (req, res) => {
 
 app.get('/', (req, res) => res.send('SkyDeal backend is running'));
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
+// ---- Kiwi API Flight Search ----
+app.get('/kiwi', async (req, res) => {
+  const { origin, destination, date, adults = 1, travelClass = "ECONOMY" } = req.query;
+
+  try {
+    const response = await axios.get('https://kiwi-flight-search.p.rapidapi.com/flights', {
+      params: {
+        fly_from: origin,
+        fly_to: destination,
+        date_from: date,
+        date_to: date,
+        adults,
+        selected_cabins: travelClass === "BUSINESS" ? "C" : "M",
+        curr: "INR"
+      },
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'kiwi-flight-search.p.rapidapi.com'
+      }
+    });
+
+    res.json(response.data);
+  } catch (error) {
+    console.error("Kiwi API error:", error.message);
+    res.status(500).json({ error: "Failed to fetch flights from Kiwi" });
+  }
+});
 
 
