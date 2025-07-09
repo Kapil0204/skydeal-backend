@@ -1,18 +1,19 @@
 import express from 'express';
-import axios from 'axios';
 import cors from 'cors';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 const PORT = process.env.PORT || 10000;
 
-app.use(cors());
-
 app.get('/kiwi', async (req, res) => {
-  const options = {
-    method: 'GET',
-    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
-    params: {
-      source: 'City:mumbai_in',
+  try {
+    const params = {
+      source: 'Country:IN',
       destination: 'City:new-delhi_in',
       currency: 'INR',
       locale: 'en',
@@ -28,29 +29,37 @@ app.get('/kiwi', async (req, res) => {
       allowOvernightStopover: 'true',
       outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
       transportTypes: 'FLIGHT',
-      contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
-      limit: '10',
-      inboundDepartureDateStart: '2025-07-22T00:00:00',
-      inboundDepartureDateEnd: '2025-07-29T00:00:00'
-    },
-    headers: {
-      'x-rapidapi-host': 'kiwi-com-cheap-flights.p.rapidapi.com',
-      'x-rapidapi-key': 'YOUR_RAPIDAPI_KEY_HERE' // Replace this
-    }
-  };
+      limit: 20
+    };
 
-  try {
-    const response = await axios.request(options);
-    res.json(response.data);
+    const url = new URL('https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip');
+    Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
+
+    const response = await fetch(url.href, {
+      method: 'GET',
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+      }
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      res.json(data);
+    } else {
+      res.status(response.status).json({ error: data.message || 'Unknown error' });
+    }
+
   } catch (error) {
-    console.error('Error fetching from Kiwi API:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
+
 
 
 
