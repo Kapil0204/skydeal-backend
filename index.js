@@ -11,6 +11,10 @@ const PORT = process.env.PORT || 3000;
 app.get("/kiwi", async (req, res) => {
   const { origin, destination, date } = req.query;
 
+  if (!origin || !destination || !date) {
+    return res.status(400).json({ error: "Missing required parameters" });
+  }
+
   const options = {
     method: 'GET',
     url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/cheap',
@@ -31,13 +35,17 @@ app.get("/kiwi", async (req, res) => {
     const response = await axios.request(options);
     res.json(response.data);
   } catch (error) {
-    console.error("Kiwi API error:", error.message);
+    console.error("🛑 Kiwi API fetch failed:");
+    if (error.response) {
+      console.error("Status:", error.response.status);
+      console.error("Data:", error.response.data);
+    } else {
+      console.error("Message:", error.message);
+    }
     res.status(500).json({ error: "Failed to fetch from Kiwi API" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
-
-
