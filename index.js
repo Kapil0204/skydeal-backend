@@ -1,41 +1,44 @@
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
-import dotenv from 'dotenv';
-dotenv.config();
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
-app.use(express.json());
 
 app.get('/kiwi', async (req, res) => {
-  const { origin, destination, date, returnDate, adults, travelClass } = req.query;
-
-  const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip?source=City:${origin}&destination=City:${destination}&currency=INR&locale=en&adults=${adults || 1}&children=0&infants=0&bags=1&cabinClass=${travelClass || 'ECONOMY'}&sortBy=QUALITY&sortOrder=ASCENDING&limit=10&returnDateFrom=${returnDate || ''}&returnDateTo=${returnDate || ''}&dateFrom=${date}&dateTo=${date}`;
-
   try {
-    const response = await fetch(url, {
+    const {
+      flyFrom,
+      to,
+      dateFrom,
+      dateTo,
+      oneWay,
+      adults,
+      travelClass
+    } = req.query;
+
+    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&adults=${adults}&selected_cabins=${travelClass}&one_for_city=0&one_per_date=0&curr=INR`;
+
+    const options = {
       method: 'GET',
       headers: {
         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
         'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
       }
-    });
+    };
 
+    const response = await fetch(url, options);
     const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.message || 'Kiwi API Error' });
-    }
-
     res.json(data);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching flight data:', error);
+    res.status(500).json({ error: 'Failed to fetch flight data' });
   }
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`SkyDeal backend running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
+
