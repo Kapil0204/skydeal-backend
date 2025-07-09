@@ -1,66 +1,53 @@
-const form = document.getElementById('flight-form');
-const resultsContainer = document.getElementById('results');
-const tripTypeInputs = document.getElementsByName('tripType');
-const returnDateContainer = document.getElementById('return-date-container');
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+require('dotenv').config();
 
-tripTypeInputs.forEach(input => {
-  input.addEventListener('change', () => {
-    returnDateContainer.style.display = input.value === 'roundtrip' ? 'block' : 'none';
-  });
-});
+const app = express();
+app.use(cors());
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
+const PORT = process.env.PORT || 3000;
 
-  const origin = document.getElementById('origin').value;
-  const destination = document.getElementById('destination').value;
-  const date = document.getElementById('departure-date').value;
-  const tripType = document.querySelector('input[name="tripType"]:checked').value;
+app.get('/kiwi', async (req, res) => {
+  const { origin, destination, date, tripType } = req.query;
 
-  let url = `https://skydeal-backend.onrender.com/kiwi?origin=${origin}&destination=${destination}&date=${date}`;
-  if (tripType === 'roundtrip') {
-    const returnDate = document.getElementById('return-date').value;
-    url += `&returnDate=${returnDate}`;
-  }
+  const url = tripType === 'round'
+    ? 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip'
+    : 'https://kiwi-com-cheap-flights.p.rapidapi.com/one-way';
+
+  const options = {
+    method: 'GET',
+    url,
+    params: {
+      sourceCountry: 'IN',
+      sourceDestination: origin,
+      destinationCountry: 'IN',
+      destinationCity: destination,
+      adults: '1',
+      cabinClass: 'ECONOMY',
+      currency: 'INR',
+      locale: 'en',
+      limit: '5',
+    },
+    headers: {
+      'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+    }
+  };
 
   try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const itineraries = data.data || data.itineraries || [];
-    const carriers = data.carriers || [];
-    const carrierMap = new Map();
-    carriers.forEach(c => carrierMap.set(c.code, c.name));
-
-    resultsContainer.innerHTML = '';
-
-    if (itineraries.length === 0) {
-      resultsContainer.innerHTML = '<p>No flights found.</p>';
-      return;
-    }
-
-    itineraries.forEach(flight => {
-      const carrierCode = flight.validatingCarrier || flight.carrier || 'N/A';
-      const airline = carrierMap.get(carrierCode) || "Unknown Airline";
-      const departure = flight.departureTime || flight.departure || "N/A";
-      const arrival = flight.arrivalTime || flight.arrival || "N/A";
-      const price = flight.price || flight.priceAmount || 'N/A';
-
-      const card = document.createElement('div');
-      card.className = 'flight-card';
-      card.innerHTML = `
-        <h3>✈️ ${airline}</h3>
-        <p><strong>Departure:</strong> ${departure}</p>
-        <p><strong>Arrival:</strong> ${arrival}</p>
-        <p><strong>Price:</strong> ₹${price}</p>
-      `;
-      resultsContainer.appendChild(card);
-    });
-  } catch (err) {
-    resultsContainer.innerHTML = '<p>Something went wrong. Try again.</p>';
-    console.error(err);
+    const response = await axios.request(options);
+    res.json(response.data);
+  } catch (error) {
+    console.error('Error fetching flights:', error.message);
+    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error.message });
   }
 });
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
 
 
 
