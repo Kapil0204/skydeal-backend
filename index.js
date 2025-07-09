@@ -6,40 +6,38 @@ require("dotenv").config();
 const app = express();
 app.use(cors());
 
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = "kiwi.com";
+const PORT = process.env.PORT || 3000;
 
 app.get("/kiwi", async (req, res) => {
-  const { origin, destination, date, adults = 1, travelClass = "M" } = req.query;
+  const { origin, destination, date } = req.query;
+
+  const options = {
+    method: 'GET',
+    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/cheap',
+    params: {
+      from: origin,
+      to: destination,
+      date: date,
+      partner: 'picky',
+      currency: 'INR'
+    },
+    headers: {
+      'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+    }
+  };
 
   try {
-    const response = await axios.get("https://kiwi-com.p.rapidapi.com/v2/search", {
-      headers: {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "kiwi-com.p.rapidapi.com",
-      },
-      params: {
-        fly_from: origin,
-        fly_to: destination,
-        date_from: date,
-        date_to: date,
-        curr: "INR",
-        adults,
-        selected_cabins: travelClass,
-        one_for_city: 0,
-        max_stopovers: 1
-      },
-    });
-
+    const response = await axios.request(options);
     res.json(response.data);
-  } catch (err) {
-    console.error(err?.response?.data || err.message);
+  } catch (error) {
+    console.error("Kiwi API error:", error.message);
     res.status(500).json({ error: "Failed to fetch from Kiwi API" });
   }
 });
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 
