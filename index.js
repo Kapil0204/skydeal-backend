@@ -36,8 +36,8 @@ app.get("/kiwi", async (req, res) => {
     const mappedTo = cityMap[to?.toUpperCase()] || to;
 
     const params = {
-  source: 'City:mumbai_in',
-  destination: 'City:new-delhi_in',
+  source: 'City:mumbai_in', // ✅ use valid city
+  destination: 'City:new-delhi_in', // ✅ use valid city
   currency: 'INR',
   locale: 'en',
   adults: '1',
@@ -56,6 +56,7 @@ app.get("/kiwi", async (req, res) => {
   limit: '10',
   sort: 'quality',
 };
+
 
 
 
