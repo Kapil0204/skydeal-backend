@@ -1,6 +1,6 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
+import express from 'express';
+import axios from 'axios';
+import cors from 'cors';
 
 const app = express();
 app.use(cors());
@@ -8,42 +8,41 @@ app.use(cors());
 const PORT = process.env.PORT || 10000;
 
 app.get('/kiwi', async (req, res) => {
-  const options = {
-    method: 'GET',
-    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
-    headers: {
-      'x-rapidapi-host': 'kiwi-com-cheap-flights.p.rapidapi.com',
-      'x-rapidapi-key': 'c20c8406fdmsh6b8b35e214af438p1c3ab4jsn15ca574a21c5', // 🔁 replace with your real key
-    },
-    params: new URLSearchParams({
-      source: 'City:mumbai_in',
-      destination: 'City:new-delhi_in',
-      currency: 'INR',
-      locale: 'en',
-      adults: '1',
-      children: '0',
-      infants: '0',
-      applyMixedClasses: 'true',
-      allowChangeInboundSource: 'true',
-      allowChangeInboundDestination: 'true',
-      allowReturnFromDifferentCity: 'true',
-      allowDifferentStationConnection: 'true',
-      enableSelfTransfer: 'true',
-      allowOvernightStopover: 'true',
-      outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
-      transportTypes: 'FLIGHT',
-      contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
-      limit: '10',
-      inboundDepartureDateStart: '2025-07-22T00:00:00',
-      inboundDepartureDateEnd: '2025-07-29T00:00:00',
-    })
+  const url = 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip';
+
+  const headers = {
+    'x-rapidapi-host': 'kiwi-com-cheap-flights.p.rapidapi.com',
+    'x-rapidapi-key': 'YOUR_RAPIDAPI_KEY' // replace with your key
   };
 
+  const params = new URLSearchParams({
+    source: 'City:mumbai_in',
+    destination: 'City:new-delhi_in',
+    currency: 'INR',
+    locale: 'en',
+    adults: '1',
+    children: '0',
+    infants: '0',
+    applyMixedClasses: 'true',
+    allowChangeInboundSource: 'true',
+    allowChangeInboundDestination: 'true',
+    allowReturnFromDifferentCity: 'true',
+    allowDifferentStationConnection: 'true',
+    enableSelfTransfer: 'true',
+    allowOvernightStopover: 'true',
+    outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
+    transportTypes: 'FLIGHT',
+    contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
+    limit: '10',
+    inboundDepartureDateStart: '2025-07-22T00:00:00',
+    inboundDepartureDateEnd: '2025-07-29T00:00:00',
+  });
+
   try {
-    const response = await axios.request(options);
+    const response = await axios.get(url, { headers, params });
     res.json(response.data);
   } catch (error) {
-    console.error('❌ Error fetching from Kiwi:', error.message);
+    console.error('❌ Kiwi API error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -51,5 +50,6 @@ app.get('/kiwi', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
 
 
