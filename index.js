@@ -6,36 +6,42 @@ require('dotenv').config();
 const app = express();
 app.use(cors());
 
+const API_KEY = process.env.RAPIDAPI_KEY;
+
 app.get('/kiwi', async (req, res) => {
-  const { origin, destination, date } = req.query;
+  const { origin, destination, date, returnDate, adults = 1, travelClass = 'ECONOMY' } = req.query;
 
-  const url = 'https://kiwi-com-cheap-flights.p.rapidapi.com/v1/flights';
-
-  const params = {
-    fly_from: origin,
-    fly_to: destination,
-    date_from: date,
-    date_to: date,
-    curr: 'INR',
-    limit: 10
-  };
-
-  const headers = {
-    'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-    'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+  const options = {
+    method: 'GET',
+    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
+    params: {
+      sourceCountry: 'IN',
+      sourceCity: origin,
+      destinationCity: destination,
+      currency: 'INR',
+      adults,
+      children: 0,
+      infants: 0,
+      bags: 0,
+      cabinClass: travelClass,
+      mixedClasses: false,
+      returnDate: returnDate || '',
+      sortBy: 'QUALITY',
+      transportTypes: 'FLIGHT',
+      limit: '10'
+    },
+    headers: {
+      'X-RapidAPI-Key': API_KEY,
+      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+    }
   };
 
   try {
-    const response = await axios.get(url, { params, headers });
-    const data = response.data.data.map(flight => ({
-      airline: flight.airlines[0] || 'Unknown',
-      departureTime: flight.dTimeUTC ? new Date(flight.dTimeUTC * 1000).toISOString() : null,
-      arrivalTime: flight.aTimeUTC ? new Date(flight.aTimeUTC * 1000).toISOString() : null,
-      price: flight.price || 'N/A'
-    }));
-    res.json(data);
+    const response = await axios.request(options);
+    res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error?.response?.data || error.message });
+    console.error('Error fetching from Kiwi API:', error?.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error?.response?.data });
   }
 });
 
