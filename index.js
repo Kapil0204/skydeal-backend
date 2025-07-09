@@ -36,7 +36,7 @@ app.get("/kiwi", async (req, res) => {
     const mappedTo = cityMap[to?.toUpperCase()] || to;
 
     const params = {
-  source: 'Country:IN',
+  source: 'City:mumbai_in',
   destination: 'City:new-delhi_in',
   currency: 'INR',
   locale: 'en',
@@ -52,10 +52,11 @@ app.get("/kiwi", async (req, res) => {
   allowOvernightStopover: 'true',
   outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
   transportTypes: 'FLIGHT',
-  contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
-  limit: '20',
+  contentProviders: 'KIWI,KAYAK,FRESH,DIRECTS',
+  limit: '10',
   sort: 'quality',
 };
+
 
 
     if (oneWay === "1") {
