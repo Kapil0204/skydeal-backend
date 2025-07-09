@@ -4,34 +4,28 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(cors());
 
-const API_KEY = process.env.RAPIDAPI_KEY;
-
+// API route
 app.get('/kiwi', async (req, res) => {
-  const { origin, destination, date, returnDate, adults = 1, travelClass = 'ECONOMY' } = req.query;
+  const { origin, destination, date, adults, travelClass } = req.query;
 
   const options = {
     method: 'GET',
-    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
+    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search',
     params: {
-      sourceCountry: 'IN',
-      sourceCity: origin,
-      destinationCity: destination,
-      currency: 'INR',
+      fly_from: origin,
+      fly_to: destination,
+      date_from: date,
+      date_to: date,
+      curr: 'INR',
       adults,
-      children: 0,
-      infants: 0,
-      bags: 0,
-      cabinClass: travelClass,
-      mixedClasses: false,
-      returnDate: returnDate || '',
-      sortBy: 'QUALITY',
-      transportTypes: 'FLIGHT',
-      limit: '10'
+      selected_cabins: travelClass.toLowerCase()
     },
     headers: {
-      'X-RapidAPI-Key': API_KEY,
+      'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
       'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
     }
   };
@@ -40,10 +34,12 @@ app.get('/kiwi', async (req, res) => {
     const response = await axios.request(options);
     res.json(response.data);
   } catch (error) {
-    console.error('Error fetching from Kiwi API:', error?.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error?.response?.data });
+    console.error('❌ Error fetching flights:', error.message);
+    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
