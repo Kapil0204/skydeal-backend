@@ -8,21 +8,19 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ CORS MUST BE SET BEFORE ROUTES
-app.use(cors({
-  origin: '*', // or specify Vercel frontend URL here for tighter security
-}));
+// ✅ Enable CORS
+app.use(cors());
 
 app.get('/kiwi', async (req, res) => {
   const { flyFrom, to, dateFrom, dateTo, adults, travelClass, oneWay } = req.query;
 
-  const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/roundTrip?flyFrom=${flyFrom}&to=${to}&dateFrom=${dateFrom}&dateTo=${dateTo}&adults=${adults}&travelClass=${travelClass}&oneWay=${oneWay}&curr=INR`;
+  const url = `https://kiwi-com.p.rapidapi.com/v2/search?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&adults=${adults}&selected_cabins=${travelClass}&curr=INR&one_for_city=1&one_way=${oneWay}`;
 
   const options = {
     method: 'GET',
     headers: {
       'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+      'X-RapidAPI-Host': 'kiwi-com.p.rapidapi.com'
     }
   };
 
@@ -36,6 +34,5 @@ app.get('/kiwi', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ SkyDeal backend running on port ${PORT}`);
 });
-
