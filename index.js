@@ -7,7 +7,6 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ✅ Fix: Allow only your Vercel frontend
 app.use(cors({
   origin: 'https://skydeal-frontend-o0iiadcon-kapils-projects-0b446913.vercel.app',
 }));
@@ -47,6 +46,7 @@ app.get('/kiwi', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
 
 
 
