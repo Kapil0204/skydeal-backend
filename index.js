@@ -20,12 +20,11 @@ app.get('/kiwi', async (req, res) => {
   }
 
   try {
-    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/roundtrip
-', {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/roundtrip', {
       params: {
         from: origin,
         to: destination,
-        date: date
+        date: date,
       },
       headers: {
         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
@@ -46,6 +45,7 @@ app.get('/kiwi', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
 
 
 
