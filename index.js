@@ -20,7 +20,7 @@ app.get('/kiwi', async (req, res) => {
   }
 
   try {
-    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/search', {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search', {
       params: {
         fly_from: origin,
         fly_to: destination,
@@ -49,3 +49,4 @@ app.get('/kiwi', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
