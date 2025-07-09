@@ -1,94 +1,67 @@
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
+import express from 'express';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+import cors from 'cors';
+
 dotenv.config();
-
 const app = express();
+const PORT = process.env.PORT || 10000;
+
 app.use(cors());
+app.use(express.json());
 
-const cityMap = {
-  DEL: "City:delhi_in",
-  BOM: "City:mumbai_in",
-  BLR: "City:bangalore_in",
-  HYD: "City:hyderabad_in",
-  MAA: "City:chennai_in",
-  CCU: "City:kolkata_in",
-  PNQ: "City:pune_in",
-  AMD: "City:ahmedabad_in",
-  GOI: "City:goa_in",
-  LKO: "City:lucknow_in"
-};
+app.get('/', (req, res) => {
+  res.send('SkyDeal backend is live!');
+});
 
-app.get("/kiwi", async (req, res) => {
+// ✅ FLIGHT ROUTE USING RAPIDAPI + KIWI.COM (Round-trip)
+app.get('/kiwi', async (req, res) => {
   try {
-    const {
-      flyFrom,
-      to,
-      dateFrom,
-      dateTo,
-      oneWay = "1",
-      travelClass = "M",
-      adults = "1"
-    } = req.query;
-
-    const mappedFlyFrom = cityMap[flyFrom?.toUpperCase()] || flyFrom;
-    const mappedTo = cityMap[to?.toUpperCase()] || to;
-
     const params = {
-  source: 'City:mumbai_in', // ✅ use valid city
-  destination: 'City:new-delhi_in', // ✅ use valid city
-  currency: 'INR',
-  locale: 'en',
-  adults: '1',
-  children: '0',
-  infants: '0',
-  applyMixedClasses: 'true',
-  allowChangeInboundSource: 'true',
-  allowChangeInboundDestination: 'true',
-  allowReturnFromDifferentCity: 'true',
-  allowDifferentStationConnection: 'true',
-  enableSelfTransfer: 'true',
-  allowOvernightStopover: 'true',
-  outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
-  transportTypes: 'FLIGHT',
-  contentProviders: 'KIWI,KAYAK,FRESH,DIRECTS',
-  limit: '10',
-  sort: 'quality',
-};
+      source: 'Country:IN',
+      destination: 'City:new-delhi_in',
+      currency: 'INR',
+      locale: 'en',
+      adults: '1',
+      children: '0',
+      infants: '0',
+      applyMixedClasses: 'true',
+      allowChangeInboundSource: 'true',
+      allowChangeInboundDestination: 'true',
+      allowReturnFromDifferentCity: 'true',
+      allowDifferentStationConnection: 'true',
+      enableSelfTransfer: 'true',
+      allowOvernightStopover: 'true',
+      outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
+      transportTypes: 'FLIGHT',
+      contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
+      limit: '20',
+    };
 
+    const url = 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip';
 
-
-
-    if (oneWay === "1") {
-      params.append("return_from_diff_airport", "false");
-      params.append("return_to_diff_airport", "false");
+    // ✅ convert plain object to URLSearchParams
+    const searchParams = new URLSearchParams();
+    for (const key in params) {
+      searchParams.append(key, params[key]);
     }
 
-    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip?${params.toString()}`;
-
-    const response = await fetch(url, {
-      method: "GET",
+    const response = await fetch(`${url}?${searchParams.toString()}`, {
+      method: 'GET',
       headers: {
-        "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "kiwi-com-cheap-flights.p.rapidapi.com"
-      }
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com',
+      },
     });
 
     const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.message || "Failed to fetch data from Kiwi");
-    }
-
     res.json(data);
   } catch (error) {
-    console.error("Kiwi API fetch error:", error.message);
-    res.status(500).json({ error: error.message || "Internal Server Error" });
+    console.error('Error fetching from Kiwi API:', error);
+    res.status(500).json({ error: 'Failed to fetch flights from Kiwi API.' });
   }
 });
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
