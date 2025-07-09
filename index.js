@@ -20,7 +20,7 @@ app.get('/kiwi', async (req, res) => {
   }
 
   try {
-    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search', {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/v1/flights', {
       params: {
         fly_from: origin,
         fly_to: destination,
@@ -38,7 +38,7 @@ app.get('/kiwi', async (req, res) => {
 
     res.json(response.data);
   } catch (error) {
-    console.error('❌ Kiwi API fetch failed:', error.response?.status, error.response?.data);
+    console.error('Kiwi API fetch failed:', error.response?.status, error.response?.data);
     res.status(error.response?.status || 500).json({
       error: 'Failed to fetch from Kiwi API',
       details: error.response?.data || error.message
@@ -49,4 +49,3 @@ app.get('/kiwi', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
-
