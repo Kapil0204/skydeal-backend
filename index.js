@@ -20,7 +20,8 @@ app.get('/kiwi', async (req, res) => {
   }
 
   try {
-    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/v1/flightSearch', {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/roundtrip
+', {
       params: {
         from: origin,
         to: destination,
