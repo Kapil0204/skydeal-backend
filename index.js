@@ -1,14 +1,15 @@
 import express from 'express';
 import cors from 'cors';
-import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import fetch from 'node-fetch'; // ✅ Using ESM-compatible import
+
 dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
 app.use(cors());
 app.use(express.json());
-
-const PORT = process.env.PORT || 10000;
 
 app.get('/kiwi', async (req, res) => {
   try {
@@ -33,7 +34,9 @@ app.get('/kiwi', async (req, res) => {
     };
 
     const url = new URL('https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip');
-    Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
+    Object.entries(params).forEach(([key, value]) => {
+      url.searchParams.append(key, value);
+    });
 
     const response = await fetch(url.href, {
       method: 'GET',
@@ -45,20 +48,21 @@ app.get('/kiwi', async (req, res) => {
 
     const data = await response.json();
 
-    if (response.ok) {
-      res.json(data);
-    } else {
-      res.status(response.status).json({ error: data.message || 'Unknown error' });
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.message || 'API error' });
     }
 
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(data);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+
 
 
 
