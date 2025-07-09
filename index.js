@@ -1,52 +1,53 @@
 const express = require('express');
-const cors = require('cors');
 const axios = require('axios');
+const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+const port = process.env.PORT || 10000;
+
 app.use(cors());
-const PORT = process.env.PORT || 10000;
 
 app.get('/kiwi', async (req, res) => {
-  const { origin, destination, date, returnDate, adults, travelClass } = req.query;
-
-  const url = 'https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search';
-
-  const params = {
-    fly_from: origin,
-    fly_to: destination,
-    date_from: date,
-    date_to: date,
-    return_from: returnDate || undefined,
-    return_to: returnDate || undefined,
-    curr: 'INR',
-    adults: adults || 1,
-    selected_cabins: travelClass || 'M',
-    max_stopovers: 1,
-    limit: 10
-  };
-
   try {
-    const response = await axios.get(url, {
+    const { origin, destination, date, returnDate, adults = 1, travelClass = 'ECONOMY' } = req.query;
+
+    if (!origin || !destination || !date) {
+      return res.status(400).json({ error: 'Missing required query parameters.' });
+    }
+
+    const params = {
+      fly_from: origin,
+      fly_to: destination,
+      date_from: date,
+      date_to: date,
+      return_from: returnDate || undefined,
+      return_to: returnDate || undefined,
+      flight_type: returnDate ? 'round' : 'oneway',
+      adults,
+      selected_cabins: travelClass,
+      curr: 'INR',
+      locale: 'en'
+    };
+
+    const response = await axios.get('https://kiwi-com.p.rapidapi.com/api/v1/flights', {
       params,
       headers: {
         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+        'X-RapidAPI-Host': 'kiwi-com.p.rapidapi.com'
       }
     });
 
     res.json(response.data);
   } catch (error) {
-    console.error('Error fetching flights:', error.response?.status, error.response?.data || error.message);
-    res.status(500).json({
-      error: 'Failed to fetch from Kiwi API',
-      details: error.response?.data || error.message
-    });
+    console.error('Error fetching flights:', error.message);
+    res.status(500).json({ error: 'Failed to fetch from Kiwi API', details: error.response?.data || error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
+
 
 
