@@ -8,13 +8,12 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ Enable CORS
 app.use(cors());
 
 app.get('/kiwi', async (req, res) => {
   const { flyFrom, to, dateFrom, dateTo, adults, travelClass, oneWay } = req.query;
 
-  const url = `https://kiwi-com.p.rapidapi.com/v2/search?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&adults=${adults}&selected_cabins=${travelClass}&curr=INR&one_for_city=1&one_way=${oneWay}`;
+  const url = `https://kiwi-com.p.rapidapi.com/v2/search?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&adults=${adults}&selected_cabins=${travelClass}&curr=INR&one_way=${oneWay}`;
 
   const options = {
     method: 'GET',
