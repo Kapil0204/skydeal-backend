@@ -1,55 +1,85 @@
-const express = require('express');
-const fetch = require('node-fetch');
-const cors = require('cors');
-require('dotenv').config();
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-
 app.use(cors());
 
-app.get('/kiwi', async (req, res) => {
+const cityMap = {
+  DEL: "City:delhi_in",
+  BOM: "City:mumbai_in",
+  BLR: "City:bangalore_in",
+  HYD: "City:hyderabad_in",
+  MAA: "City:chennai_in",
+  CCU: "City:kolkata_in",
+  PNQ: "City:pune_in",
+  AMD: "City:ahmedabad_in",
+  GOI: "City:goa_in",
+  LKO: "City:lucknow_in"
+};
+
+app.get("/kiwi", async (req, res) => {
   try {
-    const { flyFrom, to, dateFrom, dateTo, oneWay } = req.query;
+    const {
+      flyFrom,
+      to,
+      dateFrom,
+      dateTo,
+      oneWay = "1",
+      travelClass = "M",
+      adults = "1"
+    } = req.query;
 
-    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip?sourceAirportCode=${flyFrom}&destinationAirportCode=${to}&dateFrom=${dateFrom}&dateTo=${dateTo}&oneWay=${oneWay}`;
+    const mappedFlyFrom = cityMap[flyFrom?.toUpperCase()] || flyFrom;
+    const mappedTo = cityMap[to?.toUpperCase()] || to;
 
-    console.log('Fetching from URL:', url);
+    const params = new URLSearchParams({
+      flyFrom: mappedFlyFrom,
+      to: mappedTo,
+      dateFrom,
+      dateTo,
+      one_for_city: "1",
+      one_per_date: "0",
+      adults,
+      selected_cabins: travelClass,
+      vehicle_type: "aircraft",
+      curr: "INR",
+      locale: "en",
+      sort: "price",
+      limit: "30"
+    });
+
+    if (oneWay === "1") {
+      params.append("return_from_diff_airport", "false");
+      params.append("return_to_diff_airport", "false");
+    }
+
+    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip?${params.toString()}`;
 
     const response = await fetch(url, {
-      method: 'GET',
+      method: "GET",
       headers: {
-        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+        "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "kiwi-com-cheap-flights.p.rapidapi.com"
       }
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('API Error response:', errorText);
-      return res.status(response.status).json({ error: 'Failed to fetch from Kiwi API', details: errorText });
-    }
-
     const data = await response.json();
 
-    // Log the result to make sure it's a plain object
-    console.log('API data:', data);
+    if (!response.ok) {
+      throw new Error(data.message || "Failed to fetch data from Kiwi");
+    }
 
-    res.json(data); // ✅ This is safe now
+    res.json(data);
   } catch (error) {
-    console.error('Error in /kiwi handler:', error.message);
-    res.status(500).json({ error: 'Server error', details: error.message });
+    console.error("Kiwi API fetch error:", error.message);
+    res.status(500).json({ error: error.message || "Internal Server Error" });
   }
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Backend running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
-
-
-
-
-
-
-
-
