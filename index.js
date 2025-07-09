@@ -1,59 +1,66 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
+const form = document.getElementById('flight-form');
+const resultsContainer = document.getElementById('results');
+const tripTypeInputs = document.getElementsByName('tripType');
+const returnDateContainer = document.getElementById('return-date-container');
 
-const app = express();
-app.use(cors());
+tripTypeInputs.forEach(input => {
+  input.addEventListener('change', () => {
+    returnDateContainer.style.display = input.value === 'roundtrip' ? 'block' : 'none';
+  });
+});
 
-const PORT = process.env.PORT || 10000;
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
 
-// ✅ Use your actual RapidAPI Key from the screenshot
-const RAPIDAPI_KEY = 'c20c8406fdmsh6b8b35e214af438p1c3ab4jsn15ca574a21c5';
+  const origin = document.getElementById('origin').value;
+  const destination = document.getElementById('destination').value;
+  const date = document.getElementById('departure-date').value;
+  const tripType = document.querySelector('input[name="tripType"]:checked').value;
 
-// ✅ Set the correct endpoint
-const API_URL = 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip';
-
-app.get('/kiwi', async (req, res) => {
-  const { origin, destination, date } = req.query;
-
-  if (!origin || !destination || !date) {
-    return res.status(400).json({ error: 'Missing required query parameters.' });
+  let url = `https://skydeal-backend.onrender.com/kiwi?origin=${origin}&destination=${destination}&date=${date}`;
+  if (tripType === 'roundtrip') {
+    const returnDate = document.getElementById('return-date').value;
+    url += `&returnDate=${returnDate}`;
   }
 
   try {
-    const response = await axios.get(API_URL, {
-      params: {
-        source: origin,
-        destination: destination,
-        date_from: date,
-        date_to: date,
-        currency: 'INR',
-        locale: 'en',
-        adults: 1,
-        children: 0,
-        infants: 0,
-        bags: 0,
-        cabinClass: 'ECONOMY',
-        limit: 20,
-      },
-      headers: {
-        'X-RapidAPI-Key': RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
-      }
-    });
+    const res = await fetch(url);
+    const data = await res.json();
 
-    res.json(response.data);
-  } catch (error) {
-    console.error('Error fetching from Kiwi API:', error.response?.data || error.message);
-    res.status(500).json({
-      error: 'Failed to fetch from Kiwi API',
-      details: error.response?.data || error.message
+    const itineraries = data.data || data.itineraries || [];
+    const carriers = data.carriers || [];
+    const carrierMap = new Map();
+    carriers.forEach(c => carrierMap.set(c.code, c.name));
+
+    resultsContainer.innerHTML = '';
+
+    if (itineraries.length === 0) {
+      resultsContainer.innerHTML = '<p>No flights found.</p>';
+      return;
+    }
+
+    itineraries.forEach(flight => {
+      const carrierCode = flight.validatingCarrier || flight.carrier || 'N/A';
+      const airline = carrierMap.get(carrierCode) || "Unknown Airline";
+      const departure = flight.departureTime || flight.departure || "N/A";
+      const arrival = flight.arrivalTime || flight.arrival || "N/A";
+      const price = flight.price || flight.priceAmount || 'N/A';
+
+      const card = document.createElement('div');
+      card.className = 'flight-card';
+      card.innerHTML = `
+        <h3>✈️ ${airline}</h3>
+        <p><strong>Departure:</strong> ${departure}</p>
+        <p><strong>Arrival:</strong> ${arrival}</p>
+        <p><strong>Price:</strong> ₹${price}</p>
+      `;
+      resultsContainer.appendChild(card);
     });
+  } catch (err) {
+    resultsContainer.innerHTML = '<p>Something went wrong. Try again.</p>';
+    console.error(err);
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
 
 
