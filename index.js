@@ -13,7 +13,7 @@ app.get('/kiwi', async (req, res) => {
     url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
     headers: {
       'x-rapidapi-host': 'kiwi-com-cheap-flights.p.rapidapi.com',
-      'x-rapidapi-key': 'YOUR_RAPIDAPI_KEY', // 🔁 replace with your real key
+      'x-rapidapi-key': 'c20c8406fdmsh6b8b35e214af438p1c3ab4jsn15ca574a21c5', // 🔁 replace with your real key
     },
     params: new URLSearchParams({
       source: 'City:mumbai_in',
