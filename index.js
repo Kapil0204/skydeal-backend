@@ -35,21 +35,28 @@ app.get("/kiwi", async (req, res) => {
     const mappedFlyFrom = cityMap[flyFrom?.toUpperCase()] || flyFrom;
     const mappedTo = cityMap[to?.toUpperCase()] || to;
 
-    const params = new URLSearchParams({
-      flyFrom: mappedFlyFrom,
-      to: mappedTo,
-      dateFrom,
-      dateTo,
-      one_for_city: "1",
-      one_per_date: "0",
-      adults,
-      selected_cabins: travelClass,
-      vehicle_type: "aircraft",
-      curr: "INR",
-      locale: "en",
-      sort: "price",
-      limit: "30"
-    });
+    const params = {
+  source: 'Country:IN',
+  destination: 'City:new-delhi_in',
+  currency: 'INR',
+  locale: 'en',
+  adults: '1',
+  children: '0',
+  infants: '0',
+  applyMixedClasses: 'true',
+  allowChangeInboundSource: 'true',
+  allowChangeInboundDestination: 'true',
+  allowReturnFromDifferentCity: 'true',
+  allowDifferentStationConnection: 'true',
+  enableSelfTransfer: 'true',
+  allowOvernightStopover: 'true',
+  outbound: 'MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY,SATURDAY,SUNDAY',
+  transportTypes: 'FLIGHT',
+  contentProviders: 'FLIXBUS,DIRECTS,FRESH,KAYAK,KIWI',
+  limit: '20',
+  sort: 'quality',
+};
+
 
     if (oneWay === "1") {
       params.append("return_from_diff_airport", "false");
