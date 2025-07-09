@@ -1,10 +1,18 @@
-const express = require('express');
-const cors = require('cors');
-const fetch = require('node-fetch');
-require('dotenv').config();
+import express from 'express';
+import fetch from 'node-fetch';
+import cors from 'cors';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
-app.use(cors());
+const port = process.env.PORT || 3000;
+
+// ✅ Allow only your Vercel frontend URL
+app.use(
+  cors({
+    origin: 'https://skydeal-frontend-o0iiadcon-kapils-projects-0b446913.vercel.app',
+  })
+);
 
 app.get('/kiwi', async (req, res) => {
   try {
@@ -15,30 +23,31 @@ app.get('/kiwi', async (req, res) => {
       dateTo,
       oneWay,
       adults,
-      travelClass
+      travelClass,
     } = req.query;
 
-    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/v2/search?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&adults=${adults}&selected_cabins=${travelClass}&one_for_city=0&one_per_date=0&curr=INR`;
+    const url = `https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip?fly_from=${flyFrom}&fly_to=${to}&date_from=${dateFrom}&date_to=${dateTo}&curr=INR&adults=${adults}&selected_cabins=${travelClass}&one_for_city=1&max_stopovers=2`;
 
     const options = {
       method: 'GET',
       headers: {
         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
-      }
+        'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com',
+      },
     };
 
     const response = await fetch(url, options);
     const data = await response.json();
+
     res.json(data);
   } catch (error) {
-    console.error('Error fetching flight data:', error);
-    res.status(500).json({ error: 'Failed to fetch flight data' });
+    console.error('Error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
+
 
