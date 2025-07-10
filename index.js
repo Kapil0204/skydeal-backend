@@ -4,7 +4,7 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config(); // Load API keys from .env
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,10 +12,14 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// -----------------------------
+// Scrape MakeMyTrip Flight Offers
+// -----------------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const url = 'https://www.makemytrip.com/offers/';
     const fullUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}`;
+
     const response = await axios.get(fullUrl);
     const html = response.data;
     const $ = cheerio.load(html);
@@ -31,11 +35,15 @@ app.get('/scrape-mmt-offers', async (req, res) => {
 
     res.json({ offers });
   } catch (err) {
-    console.error('❌ Error:', err.message);
+    console.error('❌ Scraping error:', err.message);
     res.status(500).json({ error: 'Failed to scrape offers' });
   }
 });
 
+// -----------------------------
+// Start Server
+// -----------------------------
 app.listen(PORT, () => {
-  console.log(`✅ Scraper running on port ${PORT}`);
+  console.log(`✅ SkyDeal scraper running on port ${PORT}`);
 });
+
