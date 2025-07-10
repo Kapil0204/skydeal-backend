@@ -4,7 +4,7 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load API keys from .env
+dotenv.config(); // Load .env variables
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,9 +41,8 @@ app.get('/scrape-mmt-offers', async (req, res) => {
 });
 
 // -----------------------------
-// Start Server
+// Start the Server
 // -----------------------------
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal scraper running on port ${PORT}`);
 });
-
