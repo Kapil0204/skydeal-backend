@@ -1,12 +1,17 @@
 import express from 'express';
 import cors from 'cors';
+import axios from 'axios';
+import cheerio from 'cheerio';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json()); // Needed to parse JSON bodies from POST
+app.use(express.json());
 
+// Simulated flight deals
 app.post('/simulated-flights', (req, res) => {
   const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
 
@@ -41,6 +46,31 @@ app.post('/simulated-flights', (req, res) => {
   res.json(response);
 });
 
+// Scraping route
+app.get('/scrape-mmt-offers', async (req, res) => {
+  try {
+    const url = 'https://www.makemytrip.com/offers/';
+    const response = await axios.get(`http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}`);
+    const html = response.data;
+    const $ = cheerio.load(html);
+
+    const offers = [];
+
+    $('.offer-block').each((index, el) => {
+      const text = $(el).text();
+      if (text.toLowerCase().includes('flight')) {
+        offers.push(text.trim());
+      }
+    });
+
+    res.json({ offers });
+  } catch (error) {
+    console.error('❌ Scraping error:', error.message);
+    res.status(500).json({ error: 'Failed to scrape offers' });
+  }
+});
+
+// Start server
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal backend running on port ${PORT}`);
 });
