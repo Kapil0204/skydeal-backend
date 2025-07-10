@@ -3,7 +3,8 @@ import cors from 'cors';
 import axios from 'axios';
 import cheerio from 'cheerio';
 import dotenv from 'dotenv';
-dotenv.config();
+
+dotenv.config(); // ✅ Load environment variables from .env
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,7 +12,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Simulated flight deals
+// ----------------------
+// Simulated Flight Data
+// ----------------------
 app.post('/simulated-flights', (req, res) => {
   const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
 
@@ -46,11 +49,15 @@ app.post('/simulated-flights', (req, res) => {
   res.json(response);
 });
 
-// Scraping route
+// ----------------------
+// Scrape MMT Offers
+// ----------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const url = 'https://www.makemytrip.com/offers/';
-    const response = await axios.get(`http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}`);
+    const fullUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}`;
+
+    const response = await axios.get(fullUrl);
     const html = response.data;
     const $ = cheerio.load(html);
 
@@ -70,7 +77,9 @@ app.get('/scrape-mmt-offers', async (req, res) => {
   }
 });
 
-// Start server
+// ----------------------
+// Start Server
+// ----------------------
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal backend running on port ${PORT}`);
 });
