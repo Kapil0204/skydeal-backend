@@ -1,56 +1,67 @@
-import express from 'express';
-import cors from 'cors';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkyDeal Flight Finder</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>SkyDeal - Flight Offer Finder</h1>
+    <form id="flight-form">
+      <div class="form-row">
+        <input type="text" id="origin" placeholder="From" required />
+        <input type="text" id="destination" placeholder="To" required />
+      </div>
+      <div class="form-row">
+        <input type="date" id="departure-date" required />
+        <input type="date" id="return-date" />
+      </div>
+      <div class="form-row">
+        <select id="trip-type">
+          <option value="oneway">One Way</option>
+          <option value="round">Round Trip</option>
+        </select>
+        <select id="travel-class">
+          <option value="Economy">Economy</option>
+          <option value="Business">Business</option>
+        </select>
+        <input type="number" id="passengers" placeholder="Passengers" min="1" value="1" required />
+      </div>
+      <div class="form-row">
+        <label for="payment-method">Preferred Payment Methods:</label>
+        <select id="payment-method" multiple>
+          <option value="ICICI">ICICI</option>
+          <option value="HDFC">HDFC</option>
+          <option value="SBI">SBI</option>
+          <option value="Axis">Axis</option>
+          <option value="Kotak">Kotak</option>
+        </select>
+      </div>
+      <button type="submit">Search Flights</button>
+    </form>
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+    <div id="results">
+      <div class="results-section">
+        <h2>Outbound Flights</h2>
+        <div id="outbound-flights" class="flight-column"></div>
+      </div>
+      <div class="results-section">
+        <h2>Return Flights</h2>
+        <div id="return-flights" class="flight-column"></div>
+      </div>
+    </div>
+  </div>
 
-app.use(cors());
+  <div id="offer-modal" class="modal hidden">
+    <div class="modal-content">
+      <span id="close-modal">&times;</span>
+      <h3>Portal-Wise Price Comparison</h3>
+      <ul id="modal-offers"></ul>
+    </div>
+  </div>
 
-app.get('/simulated-flights', (req, res) => {
-  res.json({
-    outbound: [
-      {
-        airline: 'IndiGo',
-        departure: '08:00',
-        arrival: '10:30',
-        portals: {
-          MMT: { price: 3200, payment: 'ICICI Credit Card' },
-          Goibibo: { price: 3400, payment: 'HDFC Debit Card' },
-        },
-      },
-      {
-        airline: 'Air India Express',
-        departure: '14:00',
-        arrival: '16:30',
-        portals: {
-          MMT: { price: 3100, payment: 'HDFC Credit Card' },
-          Goibibo: { price: 3300, payment: 'ICICI Debit Card' },
-        },
-      },
-    ],
-    return: [
-      {
-        airline: 'SpiceJet',
-        departure: '11:00',
-        arrival: '13:30',
-        portals: {
-          MMT: { price: 3500, payment: 'SBI Credit Card' },
-          Goibibo: { price: 3700, payment: 'HDFC Credit Card' },
-        },
-      },
-      {
-        airline: 'Vistara',
-        departure: '17:00',
-        arrival: '19:30',
-        portals: {
-          MMT: { price: 3600, payment: 'ICICI Credit Card' },
-          Goibibo: { price: 3900, payment: 'SBI Debit Card' },
-        },
-      },
-    ]
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Simulated SkyDeal API running on port ${PORT}`);
-});
+  <script src="script.js"></script>
+</body>
+</html>
