@@ -4,7 +4,7 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load .env variables
+dotenv.config(); // Load env vars
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,9 +12,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// -----------------------------
-// Scrape MakeMyTrip Flight Offers
-// -----------------------------
+// ✅ Scraping route
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const url = 'https://www.makemytrip.com/offers/';
@@ -34,15 +32,13 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     });
 
     res.json({ offers });
-  } catch (err) {
-    console.error('❌ Scraping error:', err.message);
+  } catch (error) {
+    console.error('❌ Scraping error:', error.message);
     res.status(500).json({ error: 'Failed to scrape offers' });
   }
 });
 
-// -----------------------------
-// Start the Server
-// -----------------------------
+// Start server
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal scraper running on port ${PORT}`);
 });
