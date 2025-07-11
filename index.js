@@ -4,38 +4,33 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load environment variables
-
+dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------
-// Scrape MMT Flight Offers
-// ---------------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
-    const url = 'https://www.makemytrip.com/offer/domestic-flight-deals.html';
+    const targetUrl = 'https://www.makemytrip.com/offers/';
+    const apiUrl = `http://api.scraperapi.com/?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
 
-    const response = await axios.get('http://api.scraperapi.com', {
-      params: {
-        api_key: process.env.SCRAPER_API_KEY,
-        url: url,
-        render: true
-      }
+    const { data: html } = await axios.get(apiUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        Accept: 'text/html',
+      },
     });
 
-    const $ = cheerio.load(response.data);
-
+    const $ = cheerio.load(html);
     const offers = [];
 
-    $('*').each((i, el) => {
+    $('.offer-card').each((i, el) => {
       const text = $(el).text().trim();
-      const isFlightOffer = /flight|airfare|domestic/i.test(text);
-
-      if (isFlightOffer && text.length > 20 && text.length < 500) {
+      const isFlightOffer = /flight|air/i.test(text);
+      if (isFlightOffer) {
         offers.push({ text });
       }
     });
@@ -47,9 +42,6 @@ app.get('/scrape-mmt-offers', async (req, res) => {
   }
 });
 
-// ---------------------------
-// Server Start
-// ---------------------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
