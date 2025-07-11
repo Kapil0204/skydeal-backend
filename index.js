@@ -117,7 +117,8 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed' });
   }
 });
-// Scrape All MMT Promo Page Links
+// ------------------------------
+// Scrape All MMT Promo Page Links (Improved Fallback)
 // ------------------------------
 app.get('/scrape-mmt-links', async (req, res) => {
   const targetUrl = "https://www.makemytrip.com/offers/";
@@ -126,22 +127,21 @@ app.get('/scrape-mmt-links', async (req, res) => {
   try {
     const response = await axios.get(apiUrl);
     const $ = cheerio.load(response.data);
-    const promoUrls = [];
+    const promoUrls = new Set();
 
-    $('a.promosCard').each((i, el) => {
+    $('a').each((i, el) => {
       const href = $(el).attr('href');
-      if (href && href.startsWith('/promos/')) {
-        promoUrls.push('https://www.makemytrip.com' + href);
+      if (href && href.startsWith('/promos/df-') && href.endsWith('.html')) {
+        promoUrls.add('https://www.makemytrip.com' + href);
       }
     });
 
-    res.json({ promoUrls });
+    res.json({ promoUrls: [...promoUrls] });
   } catch (error) {
     console.error("Error scraping MMT links:", error.message);
     res.status(500).json({ error: 'Scraping links failed' });
   }
 });
-
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
