@@ -4,7 +4,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config(); // Load environment variables
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,10 +12,13 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// ---------------------------
+// Scrape MMT Flight Offers
+// ---------------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const baseUrl = 'https://www.makemytrip.com/offer/domestic-flight-deals.html';
-    const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(baseUrl)}`;
+    const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&render=true&url=${encodeURIComponent(baseUrl)}`;
 
     const response = await axios.get(scraperApiUrl);
     const html = response.data;
@@ -26,7 +29,7 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     $('.offer-card').each((i, el) => {
       const title = $(el).find('.offer-title').text().trim();
       const description = $(el).find('.offer-desc').text().trim();
-      const codeMatch = description.match(/Use code:([A-Z0-9]+)/i);
+      const codeMatch = description.match(/Use code:?\s*([A-Z0-9]+)/i);
       const code = codeMatch ? codeMatch[1] : null;
 
       const isFlightOffer = /flight|fly/i.test(title + description);
@@ -42,6 +45,9 @@ app.get('/scrape-mmt-offers', async (req, res) => {
   }
 });
 
+// ---------------------------
+// Server Start
+// ---------------------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
