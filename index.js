@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import cheerio from 'cheerio';
+import { load } from 'cheerio';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -12,35 +12,32 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-app.get('/scrape-mmt-offers', async (req, res) => {
+app.post('/scrape-offers', async (req, res) => {
   try {
-    const url = 'https://www.makemytrip.com/offers/';
-    const fullUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=true`;
-
-    const response = await axios.get(fullUrl);
-    const html = response.data;
-    const $ = cheerio.load(html);
+    const { data: html } = await axios.get('https://www.makemytrip.com/offers/');
+    const $ = load(html);
 
     const offers = [];
 
-    $('.offer-block').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text.toLowerCase().includes('flight')) {
-        offers.push(text);
+    $('.offer-card').each((_, element) => {
+      const title = $(element).find('.offer-title').text().trim();
+      const description = $(element).find('.offer-desc').text().trim();
+      const code = $(element).find('.offer-code').text().trim();
+      const visibleText = $(element).text();
+
+      // Only push if it's flight-related
+      if (/flight|fly/i.test(visibleText)) {
+        offers.push({ title, description, code });
       }
     });
 
-    if (offers.length === 0) {
-      console.warn('⚠️ No flight offers found — maybe selector issue or content not rendered');
-    }
-
     res.json({ offers });
-  } catch (error) {
-    console.error('❌ Scraping error:', error.message);
-    res.status(500).json({ error: 'Failed to scrape offers' });
+  } catch (err) {
+    console.error('Scraping failed:', err.message);
+    res.status(500).json({ error: 'Scraping failed' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ SkyDeal scraper running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
