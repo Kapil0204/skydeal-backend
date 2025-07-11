@@ -117,14 +117,21 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed' });
   }
 });
-// Scrape MMT Flight Offer Promo Links from API
+// Scrape MMT Promo Links via Offer API with headers
 app.get('/scrape-mmt-links', async (req, res) => {
   const targetUrl = "https://offers-api.makemytrip.com/offerfeed/v1/web/offers?product=FLIGHTS";
-  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
+  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}&keep_headers=true`;
 
   try {
-    const response = await axios.get(apiUrl);
-    const offers = response.data.data || [];
+    const response = await axios.get(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Referer': 'https://www.makemytrip.com/',
+        'Accept': 'application/json'
+      }
+    });
+
+    const offers = response.data?.data || [];
     const promoUrls = offers.map(offer => 'https://www.makemytrip.com/promos/' + offer.pageUrl);
 
     res.json({ promoUrls });
@@ -133,6 +140,7 @@ app.get('/scrape-mmt-links', async (req, res) => {
     res.status(500).json({ error: 'Promo API scrape failed' });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
