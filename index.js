@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -26,11 +26,10 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     $('.offer-card').each((i, el) => {
       const title = $(el).find('.offer-title').text().trim();
       const description = $(el).find('.offer-desc').text().trim();
-      const codeMatch = description.match(/Use code:\s*([A-Z0-9]+)/i);
+      const codeMatch = description.match(/Use code:([A-Z0-9]+)/i);
       const code = codeMatch ? codeMatch[1] : null;
 
-      const isFlightOffer = /flight|fly|air/i.test(title + description);
-
+      const isFlightOffer = /flight|fly/i.test(title + description);
       if (isFlightOffer) {
         offers.push({ title, description, code });
       }
