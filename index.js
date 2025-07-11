@@ -17,29 +17,25 @@ app.use(express.json());
 // ---------------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
-    const baseUrl = 'https://www.makemytrip.com/offer/domestic-flight-deals.html';
-    const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&render=true&url=${encodeURIComponent(baseUrl)}`;
+    const url = 'https://www.makemytrip.com/offer/';
+    const response = await axios.get('http://api.scraperapi.com', {
+      params: {
+        api_key: process.env.SCRAPER_API_KEY,
+        url: url
+      }
+    });
 
-    const response = await axios.get(scraperApiUrl);
     const html = response.data;
-
-    // 🔍 Log the first 1000 characters only to avoid flooding Render logs
-    console.log('--- RAW HTML START ---');
-    console.log(html.slice(0, 1000));
-    console.log('--- RAW HTML END ---');
+    console.log('--- RAW HTML START ---\n' + html.slice(0, 1000) + '\n--- RAW HTML END ---');
 
     const $ = cheerio.load(html);
     const offers = [];
 
-    $('.offer-card').each((i, el) => {
-      const title = $(el).find('.offer-title').text().trim();
-      const description = $(el).find('.offer-desc').text().trim();
-      const codeMatch = description.match(/Use code:?\s*([A-Z0-9]+)/i);
-      const code = codeMatch ? codeMatch[1] : null;
-
-      const isFlightOffer = /flight|fly/i.test(title + description);
-      if (isFlightOffer) {
-        offers.push({ title, description, code });
+    $('div, li, span, p').each((i, el) => {
+      const text = $(el).text().trim();
+      const isFlight = /flight|fly|air/i.test(text);
+      if (isFlight && text.length > 40) {
+        offers.push({ text });
       }
     });
 
@@ -49,6 +45,7 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed', details: error.message });
   }
 });
+
 
 
 // ---------------------------
