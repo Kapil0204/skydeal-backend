@@ -4,46 +4,57 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load .env variables
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 9000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
+// ----------------------
+// MMT Flight Offer Scraper
+// ----------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
-    const url = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=https://www.makemytrip.com/offers/&render=true`;
+    const url = 'https://www.makemytrip.com/offers/';
+    const response = await axios.get(`http://api.scraperapi.com`, {
+      params: {
+        api_key: process.env.SCRAPERAPI_KEY,
+        url: url,
+        render: true
+      },
+      timeout: 20000 // 20 seconds
+    });
 
-    const response = await axios.get(url, { timeout: 20000 }); // 20 sec timeout
+    const html = response.data;
+    console.log("Scraped HTML length:", html.length);
 
-    const $ = cheerio.load(response.data);
+    const $ = cheerio.load(html);
+    const offerCards = $('.makeFlex.column');
+
+    console.log("Found offer card count:", offerCards.length);
+
     const offers = [];
 
-    $('.offer-content').each((i, el) => {
-      const title = $(el).find('.title').text().trim();
-      const description = $(el).find('.desc').text().trim();
-      const code = $(el).find('.coupon-code').text().trim();
-      const bankMatch = title.match(/ICICI|HDFC|SBI|Axis|Kotak|RBL/i);
-
-      offers.push({
-        bank: bankMatch ? bankMatch[0] : 'General',
-        title,
-        description,
-        code
-      });
+    offerCards.each((i, el) => {
+      const text = $(el).text().trim();
+      if (/flight|fly|air/i.test(text)) {
+        console.log("Flight offer found:", text);
+        offers.push({ text });
+      }
     });
 
     res.json({ offers });
   } catch (error) {
-    res.status(500).json({
-      error: 'Scraping failed',
-      details: error.message
-    });
+    console.error('Scraping error:', error.message);
+    res.status(500).json({ error: 'Scraping failed', details: error.message });
   }
 });
 
+// ----------------------
+// Start Server
+// ----------------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
