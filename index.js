@@ -22,8 +22,13 @@ app.get('/scrape-mmt-offers', async (req, res) => {
 
     const response = await axios.get(scraperApiUrl);
     const html = response.data;
-    const $ = cheerio.load(html);
 
+    // 🔍 Log the first 1000 characters only to avoid flooding Render logs
+    console.log('--- RAW HTML START ---');
+    console.log(html.slice(0, 1000));
+    console.log('--- RAW HTML END ---');
+
+    const $ = cheerio.load(html);
     const offers = [];
 
     $('.offer-card').each((i, el) => {
@@ -44,6 +49,7 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed', details: error.message });
   }
 });
+
 
 // ---------------------------
 // Server Start
