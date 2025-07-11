@@ -41,3 +41,31 @@ app.post('/scrape-offers', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+import axios from 'axios';
+import cheerio from 'cheerio';
+
+app.get('/scrape-mmt-offers', async (req, res) => {
+  const url = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=https://www.makemytrip.com/offers/`;
+
+  try {
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
+
+    const flightOffers = [];
+
+    $('.offerCardContent .offerCardTextContent').each((i, el) => {
+      const title = $(el).find('.offerTitle').text().trim();
+      const desc = $(el).find('.offerDescription').text().trim();
+      const code = $(el).find('.offerCodeTag').text().trim();
+
+      if (/flight/i.test(title + desc)) {
+        flightOffers.push({ title, desc, code });
+      }
+    });
+
+    res.json({ offers: flightOffers });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ error: 'Failed to scrape offers' });
+  }
+});
