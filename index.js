@@ -117,27 +117,30 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed' });
   }
 });
-// Scrape MMT Promo Links via Offer API with headers
+// Scrape promo links from https://www.makemytrip.com/offers/
 app.get('/scrape-mmt-links', async (req, res) => {
-  const targetUrl = "https://offers-api.makemytrip.com/offerfeed/v1/web/offers?product=FLIGHTS";
-  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}&keep_headers=true`;
+  const targetUrl = "https://www.makemytrip.com/offers/";
+  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
 
   try {
-    const response = await axios.get(apiUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-        'Referer': 'https://www.makemytrip.com/',
-        'Accept': 'application/json'
+    const response = await axios.get(apiUrl);
+    const $ = cheerio.load(response.data);
+    const promoUrls = [];
+
+    $('a').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && href.startsWith('/promos/df-') && href.endsWith('.html')) {
+        const fullUrl = `https://www.makemytrip.com${href}`;
+        if (!promoUrls.includes(fullUrl)) {
+          promoUrls.push(fullUrl);
+        }
       }
     });
 
-    const offers = response.data?.data || [];
-    const promoUrls = offers.map(offer => 'https://www.makemytrip.com/promos/' + offer.pageUrl);
-
     res.json({ promoUrls });
   } catch (error) {
-    console.error("Error scraping MMT promo API:", error.message);
-    res.status(500).json({ error: 'Promo API scrape failed' });
+    console.error("Error scraping MMT promo page:", error.message);
+    res.status(500).json({ error: 'Promo page scrape failed' });
   }
 });
 
