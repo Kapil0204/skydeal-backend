@@ -7,17 +7,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-<<<<<<< HEAD
     "axios": "^1.6.0",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-=======
-    "axios": "^1.10.0",
-    "cheerio": "^1.1.0",
-    "cors": "^2.8.5",
-    "dotenv": "^17.2.0",
->>>>>>> 60ebb70 (Add axios, cheerio, dotenv for scraping route)
     "express": "^4.18.2"
   }
 }
