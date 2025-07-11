@@ -117,6 +117,32 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed' });
   }
 });
+// ----------------------
+// Scrape MMT Offers Page to Extract Promo URLs
+// ----------------------
+app.get('/scrape-mmt-links', async (req, res) => {
+  const targetUrl = "https://www.makemytrip.com/offers/";
+  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
+
+  try {
+    const response = await axios.get(apiUrl);
+    const $ = cheerio.load(response.data);
+    const promoUrls = new Set();
+
+    $('a').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && href.includes('/promos/') && href.includes('df-')) {
+        promoUrls.add('https://www.makemytrip.com' + href.split('?')[0]);
+      }
+    });
+
+    res.json({ promoUrls: Array.from(promoUrls) });
+  } catch (error) {
+    console.error("Error scraping MMT links:", error.message);
+    res.status(500).json({ error: 'Failed to extract promo URLs' });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
