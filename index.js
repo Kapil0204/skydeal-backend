@@ -17,24 +17,25 @@ app.use(express.json());
 // ---------------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
-    const url = 'https://www.makemytrip.com/offer/';
+    const url = 'https://www.makemytrip.com/offer/domestic-flight-deals.html';
+
     const response = await axios.get('http://api.scraperapi.com', {
       params: {
         api_key: process.env.SCRAPER_API_KEY,
-        url: url
+        url: url,
+        render: true
       }
     });
 
-    const html = response.data;
-    console.log('--- RAW HTML START ---\n' + html.slice(0, 1000) + '\n--- RAW HTML END ---');
+    const $ = cheerio.load(response.data);
 
-    const $ = cheerio.load(html);
     const offers = [];
 
-    $('div, li, span, p').each((i, el) => {
+    $('*').each((i, el) => {
       const text = $(el).text().trim();
-      const isFlight = /flight|fly|air/i.test(text);
-      if (isFlight && text.length > 40) {
+      const isFlightOffer = /flight|airfare|domestic/i.test(text);
+
+      if (isFlightOffer && text.length > 20 && text.length < 500) {
         offers.push({ text });
       }
     });
@@ -45,8 +46,6 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     res.status(500).json({ error: 'Scraping failed', details: error.message });
   }
 });
-
-
 
 // ---------------------------
 // Server Start
