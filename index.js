@@ -4,7 +4,7 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load env vars
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,11 +12,10 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ✅ Scraping route
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const url = 'https://www.makemytrip.com/offers/';
-    const fullUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}`;
+    const fullUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=true`;
 
     const response = await axios.get(fullUrl);
     const html = response.data;
@@ -25,11 +24,15 @@ app.get('/scrape-mmt-offers', async (req, res) => {
     const offers = [];
 
     $('.offer-block').each((i, el) => {
-      const text = $(el).text();
+      const text = $(el).text().trim();
       if (text.toLowerCase().includes('flight')) {
-        offers.push(text.trim());
+        offers.push(text);
       }
     });
+
+    if (offers.length === 0) {
+      console.warn('⚠️ No flight offers found — maybe selector issue or content not rendered');
+    }
 
     res.json({ offers });
   } catch (error) {
@@ -38,7 +41,6 @@ app.get('/scrape-mmt-offers', async (req, res) => {
   }
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal scraper running on port ${PORT}`);
 });
