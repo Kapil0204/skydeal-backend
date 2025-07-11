@@ -12,36 +12,20 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ----------------------
-// MMT Flight Offer Scraper
-// ----------------------
 app.get('/scrape-mmt-offers', async (req, res) => {
+  const baseUrl = 'https://www.makemytrip.com/offers/';
+  const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(baseUrl)}&render=true`;
+
   try {
-    const url = 'https://www.makemytrip.com/offers/';
-    const response = await axios.get(`http://api.scraperapi.com`, {
-      params: {
-        api_key: process.env.SCRAPERAPI_KEY,
-        url: url,
-        render: true
-      },
-      timeout: 40000 // 40 seconds
-    });
-
-    const html = response.data;
-    console.log("Scraped HTML length:", html.length);
-
-    const $ = cheerio.load(html);
-    const offerCards = $('.makeFlex.column');
-
-    console.log("Found offer card count:", offerCards.length);
-
+    const response = await axios.get(scraperApiUrl, { timeout: 20000 });
+    const $ = cheerio.load(response.data);
     const offers = [];
 
-    offerCards.each((i, el) => {
-      const text = $(el).text().trim();
-      if (/flight|fly|air/i.test(text)) {
-        console.log("Flight offer found:", text);
-        offers.push({ text });
+    $('.common-offers-card .font26').each((i, el) => {
+      const title = $(el).text().trim();
+      const description = $(el).parent().find('.font14').text().trim();
+      if (title.toLowerCase().includes('flight')) {
+        offers.push({ title, description });
       }
     });
 
@@ -52,9 +36,6 @@ app.get('/scrape-mmt-offers', async (req, res) => {
   }
 });
 
-// ----------------------
-// Start Server
-// ----------------------
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
