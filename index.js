@@ -15,7 +15,8 @@ app.use(express.json());
 app.get('/scrape-mmt-offers', async (req, res) => {
   try {
     const baseUrl = 'https://www.makemytrip.com/offer/domestic-flight-deals.html';
-    const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(baseUrl)}&render=true`;
+const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(baseUrl)}`;
+
 
     const response = await axios.get(scraperApiUrl, { timeout: 20000 });
     const html = response.data;
