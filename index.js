@@ -24,7 +24,7 @@ app.get('/scrape-mmt-offers', async (req, res) => {
         url: url,
         render: true
       },
-      timeout: 20000 // 20 seconds
+      timeout: 40000 // 40 seconds
     });
 
     const html = response.data;
