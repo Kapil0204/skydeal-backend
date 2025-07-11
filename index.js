@@ -18,6 +18,7 @@ app.get('/scrape-mmt-offers', async (req, res) => {
 const scraperApiUrl = `https://api.scraperapi.com/?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(baseUrl)}`;
 
 
+
     const response = await axios.get(scraperApiUrl, { timeout: 20000 });
     const html = response.data;
     const $ = cheerio.load(html);
