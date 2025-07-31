@@ -47,7 +47,7 @@ app.post('/search', async (req, res) => {
       destinationLocationCode: to,
       departureDate,
       adults: passengers,
-      selectedCabins: travelClass.toUpperCase(), // <- this is what Amadeus uses
+      travelClass: travelClass.toUpperCase(),
       currencyCode: 'INR'
     };
 
