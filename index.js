@@ -1,97 +1,71 @@
 import express from 'express';
 import cors from 'cors';
-import axios from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
+// Allow requests from your frontend on Vercel
 app.use(cors({
   origin: 'https://skydeal-frontend.vercel.app'
 }));
+
 app.use(express.json());
 
 // ----------------------
-// Get Amadeus Token
+// Simulated Flights Route
 // ----------------------
-let accessToken = null;
+app.post('/simulated-flights', (req, res) => {
+  const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
 
-async function getAmadeusToken() {
-  const { AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET } = process.env;
-  const response = await axios.post(
-  'https://test.api.amadeus.com/v1/security/oauth2/token',
-  new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: AMADEUS_CLIENT_ID,
-    client_secret: AMADEUS_CLIENT_SECRET
-  }).toString(),
-  {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  }
-);
+  const bestDeals = {
+    'ICICI Bank': { portal: 'MakeMyTrip', offer: '10% off', code: 'SKYICICI10', price: 4900 },
+    'HDFC Bank': { portal: 'Goibibo', offer: '12% off', code: 'SKYHDFC12', price: 4700 },
+    'Axis Bank': { portal: 'EaseMyTrip', offer: '15% off', code: 'SKYAXIS15', price: 4500 }
+  };
 
-  accessToken = response.data.access_token;
-}
-
-// ----------------------
-// POST /search → real price + 5 OTA simulated prices
-// ----------------------
-app.post('/search', async (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
-
-  try {
-    if (!accessToken) await getAmadeusToken();
-
-    const params = {
-      originLocationCode: from,
-      destinationLocationCode: to,
-      departureDate,
-      adults: passengers,
-      travelClass: travelClass.toUpperCase(),
-      currencyCode: 'INR'
-    };
-
-    if (tripType === 'round-trip' && returnDate) {
-      params.returnDate = returnDate;
+  const outboundFlights = [
+    {
+      flightName: 'IndiGo 6E123',
+      departure: '08:00',
+      arrival: '10:00',
+      bestDeal: bestDeals[paymentMethods?.[0]] || null
+    },
+    {
+      flightName: 'Air India AI456',
+      departure: '12:30',
+      arrival: '14:45',
+      bestDeal: bestDeals[paymentMethods?.[0]] || null
     }
+  ];
 
-    const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      },
-      params
-    });
+  const returnFlights = tripType === 'round-trip' ? [
+    {
+      flightName: 'SpiceJet SG789',
+      departure: '18:00',
+      arrival: '20:00',
+      bestDeal: bestDeals[paymentMethods?.[0]] || null
+    },
+    {
+      flightName: 'Vistara UK321',
+      departure: '21:30',
+      arrival: '23:50',
+      bestDeal: bestDeals[paymentMethods?.[0]] || null
+    }
+  ] : [];
 
-    const results = response.data?.data || [];
-    const flights = results.map((flight) => {
-      const itinerary = flight.itineraries[0];
-      const segment = itinerary.segments[0]; // First leg
-
-      return {
-        airline: segment.carrierCode || 'N/A',
-        flightNumber: segment.number || 'N/A',
-        departure: segment.departure.at,
-        arrival: segment.arrival.at,
-        basePrice: parseFloat(flight.price.total),
-        currency: flight.price.currency
-      };
-    });
-
-    res.json(flights);
-  } catch (error) {
-    console.error('Error fetching from Amadeus:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to fetch flight data' });
-  }
+  res.json({ outboundFlights, returnFlights });
 });
 
-
+// ----------------------
+// Default Route
 // ----------------------
 app.get('/', (req, res) => {
-  res.send('SkyDeal backend live');
+  res.send('SkyDeal backend is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ SkyDeal backend running on port ${PORT}`);
+  console.log(`✅ Server is running on port ${PORT}`);
 });
