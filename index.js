@@ -1,80 +1,78 @@
-// skydeal-backend/index.js
+// ✅ BACKEND: index.js
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import axios from 'axios';
+import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
 
-// POST /search - Real flights from Amadeus
+// ✅ Amadeus Real Flights Endpoint
 app.post('/search', async (req, res) => {
   const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
 
-  const tokenOptions = {
-    method: 'POST',
-    url: 'https://test.api.amadeus.com/v1/security/oauth2/token',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    data: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: process.env.AMADEUS_CLIENT_ID,
-      client_secret: process.env.AMADEUS_CLIENT_SECRET
-    })
+  const headers = {
+    'Authorization': `Bearer ${process.env.AMADEUS_ACCESS_TOKEN}`
   };
 
+  const params = {
+    originLocationCode: from,
+    destinationLocationCode: to,
+    departureDate,
+    adults: passengers,
+    travelClass,
+    currencyCode: 'INR'
+  };
+
+  if (tripType === 'round-trip') {
+    params.returnDate = returnDate;
+  }
+
   try {
-    const tokenRes = await axios.request(tokenOptions);
-    const token = tokenRes.data.access_token;
+    const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', { params, headers });
+    const data = response.data.data;
 
-    const searchParams = new URLSearchParams({
-      originLocationCode: from,
-      destinationLocationCode: to,
-      departureDate,
-      adults: passengers,
-      travelClass,
-      currencyCode: 'INR',
-      max: 10
+    // ✅ Parse outbound & return flights
+    const outboundFlights = [];
+    const returnFlights = [];
+
+    data.forEach(flight => {
+      const itineraries = flight.itineraries;
+
+      // Outbound
+      if (itineraries[0]) {
+        const seg = itineraries[0].segments[0];
+        outboundFlights.push({
+          flightName: `${seg.carrierCode} ${seg.number}`,
+          airline: seg.carrierCode,
+          departure: seg.departure.at.split('T')[1].slice(0, 5),
+          arrival: seg.arrival.at.split('T')[1].slice(0, 5),
+          price: flight.price.total
+        });
+      }
+
+      // Return (if round trip)
+      if (tripType === 'round-trip' && itineraries[1]) {
+        const seg = itineraries[1].segments[0];
+        returnFlights.push({
+          flightName: `${seg.carrierCode} ${seg.number}`,
+          airline: seg.carrierCode,
+          departure: seg.departure.at.split('T')[1].slice(0, 5),
+          arrival: seg.arrival.at.split('T')[1].slice(0, 5),
+          price: flight.price.total
+        });
+      }
     });
 
-    if (tripType === 'round-trip' && returnDate) {
-      searchParams.append('returnDate', returnDate);
-    }
-
-    const flightOptions = {
-      method: 'GET',
-      url: `https://test.api.amadeus.com/v2/shopping/flight-offers?${searchParams.toString()}`,
-      headers: { Authorization: `Bearer ${token}` }
-    };
-
-    const flightRes = await axios.request(flightOptions);
-    const offers = flightRes.data.data || [];
-
-    const flights = offers.map((offer) => {
-      const itinerary = offer.itineraries[0];
-      const segment = itinerary.segments[0];
-      const flight = segment.flightSegment || segment;
-      return {
-        airline: flight.carrierCode,
-        flightNumber: flight.number,
-        departure: flight.departure.at,
-        arrival: flight.arrival.at,
-        basePrice: parseInt(offer.price.total),
-        id: offer.id
-      };
-    });
-
-    res.json({ flights });
-  } catch (err) {
-    console.error('Amadeus API error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch flight data from Amadeus' });
+    res.json({ outboundFlights, returnFlights });
+  } catch (error) {
+    console.error('Amadeus error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch flights' });
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`✅ SkyDeal backend running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ SkyDeal backend running on port ${PORT}`));
