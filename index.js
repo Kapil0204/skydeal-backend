@@ -1,71 +1,105 @@
 import express from 'express';
 import cors from 'cors';
+import axios from 'axios';
 import dotenv from 'dotenv';
+import { MongoClient } from 'mongodb';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Allow requests from your frontend on Vercel
-app.use(cors({
-  origin: 'https://skydeal-frontend.vercel.app'
-}));
-
+app.use(cors());
 app.use(express.json());
 
-// ----------------------
-// Simulated Flights Route
-// ----------------------
-app.post('/simulated-flights', (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
+// -----------------------------
+// MongoDB Connection
+// -----------------------------
+const mongoUri = process.env.MONGODB_URI;
+const client = new MongoClient(mongoUri);
+let offersCollection;
 
-  const bestDeals = {
-    'ICICI Bank': { portal: 'MakeMyTrip', offer: '10% off', code: 'SKYICICI10', price: 4900 },
-    'HDFC Bank': { portal: 'Goibibo', offer: '12% off', code: 'SKYHDFC12', price: 4700 },
-    'Axis Bank': { portal: 'EaseMyTrip', offer: '15% off', code: 'SKYAXIS15', price: 4500 }
-  };
+async function connectDB() {
+  try {
+    await client.connect();
+    const db = client.db('skydeal');
+    offersCollection = db.collection('offers');
+    console.log('✅ Connected to MongoDB');
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err.message);
+  }
+}
+connectDB();
 
-  const outboundFlights = [
-    {
-      flightName: 'IndiGo 6E123',
-      departure: '08:00',
-      arrival: '10:00',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    },
-    {
-      flightName: 'Air India AI456',
-      departure: '12:30',
-      arrival: '14:45',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    }
+// -----------------------------
+// Amadeus Flight Search Endpoint
+// -----------------------------
+app.post('/search', async (req, res) => {
+  const { from, to, departureDate, passengers, travelClass } = req.body;
+
+  try {
+    const response = await axios.post('https://test.api.amadeus.com/v1/shopping/flight-offers', {
+      currencyCode: 'INR',
+      originLocationCode: from,
+      destinationLocationCode: to,
+      departureDate,
+      adults: passengers,
+      travelClass,
+      nonStop: false,
+      max: 10
+    }, {
+      headers: {
+        Authorization: `Bearer ${process.env.AMADEUS_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const offers = response.data.data || [];
+
+    const flights = offers.map((offer, index) => {
+      const segment = offer.itineraries[0].segments[0];
+      const price = parseFloat(offer.price.total);
+      const airlineCode = segment.carrierCode;
+      const flightNumber = segment.number;
+      const departure = segment.departure.at;
+      const arrival = segment.arrival.at;
+
+      return {
+        id: index,
+        airline: airlineCode,
+        flightNumber,
+        departureTime: departure,
+        arrivalTime: arrival,
+        basePrice: price
+      };
+    });
+
+    res.json({ flights });
+  } catch (err) {
+    console.error('❌ Amadeus error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch flight data' });
+  }
+});
+
+// -----------------------------
+// Simulated OTA Price Modal
+// -----------------------------
+app.post('/simulate-ota-prices', (req, res) => {
+  const { basePrice } = req.body;
+  const markup = 100;
+
+  const simulatedPrices = [
+    { ota: 'MakeMyTrip', price: basePrice + markup },
+    { ota: 'Goibibo', price: basePrice + markup },
+    { ota: 'EaseMyTrip', price: basePrice + markup },
+    { ota: 'Yatra', price: basePrice + markup },
+    { ota: 'Cleartrip', price: basePrice + markup }
   ];
 
-  const returnFlights = tripType === 'round-trip' ? [
-    {
-      flightName: 'SpiceJet SG789',
-      departure: '18:00',
-      arrival: '20:00',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    },
-    {
-      flightName: 'Vistara UK321',
-      departure: '21:30',
-      arrival: '23:50',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    }
-  ] : [];
-
-  res.json({ outboundFlights, returnFlights });
+  res.json(simulatedPrices);
 });
 
-// ----------------------
-// Default Route
-// ----------------------
-app.get('/', (req, res) => {
-  res.send('SkyDeal backend is running');
-});
-
+// -----------------------------
 app.listen(PORT, () => {
-  console.log(`✅ Server is running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
