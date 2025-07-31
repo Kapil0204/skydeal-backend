@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -13,138 +12,82 @@ app.use(cors());
 app.use(express.json());
 
 // ----------------------
-// Simulated Flight Data
+// Get Amadeus Token
 // ----------------------
-app.post('/simulated-flights', (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
+let accessToken = null;
 
-  const bestDeals = {
-    'ICICI Bank': { portal: 'MakeMyTrip', offer: '10% off', code: 'SKYICICI10', price: 4900 },
-    'HDFC Bank': { portal: 'Goibibo', offer: '12% off', code: 'SKYHDFC12', price: 4700 },
-    'Axis Bank': { portal: 'EaseMyTrip', offer: '15% off', code: 'SKYAXIS15', price: 4500 }
-  };
-
-  const outboundFlights = [
-    {
-      flightName: 'IndiGo 6E123',
-      departure: '08:00',
-      arrival: '10:00',
-      bestDeal: bestDeals[paymentMethods[0]] || null
-    },
-    {
-      flightName: 'Air India AI456',
-      departure: '12:30',
-      arrival: '14:45',
-      bestDeal: bestDeals[paymentMethods[0]] || null
-    }
-  ];
-
-  const returnFlights = tripType === 'round-trip' ? [
-    {
-      flightName: 'SpiceJet SG789',
-      departure: '18:00',
-      arrival: '20:00',
-      bestDeal: bestDeals[paymentMethods[0]] || null
-    },
-    {
-      flightName: 'Vistara UK321',
-      departure: '21:30',
-      arrival: '23:50',
-      bestDeal: bestDeals[paymentMethods[0]] || null
-    }
-  ] : [];
-
-  res.json({ outboundFlights, returnFlights });
-});
-
-// ----------------------
-// Kiwi.com Real Flights
-// ----------------------
-app.post('/kiwi', async (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass } = req.body;
-
-  const options = {
-    method: 'GET',
-    url: 'https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip',
+async function getAmadeusToken() {
+  const { AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET } = process.env;
+  const response = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', null, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     params: {
-      from,
-      to,
-      dateFrom: departureDate,
-      dateTo: departureDate,
-      returnFrom: returnDate || '',
-      returnTo: returnDate || '',
-      adults: passengers,
-      selectedCabins: travelClass.toLowerCase(),
-      currency: 'INR'
-    },
-    headers: {
-      'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-      'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com'
+      grant_type: 'client_credentials',
+      client_id: AMADEUS_CLIENT_ID,
+      client_secret: AMADEUS_CLIENT_SECRET
     }
-  };
+  });
+  accessToken = response.data.access_token;
+}
+
+// ----------------------
+// POST /search → real price + 5 OTA simulated prices
+// ----------------------
+app.post('/search', async (req, res) => {
+  const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
 
   try {
-    const response = await axios.request(options);
-    res.json(response.data);
+    if (!accessToken) await getAmadeusToken();
+
+    const params = {
+      originLocationCode: from,
+      destinationLocationCode: to,
+      departureDate,
+      adults: passengers,
+      travelClass: travelClass.toUpperCase(),
+      currencyCode: 'INR',
+      max: 1
+    };
+
+    if (tripType === 'round-trip' && returnDate) {
+      params.returnDate = returnDate;
+    }
+
+    const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params
+    });
+
+    const flightData = response.data?.data?.[0];
+    if (!flightData) return res.status(404).json({ error: 'No flights found' });
+
+    const basePrice = parseFloat(flightData.price.total);
+    const currency = flightData.price.currency;
+
+    const simulatedResults = [
+      { ota: 'MakeMyTrip', price: basePrice + 100 },
+      { ota: 'Goibibo', price: basePrice + 100 },
+      { ota: 'EaseMyTrip', price: basePrice + 100 },
+      { ota: 'Yatra', price: basePrice + 100 },
+      { ota: 'Cleartrip', price: basePrice + 100 }
+    ].map(item => ({
+      ...item,
+      basePrice,
+      currency
+    }));
+
+    res.json(simulatedResults);
+
   } catch (error) {
-    console.error('Error fetching Kiwi flights:', error.message);
-    res.status(500).json({ error: 'Failed to fetch real flights' });
+    console.error('Error fetching from Amadeus:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to fetch flight data' });
   }
 });
 
 // ----------------------
-// Scrape MMT ICICI Page
-// ----------------------
-app.get('/scrape-mmt-offers', async (req, res) => {
-  const targetUrl = "https://www.makemytrip.com/promos/df-icici-02012023.html";
-  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
-
-  try {
-    const response = await axios.get(apiUrl);
-    const $ = cheerio.load(response.data);
-    const offers = [];
-
-    $('div').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text && /(flight|fly|discount|code|ICICI|save|Rs|\boff\b)/i.test(text)) {
-        offers.push({ text });
-      }
-    });
-
-    res.json({ offers });
-  } catch (error) {
-    console.error("Error scraping MMT:", error.message);
-    res.status(500).json({ error: 'Scraping failed' });
-  }
+app.get('/', (req, res) => {
+  res.send('SkyDeal backend live');
 });
-// Scrape promo links from https://www.makemytrip.com/offers/
-app.get('/scrape-mmt-links', async (req, res) => {
-  const targetUrl = "https://www.makemytrip.com/offers/";
-  const apiUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(targetUrl)}`;
-
-  try {
-    const response = await axios.get(apiUrl);
-    const $ = cheerio.load(response.data);
-    const promoUrls = [];
-
-    $('a').each((i, el) => {
-      const href = $(el).attr('href');
-      if (href && href.startsWith('/promos/df-') && href.endsWith('.html')) {
-        const fullUrl = `https://www.makemytrip.com${href}`;
-        if (!promoUrls.includes(fullUrl)) {
-          promoUrls.push(fullUrl);
-        }
-      }
-    });
-
-    res.json({ promoUrls });
-  } catch (error) {
-    console.error("Error scraping MMT promo page:", error.message);
-    res.status(500).json({ error: 'Promo page scrape failed' });
-  }
-});
-
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ SkyDeal backend running on port ${PORT}`);
 });
