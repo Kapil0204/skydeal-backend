@@ -18,14 +18,18 @@ let accessToken = null;
 
 async function getAmadeusToken() {
   const { AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET } = process.env;
-  const response = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', null, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    params: {
-      grant_type: 'client_credentials',
-      client_id: AMADEUS_CLIENT_ID,
-      client_secret: AMADEUS_CLIENT_SECRET
-    }
-  });
+  const response = await axios.post(
+  'https://test.api.amadeus.com/v1/security/oauth2/token',
+  new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: AMADEUS_CLIENT_ID,
+    client_secret: AMADEUS_CLIENT_SECRET
+  }).toString(),
+  {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  }
+);
+
   accessToken = response.data.access_token;
 }
 
