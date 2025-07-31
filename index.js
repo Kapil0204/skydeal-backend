@@ -11,72 +11,54 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------
-// 1. Real Flights from Amadeus
-// ---------------------------
+// --- GET AMADEUS ACCESS TOKEN ---
+async function getAmadeusAccessToken() {
+  const response = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: process.env.AMADEUS_API_KEY,
+    client_secret: process.env.AMADEUS_API_SECRET
+  }), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+
+  return response.data.access_token;
+}
+
+// --- /search endpoint ---
 app.post('/search', async (req, res) => {
-  const { from, to, departureDate, passengers, travelClass } = req.body;
+  const { from, to, departureDate, returnDate, passengers, travelClass } = req.body;
 
   try {
-    // 1. Auth to Amadeus
-    const authResponse = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', null, {
-      params: {
-        grant_type: 'client_credentials',
-        client_id: process.env.AMADEUS_API_KEY,
-        client_secret: process.env.AMADEUS_API_SECRET,
-      },
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      }
-    });
+    const token = await getAmadeusAccessToken();
 
-    const accessToken = authResponse.data.access_token;
-
-    // 2. Fetch flights
-    const searchUrl = 'https://test.api.amadeus.com/v2/shopping/flight-offers';
-    const flightResponse = await axios.get(searchUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      },
+    const amadeusRes = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
+      headers: { Authorization: `Bearer ${token}` },
       params: {
         originLocationCode: from,
         destinationLocationCode: to,
-        departureDate: departureDate,
+        departureDate,
+        ...(returnDate ? { returnDate } : {}),
         adults: passengers,
-        travelClass: travelClass,
+        travelClass,
         currencyCode: 'INR',
-        max: 10
+        max: 20
       }
     });
 
-    const flights = flightResponse.data.data.map((offer, index) => {
+    const flights = amadeusRes.data.data.map((offer) => {
       const segment = offer.itineraries[0].segments[0];
-      const airline = segment.carrierCode;
-      const departure = segment.departure.at;
-      const arrival = segment.arrival.at;
-      const flightNumber = segment.flightNumber;
-      const basePrice = parseFloat(offer.price.total);
-
       return {
-        index,
-        airline,
-        departure,
-        arrival,
-        flightNumber,
-        basePrice,
-        otaPrices: {
-          MakeMyTrip: basePrice + 100,
-          Goibibo: basePrice + 100,
-          EaseMyTrip: basePrice + 100,
-          Yatra: basePrice + 100
-        }
+        airline: segment.carrierCode,
+        flightNumber: segment.number,
+        departure: segment.departure.at,
+        arrival: segment.arrival.at,
+        price: offer.price.total
       };
     });
 
     res.json({ flights });
-
   } catch (err) {
-    console.error('Error fetching flights:', err.response?.data || err.message);
+    console.error('Amadeus error:', err?.response?.data || err.message);
     res.status(500).json({ error: 'Failed to fetch flight data from Amadeus' });
   }
 });
