@@ -48,8 +48,7 @@ app.post('/search', async (req, res) => {
       departureDate,
       adults: passengers,
       travelClass: travelClass.toUpperCase(),
-      currencyCode: 'INR',
-      max: 1
+      currencyCode: 'INR'
     };
 
     if (tripType === 'round-trip' && returnDate) {
@@ -57,35 +56,34 @@ app.post('/search', async (req, res) => {
     }
 
     const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
       params
     });
 
-    const flightData = response.data?.data?.[0];
-    if (!flightData) return res.status(404).json({ error: 'No flights found' });
+    const results = response.data?.data || [];
+    const flights = results.map((flight) => {
+      const itinerary = flight.itineraries[0];
+      const segment = itinerary.segments[0]; // First leg
 
-    const basePrice = parseFloat(flightData.price.total);
-    const currency = flightData.price.currency;
+      return {
+        airline: segment.carrierCode || 'N/A',
+        flightNumber: segment.number || 'N/A',
+        departure: segment.departure.at,
+        arrival: segment.arrival.at,
+        basePrice: parseFloat(flight.price.total),
+        currency: flight.price.currency
+      };
+    });
 
-    const simulatedResults = [
-      { ota: 'MakeMyTrip', price: basePrice + 100 },
-      { ota: 'Goibibo', price: basePrice + 100 },
-      { ota: 'EaseMyTrip', price: basePrice + 100 },
-      { ota: 'Yatra', price: basePrice + 100 },
-      { ota: 'Cleartrip', price: basePrice + 100 }
-    ].map(item => ({
-      ...item,
-      basePrice,
-      currency
-    }));
-
-    res.json(simulatedResults);
-
+    res.json(flights);
   } catch (error) {
     console.error('Error fetching from Amadeus:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to fetch flight data' });
   }
 });
+
 
 // ----------------------
 app.get('/', (req, res) => {
