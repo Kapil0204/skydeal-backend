@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import dotenv from 'dotenv';
-import { MongoClient } from 'mongodb';
 
 dotenv.config();
 
@@ -12,94 +11,76 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// -----------------------------
-// MongoDB Connection
-// -----------------------------
-const mongoUri = process.env.MONGODB_URI;
-const client = new MongoClient(mongoUri);
-let offersCollection;
-
-async function connectDB() {
-  try {
-    await client.connect();
-    const db = client.db('skydeal');
-    offersCollection = db.collection('offers');
-    console.log('✅ Connected to MongoDB');
-  } catch (err) {
-    console.error('❌ MongoDB connection error:', err.message);
-  }
-}
-connectDB();
-
-// -----------------------------
-// Amadeus Flight Search Endpoint
-// -----------------------------
+// ---------------------------
+// 1. Real Flights from Amadeus
+// ---------------------------
 app.post('/search', async (req, res) => {
   const { from, to, departureDate, passengers, travelClass } = req.body;
 
   try {
-    const response = await axios.post('https://test.api.amadeus.com/v1/shopping/flight-offers', {
-      currencyCode: 'INR',
-      originLocationCode: from,
-      destinationLocationCode: to,
-      departureDate,
-      adults: passengers,
-      travelClass,
-      nonStop: false,
-      max: 10
-    }, {
+    // 1. Auth to Amadeus
+    const authResponse = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', null, {
+      params: {
+        grant_type: 'client_credentials',
+        client_id: process.env.AMADEUS_API_KEY,
+        client_secret: process.env.AMADEUS_API_SECRET,
+      },
       headers: {
-        Authorization: `Bearer ${process.env.AMADEUS_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/x-www-form-urlencoded',
       }
     });
 
-    const offers = response.data.data || [];
+    const accessToken = authResponse.data.access_token;
 
-    const flights = offers.map((offer, index) => {
+    // 2. Fetch flights
+    const searchUrl = 'https://test.api.amadeus.com/v2/shopping/flight-offers';
+    const flightResponse = await axios.get(searchUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      params: {
+        originLocationCode: from,
+        destinationLocationCode: to,
+        departureDate: departureDate,
+        adults: passengers,
+        travelClass: travelClass,
+        currencyCode: 'INR',
+        max: 10
+      }
+    });
+
+    const flights = flightResponse.data.data.map((offer, index) => {
       const segment = offer.itineraries[0].segments[0];
-      const price = parseFloat(offer.price.total);
-      const airlineCode = segment.carrierCode;
-      const flightNumber = segment.number;
+      const airline = segment.carrierCode;
       const departure = segment.departure.at;
       const arrival = segment.arrival.at;
+      const flightNumber = segment.flightNumber;
+      const basePrice = parseFloat(offer.price.total);
 
       return {
-        id: index,
-        airline: airlineCode,
+        index,
+        airline,
+        departure,
+        arrival,
         flightNumber,
-        departureTime: departure,
-        arrivalTime: arrival,
-        basePrice: price
+        basePrice,
+        otaPrices: {
+          MakeMyTrip: basePrice + 100,
+          Goibibo: basePrice + 100,
+          EaseMyTrip: basePrice + 100,
+          Yatra: basePrice + 100
+        }
       };
     });
 
     res.json({ flights });
+
   } catch (err) {
-    console.error('❌ Amadeus error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch flight data' });
+    console.error('Error fetching flights:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to fetch flight data from Amadeus' });
   }
 });
 
-// -----------------------------
-// Simulated OTA Price Modal
-// -----------------------------
-app.post('/simulate-ota-prices', (req, res) => {
-  const { basePrice } = req.body;
-  const markup = 100;
-
-  const simulatedPrices = [
-    { ota: 'MakeMyTrip', price: basePrice + markup },
-    { ota: 'Goibibo', price: basePrice + markup },
-    { ota: 'EaseMyTrip', price: basePrice + markup },
-    { ota: 'Yatra', price: basePrice + markup },
-    { ota: 'Cleartrip', price: basePrice + markup }
-  ];
-
-  res.json(simulatedPrices);
-});
-
-// -----------------------------
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`✅ SkyDeal backend running on port ${PORT}`);
 });
