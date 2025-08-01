@@ -28,7 +28,7 @@ app.post('/search', async (req, res) => {
       new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: process.env.AMADEUS_CLIENT_ID,
-        client_secret: process.env.AMADEUS_CLIENT_SECRET
+client_secret: process.env.AMADEUS_CLIENT_SECRET,
       }),
       {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
