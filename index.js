@@ -110,4 +110,4 @@ app.post('/search', async (req, res) => {
 // ----------------------
 app.listen(PORT, () => {
   console.log(`✅ SkyDeal backend running at http://localhost:${PORT}`);
-}):
+});
