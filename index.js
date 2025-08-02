@@ -1,11 +1,7 @@
-// ----------------------
-// Imports and Setup
-// ----------------------
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import * as dotenv from 'dotenv';
-import qs from 'qs';
+import dotenv from 'dotenv';
 
 dotenv.config();
 
@@ -16,144 +12,83 @@ app.use(cors());
 app.use(express.json());
 
 // ----------------------
-// Test Route
+// Utility: Remove Exact Duplicates
 // ----------------------
-app.get('/', (req, res) => {
-  res.send('SkyDeal backend is running.');
-});
-
-// ----------------------
-// Simulated Flights (for testing)
-// ----------------------
-app.post('/simulated-flights', (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
-
-  const bestDeals = {
-    'ICICI Bank': { portal: 'MakeMyTrip', offer: '10% off', code: 'SKYICICI10', price: 4900 },
-    'HDFC Bank': { portal: 'Goibibo', offer: '12% off', code: 'SKYHDFC12', price: 4700 },
-    'Axis Bank': { portal: 'EaseMyTrip', offer: '15% off', code: 'SKYAXIS15', price: 4500 }
-  };
-
-  const outboundFlights = [
-    {
-      flightName: 'IndiGo 6E123',
-      departure: '08:00',
-      arrival: '10:00',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    },
-    {
-      flightName: 'Air India AI456',
-      departure: '12:30',
-      arrival: '14:45',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    }
-  ];
-
-  const returnFlights = tripType === 'round-trip' ? [
-    {
-      flightName: 'SpiceJet SG789',
-      departure: '18:00',
-      arrival: '20:00',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    },
-    {
-      flightName: 'Vistara UK321',
-      departure: '21:30',
-      arrival: '23:50',
-      bestDeal: bestDeals[paymentMethods?.[0]] || null
-    }
-  ] : [];
-
-  res.json({ outboundFlights, returnFlights });
-});
-
-// ----------------------
-// Amadeus: Auth + Flight Search
-// ----------------------
-
-let amadeusAccessToken = null;
-let tokenExpiry = null;
-
-async function getAmadeusAccessToken() {
-  if (amadeusAccessToken && tokenExpiry && Date.now() < tokenExpiry) {
-    return amadeusAccessToken;
-  }
-
-  const data = qs.stringify({
-    grant_type: 'client_credentials',
-    client_id: process.env.AMADEUS_CLIENT_ID,
-    client_secret: process.env.AMADEUS_CLIENT_SECRET
+function removeExactDuplicates(flights) {
+  const seen = new Set();
+  return flights.filter(flight => {
+    const key = `${flight.flightName}-${flight.departure}-${flight.arrival}-${flight.price}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
-
-  try {
-    const response = await axios.post('https://test.api.amadeus.com/v1/security/oauth2/token', data, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
-
-    amadeusAccessToken = response.data.access_token;
-    tokenExpiry = Date.now() + response.data.expires_in * 1000;
-    return amadeusAccessToken;
-  } catch (error) {
-    console.error('❌ Failed to get Amadeus token:', error.response?.data || error.message);
-    throw new Error('Amadeus authentication failed');
-  }
 }
 
+// ----------------------
+// Real Flights via Amadeus
+// ----------------------
 app.post('/search', async (req, res) => {
+  const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
+
+  const amadeusUrl = 'https://test.api.amadeus.com/v2/shopping/flight-offers';
+
+  const params = {
+    originLocationCode: from,
+    destinationLocationCode: to,
+    departureDate,
+    adults: passengers,
+    travelClass,
+    currencyCode: 'INR',
+    nonStop: false,
+    max: 250
+  };
+
+  if (tripType === 'round-trip' && returnDate) {
+    params.returnDate = returnDate;
+  }
+
   try {
-    const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
-
-    const token = await getAmadeusAccessToken();
-
-    const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
-      headers: { Authorization: `Bearer ${token}` },
-      params: {
-        originLocationCode: from,
-        destinationLocationCode: to,
-        departureDate,
-        returnDate: tripType === 'round-trip' ? returnDate : undefined,
-        adults: passengers,
-        travelClass,
-        currencyCode: 'INR',
-        max: 10
+    const response = await axios.get(amadeusUrl, {
+      params,
+      headers: {
+        Authorization: `Bearer ${process.env.AMADEUS_ACCESS_TOKEN}`
       }
     });
 
-    const offers = response.data.data || [];
+    const data = response.data;
 
-    const outboundFlights = offers.map(offer => {
-      const segment = offer.itineraries[0].segments[0];
-      return {
-        flightName: `${segment.carrierCode} ${segment.number}`,
-        departure: segment.departure.at.slice(11, 16),
-        arrival: segment.arrival.at.slice(11, 16),
-        price: parseInt(offer.price.total)
-      };
-    });
+    const outboundFlights = removeExactDuplicates(
+      data.data.map(flight => ({
+        flightName: flight.validatingAirlineCodes[0] + ' ' + flight.itineraries[0].segments[0].number,
+        departure: flight.itineraries[0].segments[0].departure.at.slice(11, 16),
+        arrival: flight.itineraries[0].segments[0].arrival.at.slice(11, 16),
+        price: parseFloat(flight.price.total)
+      }))
+    );
 
-    const returnFlights = (tripType === 'round-trip')
-      ? offers.map(offer => {
-          const returnSeg = offer.itineraries[1]?.segments[0];
-          return returnSeg ? {
-            flightName: `${returnSeg.carrierCode} ${returnSeg.number}`,
-            departure: returnSeg.departure.at.slice(11, 16),
-            arrival: returnSeg.arrival.at.slice(11, 16),
-            price: parseInt(offer.price.total)
-          } : null;
-        }).filter(Boolean)
+    const returnFlights = tripType === 'round-trip'
+      ? removeExactDuplicates(
+          data.data.map(flight => {
+            const segment = flight.itineraries[1]?.segments[0];
+            if (!segment) return null;
+            return {
+              flightName: flight.validatingAirlineCodes[0] + ' ' + segment.number,
+              departure: segment.departure.at.slice(11, 16),
+              arrival: segment.arrival.at.slice(11, 16),
+              price: parseFloat(flight.price.total)
+            };
+          }).filter(f => f)
+        )
       : [];
 
     res.json({ outboundFlights, returnFlights });
 
-  } catch (err) {
-    console.error('❌ Error in /search:', err.message || err);
+  } catch (error) {
+    console.error('Error fetching flights:', error.message);
     res.status(500).json({ error: 'Failed to fetch flights' });
   }
 });
 
-// ----------------------
-// Start Server
-// ----------------------
 app.listen(PORT, () => {
-  console.log(`✅ SkyDeal backend running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
