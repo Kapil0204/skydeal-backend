@@ -6,89 +6,95 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
 
-// ----------------------
-// Utility: Remove Exact Duplicates
-// ----------------------
-function removeExactDuplicates(flights) {
-  const seen = new Set();
-  return flights.filter(flight => {
-    const key = `${flight.flightName}-${flight.departure}-${flight.arrival}-${flight.price}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// ----------------------
-// Real Flights via Amadeus
-// ----------------------
+// --------------------------
+// /search (Amadeus flights)
+// --------------------------
 app.post('/search', async (req, res) => {
-  const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
-
-  const amadeusUrl = 'https://test.api.amadeus.com/v2/shopping/flight-offers';
-
-  const params = {
-    originLocationCode: from,
-    destinationLocationCode: to,
+  const {
+    from,
+    to,
     departureDate,
-    adults: passengers,
-    travelClass,
-    currencyCode: 'INR',
-    nonStop: false,
-    max: 250
-  };
-
-  if (tripType === 'round-trip' && returnDate) {
-    params.returnDate = returnDate;
-  }
+    returnDate,
+    tripType,
+    passengers,
+    travelClass
+  } = req.body;
 
   try {
-    const response = await axios.get(amadeusUrl, {
-      params,
-      headers: {
-        Authorization: `Bearer ${process.env.AMADEUS_ACCESS_TOKEN}`
+    // Step 1: Get access token from Amadeus
+    const authResponse = await axios.post(
+      'https://test.api.amadeus.com/v1/security/oauth2/token',
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.AMADEUS_CLIENT_ID,
+        client_secret: process.env.AMADEUS_CLIENT_SECRET
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
       }
-    });
-
-    const data = response.data;
-
-    const outboundFlights = removeExactDuplicates(
-      data.data.map(flight => ({
-        flightName: flight.validatingAirlineCodes[0] + ' ' + flight.itineraries[0].segments[0].number,
-        departure: flight.itineraries[0].segments[0].departure.at.slice(11, 16),
-        arrival: flight.itineraries[0].segments[0].arrival.at.slice(11, 16),
-        price: parseFloat(flight.price.total)
-      }))
     );
 
-    const returnFlights = tripType === 'round-trip'
-      ? removeExactDuplicates(
-          data.data.map(flight => {
-            const segment = flight.itineraries[1]?.segments[0];
-            if (!segment) return null;
-            return {
-              flightName: flight.validatingAirlineCodes[0] + ' ' + segment.number,
-              departure: segment.departure.at.slice(11, 16),
-              arrival: segment.arrival.at.slice(11, 16),
-              price: parseFloat(flight.price.total)
-            };
-          }).filter(f => f)
-        )
-      : [];
+    console.log("✅ Auth success:", authResponse.status, authResponse.data);
+    const accessToken = authResponse.data.access_token;
 
-    res.json({ outboundFlights, returnFlights });
+    // Step 2: Call Amadeus flight offers API
+    const searchResponse = await axios.get(
+      'https://test.api.amadeus.com/v2/shopping/flight-offers',
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        },
+        params: {
+          originLocationCode: from,
+          destinationLocationCode: to,
+          departureDate,
+          returnDate: tripType === 'round-trip' ? returnDate : undefined,
+          adults: passengers,
+          travelClass,
+          currencyCode: 'INR',
+          max: 30
+        }
+      }
+    );
 
+    const flights = searchResponse.data.data;
+
+    // Simplify flight info
+    const simplifiedFlights = flights.map((flight) => {
+      const itinerary = flight.itineraries[0];
+      const segment = itinerary.segments[0];
+      return {
+        airline: segment.carrierCode,
+        flightNumber: segment.number,
+        departure: segment.departure.at,
+        arrival: segment.arrival.at,
+        price: flight.price.total
+      };
+    });
+
+    res.json({ flights: simplifiedFlights });
   } catch (error) {
-    console.error('Error fetching flights:', error.message);
+    console.error("❌ Failed to fetch flights");
+    if (error.response) {
+      console.error("Status:", error.response.status);
+      console.error("Data:", error.response.data);
+    } else {
+      console.error("Error:", error.message);
+    }
+    console.error("🔍 Env CLIENT_ID:", process.env.AMADEUS_CLIENT_ID);
+    console.error("🔍 Env CLIENT_SECRET:", process.env.AMADEUS_CLIENT_SECRET);
+
     res.status(500).json({ error: 'Failed to fetch flights' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🟢 SkyDeal backend running on port ${PORT}`);
 });
