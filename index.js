@@ -15,7 +15,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-
 // ----------------------
 // Test Route
 // ----------------------
@@ -23,9 +22,8 @@ app.get('/', (req, res) => {
   res.send('SkyDeal backend is running.');
 });
 
-
 // ----------------------
-// Simulated Flights Route (for testing)
+// Simulated Flights (for testing)
 // ----------------------
 app.post('/simulated-flights', (req, res) => {
   const { from, to, departureDate, returnDate, passengers, travelClass, paymentMethods, tripType } = req.body;
@@ -69,9 +67,8 @@ app.post('/simulated-flights', (req, res) => {
   res.json({ outboundFlights, returnFlights });
 });
 
-
 // ----------------------
-// Real Flights from Amadeus
+// Amadeus: Auth + Flight Search
 // ----------------------
 
 let amadeusAccessToken = null;
@@ -153,7 +150,6 @@ app.post('/search', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch flights' });
   }
 });
-
 
 // ----------------------
 // Start Server
