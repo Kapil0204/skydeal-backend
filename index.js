@@ -74,7 +74,6 @@ app.post('/search', async (req, res) => {
 
   // Skip flights where first carrier is Air India
   const firstSegment = itineraries[0]?.segments[0];
-  if (firstSegment?.carrierCode === 'AI') return;
 
   if (tripType === 'round-trip' && itineraries.length === 2) {
     outboundFlights.push(formatFlight(itineraries[0], price, flight));
