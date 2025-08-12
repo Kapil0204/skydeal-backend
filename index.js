@@ -15,8 +15,6 @@ app.use(express.json());
 // ----------------------
 // MongoDB (EC2) Connection
 // ----------------------
-// Example:
-// MONGODB_URI = mongodb://admin:SkyDealSecure123@13.233.155.88:27017/skydeal?authSource=admin
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'skydeal';
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || 'offers';
@@ -61,7 +59,7 @@ function formatFlight(itinerary, price) {
     airlineName: segment.carrierCode,
     departure: segment.departure.at.slice(11, 16),
     arrival: segment.arrival.at.slice(11, 16),
-    price: price.total, // string from Amadeus
+    price: price.total,
     stops: itinerary.segments.length - 1
   };
 }
@@ -73,7 +71,7 @@ function toNumber(val, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
-// ---------- Expiry handling (UPDATED) ----------
+// ---------- Expiry handling (robust) ----------
 function getEndDateValue(validityPeriod = {}) {
   return (
     validityPeriod.end ||
@@ -88,12 +86,11 @@ function getEndDateValue(validityPeriod = {}) {
 function isNotExpired(offer) {
   if (offer.isExpired === true) return false;
   const endRaw = getEndDateValue(offer?.validityPeriod || {});
-  if (!endRaw) return true; // fall back to isExpired flag only
+  if (!endRaw) return true;
   const end = new Date(endRaw);
   const today = new Date(new Date().toISOString().slice(0, 10));
   return end >= today;
 }
-// ---------------------------------------------
 
 // ---------- Fuzzy payment matching ----------
 const GENERIC_WORDS = new Set(['bank', 'card', 'cards', 'emi', 'and', '&']);
@@ -115,8 +112,7 @@ function extractBankAndType(s) {
   let type = null;
   for (const t of tokens) {
     if (TYPES.includes(t)) {
-      if (t === 'net' || t === 'banking') type = 'netbanking';
-      else type = t;
+      type = (t === 'net' || t === 'banking') ? 'netbanking' : t;
     }
   }
 
@@ -153,7 +149,6 @@ function matchesAnyPayment(offer, selectedPayments) {
 
   const parsedSelections = selectedPayments.map(extractBankAndType);
 
-  // Any selection matching any offer PM wins (must match bank and/or type)
   return parsedSelections.some(sel => {
     if (!sel.bank && !sel.type) return false;
     return offerPMs.some(pmStr => {
@@ -163,12 +158,11 @@ function matchesAnyPayment(offer, selectedPayments) {
     });
   });
 }
-// ---------------------------------------------
 
+// ---------- Offer rules ----------
 function applyOfferRules(baseFare, offer) {
   const hasCoupon = !!(offer?.couponCode && String(offer.couponCode).trim());
   if (!hasCoupon) return null;
-
   if (!isNotExpired(offer)) return null;
 
   const minTxn = toNumber(offer?.minTransactionValue, 0);
@@ -180,12 +174,10 @@ function applyOfferRules(baseFare, offer) {
       ? toNumber(offer.maxDiscountAmount, Infinity)
       : Infinity;
 
-  if (pct <= 0 && !isFinite(maxAmt)) return null; // nothing to apply per your rules
+  if (pct <= 0 && !isFinite(maxAmt)) return null;
 
   let discount = baseFare * (pct / 100);
-  if (isFinite(maxAmt) && discount > maxAmt) {
-    discount = maxAmt;
-  }
+  if (isFinite(maxAmt) && discount > maxAmt) discount = maxAmt;
 
   const finalPrice = Math.max(0, baseFare - discount);
 
@@ -218,7 +210,7 @@ function pickBestOfferForPortal(baseFare, offers) {
 }
 
 // ----------------------
-// Main Search
+// Search API
 // ----------------------
 app.post('/search', async (req, res) => {
   try {
@@ -266,7 +258,6 @@ app.post('/search', async (req, res) => {
       }
     });
 
-    // If Mongo not configured, return current structure (no portalPrices)
     if (!offersCollection) {
       console.warn('⚠️ No Mongo connection; returning flights without portalPrices.');
       return res.json({ outboundFlights, returnFlights });
@@ -274,16 +265,13 @@ app.post('/search', async (req, res) => {
 
     const PORTALS = ['MakeMyTrip', 'Goibibo', 'EaseMyTrip', 'Yatra', 'Cleartrip'];
 
-    // ---------- Mongo filter (UPDATED) ----------
     const todayISO = new Date().toISOString().slice(0, 10);
     const mongoFilter = {
       'sourceMetadata.sourcePortal': { $in: PORTALS },
       couponCode: { $exists: true, $ne: '' },
       isExpired: { $ne: true },
       $or: [
-        // No validity at all
         { validityPeriod: { $exists: false } },
-        // Validity exists but no end-ish keys at all
         {
           $and: [
             { 'validityPeriod.end': { $exists: false } },
@@ -293,7 +281,6 @@ app.post('/search', async (req, res) => {
             { 'validityPeriod.until': { $exists: false } }
           ]
         },
-        // Any known end-ish key is >= today
         { 'validityPeriod.end': { $gte: todayISO } },
         { 'validityPeriod.to': { $gte: todayISO } },
         { 'validityPeriod.endDate': { $gte: todayISO } },
@@ -301,7 +288,6 @@ app.post('/search', async (req, res) => {
         { 'validityPeriod.until': { $gte: todayISO } }
       ]
     };
-    // -------------------------------------------
 
     const allCandidateOffers = await offersCollection.find(mongoFilter).toArray();
     const filteredByPayment = allCandidateOffers.filter(o => matchesAnyPayment(o, paymentMethods));
@@ -361,28 +347,45 @@ app.post('/search', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch flights' });
   }
 });
-// --- helper to flatten/normalize paymentMethods from offers ---
-function flattenPaymentStrings(offer) {
-  const pm = offer?.paymentMethods || [];
-  const out = [];
-  for (const x of pm) {
-    if (typeof x === 'string') {
-      out.push(x.trim());
-    } else if (x && typeof x === 'object') {
-      const parts = [x.bank, x.type, x.cardNetwork].filter(Boolean).join(' ').trim();
-      if (parts) out.push(parts);
-    }
-  }
-  return out;
+
+// ----------------------
+// Payment methods endpoint (deduped / normalized)
+// ----------------------
+
+// normalize a payment-method label so near-duplicates collapse
+function canonicalizeLabel(label) {
+  if (!label) return '';
+  let s = String(label).toLowerCase();
+
+  s = s.replace(/\bcards\b/g, 'card');                 // "cards" -> "card"
+  s = s.replace(/\bcredit\s*cards?\b/g, 'credit card');
+  s = s.replace(/\bdebit\s*cards?\b/g, 'debit card');
+  s = s.replace(/\bnet\s*banking\b/g, 'netbanking');
+  s = s.replace(/\bltd\.?\b/g, '');                    // drop "ltd"
+  s = s.replace(/[^\p{L}\p{N}\s]/gu, ' ');             // strip punctuation
+  s = s.replace(/\s+/g, ' ').trim();                   // collapse spaces
+  s = s.replace(/\bemi\b/g, 'emi');                    // unify "EMI"
+  s = s.replace(/\s+emi\b/g, ' emi');
+
+  return s;
 }
 
-// GET /payment-methods -> all distinct active payment methods (coupon-only, not expired)
+// title-case-ish display, with common acronyms uppercased
+function displayLabelFromKey(key) {
+  const UPPER = new Set(['ICICI','HDFC','HSBC','SBI','RBL','IDBI','PNB','AU','BOB','BOBCARD','DBS','YES','J&K']);
+  return key.split(' ').map(w => {
+    const up = w.toUpperCase();
+    if (UPPER.has(up)) return up;
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).join(' ');
+}
+
 app.get('/payment-methods', async (req, res) => {
   try {
     if (!offersCollection) return res.json({ methods: [] });
 
     const PORTALS = ['MakeMyTrip','Goibibo','EaseMyTrip','Yatra','Cleartrip'];
-    const todayISO = new Date().toISOString().slice(0,10);
+    const todayISO = new Date().toISOString().slice(0, 10);
 
     const mongoFilter = {
       'sourceMetadata.sourcePortal': { $in: PORTALS },
@@ -409,22 +412,33 @@ app.get('/payment-methods', async (req, res) => {
 
     const offers = await offersCollection.find(mongoFilter, { projection: { paymentMethods: 1 } }).toArray();
 
-    // collect and de-dup (case-insensitive)
-    const set = new Map(); // key: lowercased label, val: original label (first seen)
+    const canonicalToDisplay = new Map(); // canonicalKey -> display label
     for (const off of offers) {
-      for (const label of flattenPaymentStrings(off)) {
-        const key = label.toLowerCase().replace(/\s+/g, ' ').trim();
-        if (key) set.set(key, label.trim());
+      const pm = off?.paymentMethods || [];
+      for (const x of pm) {
+        let raw =
+          typeof x === 'string'
+            ? x.trim()
+            : (x && typeof x === 'object')
+              ? [x.bank, x.type, x.cardNetwork].filter(Boolean).join(' ').trim()
+              : '';
+        if (!raw) continue;
+
+        const key = canonicalizeLabel(raw);
+        if (!key) continue;
+
+        if (!canonicalToDisplay.has(key)) {
+          canonicalToDisplay.set(key, displayLabelFromKey(key));
+        }
       }
     }
 
-    // Sort nicely and append "Other"
-    const methods = Array.from(set.values()).sort((a, b) => a.localeCompare(b));
+    const methods = Array.from(canonicalToDisplay.values()).sort((a, b) => a.localeCompare(b));
     methods.push('Other');
 
     res.json({ methods });
   } catch (e) {
-    console.error('❌ /payment-methods error:', e.message);
+    console.error('❌ /payment-methods error:', e);
     res.status(500).json({ methods: [] });
   }
 });
