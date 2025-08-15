@@ -12,9 +12,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ----------------------
-// MongoDB (EC2) Connection
-// ----------------------
+// ===== Mongo (EC2) =====
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'skydeal';
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION || 'offers';
@@ -34,9 +32,7 @@ async function initMongo() {
   console.log('✅ Connected to MongoDB for offers');
 }
 
-// ----------------------
-// Amadeus Auth
-// ----------------------
+// ===== Amadeus OAuth =====
 async function getAccessToken() {
   const url = 'https://test.api.amadeus.com/v1/security/oauth2/token';
   const body = new URLSearchParams({
@@ -44,14 +40,11 @@ async function getAccessToken() {
     client_id: process.env.AMADEUS_CLIENT_ID,
     client_secret: process.env.AMADEUS_CLIENT_SECRET
   });
-
   const response = await axios.post(url, body);
   return response.data.access_token;
 }
 
-// ----------------------
-// Helpers
-// ----------------------
+// ===== Helpers =====
 function formatFlight(itinerary, price) {
   const segment = itinerary.segments[0];
   return {
@@ -71,7 +64,6 @@ function toNumber(val, fallback = 0) {
   return isNaN(n) ? fallback : n;
 }
 
-// ---------- Expiry handling (robust) ----------
 function getEndDateValue(validityPeriod = {}) {
   return (
     validityPeriod.end ||
@@ -92,7 +84,7 @@ function isNotExpired(offer) {
   return end >= today;
 }
 
-// ---------- Fuzzy payment matching ----------
+// ===== Payment matching (credit matches EMI too) =====
 const GENERIC_WORDS = new Set(['bank', 'card', 'cards', 'emi', 'and', '&']);
 const TYPES = ['credit', 'debit', 'netbanking', 'net', 'banking', 'wallet', 'upi'];
 
@@ -104,28 +96,19 @@ function norm(s) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-
 function extractBankAndType(s) {
   const txt = norm(s);
   const tokens = txt.split(' ').filter(Boolean);
-
   let type = null;
   for (const t of tokens) {
-    if (TYPES.includes(t)) {
-      type = (t === 'net' || t === 'banking') ? 'netbanking' : t;
-    }
+    if (TYPES.includes(t)) type = (t === 'net' || t === 'banking') ? 'netbanking' : t;
   }
-
   let bank = null;
   for (const t of tokens) {
-    if (!GENERIC_WORDS.has(t) && !TYPES.includes(t)) {
-      bank = t;
-      break;
-    }
+    if (!GENERIC_WORDS.has(t) && !TYPES.includes(t)) { bank = t; break; }
   }
   return { bank, type, raw: txt };
 }
-
 function offerPaymentStrings(offer) {
   const pm = offer?.paymentMethods || [];
   if (Array.isArray(pm)) {
@@ -140,26 +123,29 @@ function offerPaymentStrings(offer) {
   }
   return [];
 }
-
 function matchesAnyPayment(offer, selectedPayments) {
   if (!Array.isArray(selectedPayments) || selectedPayments.length === 0) return false;
-
   const offerPMs = offerPaymentStrings(offer).map(norm);
   if (offerPMs.length === 0) return false;
-
   const parsedSelections = selectedPayments.map(extractBankAndType);
 
   return parsedSelections.some(sel => {
     if (!sel.bank && !sel.type) return false;
     return offerPMs.some(pmStr => {
       const hasBank = sel.bank ? pmStr.includes(sel.bank) : true;
-      const hasType = sel.type ? pmStr.includes(sel.type) : true;
+
+      // credit selection matches either "credit" OR "emi"
+      const pmHasCredit = pmStr.includes('credit') || pmStr.includes('emi');
+      const hasType = sel.type
+        ? (sel.type === 'credit' ? pmHasCredit : pmStr.includes(sel.type))
+        : true;
+
       return hasBank && hasType;
     });
   });
 }
 
-// ---------- Offer rules ----------
+// ===== Offer rules =====
 function applyOfferRules(baseFare, offer) {
   const hasCoupon = !!(offer?.couponCode && String(offer.couponCode).trim());
   if (!hasCoupon) return null;
@@ -196,7 +182,6 @@ function applyOfferRules(baseFare, offer) {
     }
   };
 }
-
 function pickBestOfferForPortal(baseFare, offers) {
   let best = null;
   for (const offer of offers) {
@@ -209,9 +194,7 @@ function pickBestOfferForPortal(baseFare, offers) {
   return best;
 }
 
-// ----------------------
-// Search API
-// ----------------------
+// ===== Search =====
 app.post('/search', async (req, res) => {
   try {
     const {
@@ -221,7 +204,6 @@ app.post('/search', async (req, res) => {
     } = req.body;
 
     const token = await getAccessToken();
-    console.log(`🔐 Token OK. Fetching flights ${from}→${to} on ${departureDate} (${tripType})`);
 
     const params = {
       originLocationCode: from,
@@ -241,8 +223,6 @@ app.post('/search', async (req, res) => {
     });
 
     const rawFlights = response.data.data || [];
-    console.log(`📦 Amadeus returned ${rawFlights.length} offers`);
-
     const outboundFlights = [];
     const returnFlights = [];
 
@@ -259,13 +239,12 @@ app.post('/search', async (req, res) => {
     });
 
     if (!offersCollection) {
-      console.warn('⚠️ No Mongo connection; returning flights without portalPrices.');
       return res.json({ outboundFlights, returnFlights });
     }
 
     const PORTALS = ['MakeMyTrip', 'Goibibo', 'EaseMyTrip', 'Yatra', 'Cleartrip'];
-
     const todayISO = new Date().toISOString().slice(0, 10);
+
     const mongoFilter = {
       'sourceMetadata.sourcePortal': { $in: PORTALS },
       couponCode: { $exists: true, $ne: '' },
@@ -291,7 +270,6 @@ app.post('/search', async (req, res) => {
 
     const allCandidateOffers = await offersCollection.find(mongoFilter).toArray();
     const filteredByPayment = allCandidateOffers.filter(o => matchesAnyPayment(o, paymentMethods));
-    console.log(`🔎 Offers from DB: ${allCandidateOffers.length}, matched by payment: ${filteredByPayment.length}`);
 
     const offersByPortal = PORTALS.reduce((acc, p) => (acc[p] = [], acc), {});
     for (const offer of filteredByPayment) {
@@ -335,12 +313,11 @@ app.post('/search', async (req, res) => {
     const outboundWithPrices = outboundFlights.map(attachPortalPrices);
     const returnWithPrices = returnFlights.map(attachPortalPrices);
 
-    console.log(`✈️ Outbound: ${outboundWithPrices.length} | Return: ${returnWithPrices.length}`);
     return res.json({ outboundFlights: outboundWithPrices, returnFlights: returnWithPrices });
 
   } catch (err) {
     if (err.response) {
-      console.error('❌ Amadeus fetch error:', JSON.stringify(err.response.data, null, 2));
+      console.error('❌ Amadeus error:', JSON.stringify(err.response.data, null, 2));
     } else {
       console.error('❌ Search error:', err.message);
     }
@@ -348,29 +325,27 @@ app.post('/search', async (req, res) => {
   }
 });
 
-// ----------------------
-// Payment methods endpoint (deduped / normalized)
-// ----------------------
-
-// normalize a payment-method label so near-duplicates collapse
+// ===== /payment-methods (normalize + collapse EMI into Credit Card) =====
 function canonicalizeLabel(label) {
   if (!label) return '';
   let s = String(label).toLowerCase();
 
-  s = s.replace(/\bcards\b/g, 'card');                 // "cards" -> "card"
+  // unify plurals / spacing
+  s = s.replace(/\bcards\b/g, 'card');
   s = s.replace(/\bcredit\s*cards?\b/g, 'credit card');
   s = s.replace(/\bdebit\s*cards?\b/g, 'debit card');
   s = s.replace(/\bnet\s*banking\b/g, 'netbanking');
-  s = s.replace(/\bltd\.?\b/g, '');                    // drop "ltd"
-  s = s.replace(/[^\p{L}\p{N}\s]/gu, ' ');             // strip punctuation
-  s = s.replace(/\s+/g, ' ').trim();                   // collapse spaces
-  s = s.replace(/\bemi\b/g, 'emi');                    // unify "EMI"
-  s = s.replace(/\s+emi\b/g, ' emi');
+
+  // strip punctuation & cleanup
+  s = s.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+
+  // collapse EMI -> credit card (so picker never shows "... EMI")
+  s = s.replace(/\bcredit card emi\b/g, 'credit card');
+  s = s.replace(/\bemi\b/g, '');
+  s = s.replace(/\s+/g, ' ').trim();
 
   return s;
 }
-
-// title-case-ish display, with common acronyms uppercased
 function displayLabelFromKey(key) {
   const UPPER = new Set(['ICICI','HDFC','HSBC','SBI','RBL','IDBI','PNB','AU','BOB','BOBCARD','DBS','YES','J&K']);
   return key.split(' ').map(w => {
@@ -412,7 +387,7 @@ app.get('/payment-methods', async (req, res) => {
 
     const offers = await offersCollection.find(mongoFilter, { projection: { paymentMethods: 1 } }).toArray();
 
-    const canonicalToDisplay = new Map(); // canonicalKey -> display label
+    const canonicalToDisplay = new Map();
     for (const off of offers) {
       const pm = off?.paymentMethods || [];
       for (const x of pm) {
@@ -443,12 +418,8 @@ app.get('/payment-methods', async (req, res) => {
   }
 });
 
-// ----------------------
+// ===== Start =====
 app.listen(PORT, async () => {
-  try {
-    await initMongo();
-  } catch (e) {
-    console.error('❌ Mongo init failed:', e.message);
-  }
+  try { await initMongo(); } catch (e) { console.error('❌ Mongo init failed:', e.message); }
   console.log(`🚀 Server running on port ${PORT}`);
 });
