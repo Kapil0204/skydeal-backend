@@ -1,425 +1,468 @@
-import express from 'express';
-import cors from 'cors';
-import axios from 'axios';
-import dotenv from 'dotenv';
-import { MongoClient } from 'mongodb';
-
-dotenv.config();
+// index.js  — SkyDeal backend (ESM)
+// --------------------------------------------------
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 app.use(express.json());
 
-// ===== Mongo (EC2) =====
+// -------------------- CONFIG -----------------------
+const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'skydeal';
-const MONGO_COLLECTION = process.env.MONGO_COLLECTION || 'offers';
+const MONGODB_DB  = process.env.MONGODB_DB || "skydeal";
 
+// OTA portals we price/compare
+const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
+
+// -------------------- MONGO ------------------------
 let mongoClient;
-let offersCollection;
-
+let db;
 async function initMongo() {
-  if (!MONGODB_URI) {
-    console.warn('⚠️ MONGODB_URI not set — offers will be skipped.');
-    return;
-  }
-  mongoClient = new MongoClient(MONGODB_URI, { ignoreUndefined: true });
-  await mongoClient.connect();
-  const db = mongoClient.db(MONGO_DB_NAME);
-  offersCollection = db.collection(MONGO_COLLECTION);
-  console.log('✅ Connected to MongoDB for offers');
-}
-
-// ===== Amadeus OAuth =====
-async function getAccessToken() {
-  const url = 'https://test.api.amadeus.com/v1/security/oauth2/token';
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: process.env.AMADEUS_CLIENT_ID,
-    client_secret: process.env.AMADEUS_CLIENT_SECRET
+  if (db) return db;
+  mongoClient = new MongoClient(MONGODB_URI, {
+    serverApi: ServerApiVersion.v1,
   });
-  const response = await axios.post(url, body);
-  return response.data.access_token;
+  await mongoClient.connect();
+  db = mongoClient.db(MONGODB_DB);
+  console.log("✅ Mongo connected:", MONGODB_DB);
+  return db;
 }
 
-// ===== Helpers =====
-function formatFlight(itinerary, price) {
-  const segment = itinerary.segments[0];
-  return {
-    flightNumber: `${segment.carrierCode} ${segment.number}`,
-    airlineName: segment.carrierCode,
-    departure: segment.departure.at.slice(11, 16),
-    arrival: segment.arrival.at.slice(11, 16),
-    price: price.total,
-    stops: itinerary.segments.length - 1
-  };
+// -------------------- HELPERS ----------------------
+
+// Coerce to price number
+function asMoney(x) {
+  if (x == null) return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
 }
 
-function toNumber(val, fallback = 0) {
-  if (val === undefined || val === null) return fallback;
-  if (typeof val === 'number') return val;
-  const n = parseFloat(String(val).replace(/[^\d.]/g, ''));
-  return isNaN(n) ? fallback : n;
+// Parse date-ish string to ISO yyyy-mm-dd (conservative)
+function toISODateStr(d) {
+  try {
+    if (!d) return null;
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt.toISOString().slice(0, 10);
+  } catch {
+    return null;
+  }
 }
 
-function getEndDateValue(validityPeriod = {}) {
-  return (
-    validityPeriod.end ||
-    validityPeriod.to ||
-    validityPeriod.endDate ||
-    validityPeriod.till ||
-    validityPeriod.until ||
-    null
+// Check if an offer is *active* for a given travel date
+function isOfferActiveForDate(offer, travelISO) {
+  // If offer explicitly expired, skip
+  if (offer.isExpired === true) return false;
+
+  // Accept many shapes of validity
+  const end =
+    offer?.validityPeriod?.end ??
+    offer?.validityPeriod?.to ??
+    offer?.validityPeriod?.endDate ??
+    offer?.validityPeriod?.till ??
+    offer?.validityPeriod?.until ??
+    null;
+
+  const endISO = toISODateStr(end);
+  if (!endISO) return true; // if no end date, assume active
+  return travelISO <= endISO;
+}
+
+// Normalize payment choice sent by frontend (array of strings)
+function normalizeUserPaymentChoices(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return arr
+    .map((s) => String(s || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// Does this offer’s paymentMethods match any selected payment choice?
+function offerMatchesPayment(offer, selected) {
+  if (!selected || selected.length === 0) return true; // no filter applied
+
+  // Payment may be string list OR structured objects
+  const list = Array.isArray(offer.paymentMethods)
+    ? offer.paymentMethods
+    : [];
+
+  const labels = list.map((pm) => {
+    if (typeof pm === "string") return pm.toLowerCase().trim();
+    if (pm && (pm.bank || pm.type || pm.cardNetwork)) {
+      return [pm.bank, pm.type, pm.cardNetwork]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .trim();
+    }
+    return "";
+  }).filter(Boolean);
+
+  // simple containment / partial match
+  return selected.some(sel =>
+    labels.some(l => l.includes(sel) || sel.includes(l))
   );
 }
 
-function isNotExpired(offer) {
-  if (offer.isExpired === true) return false;
-  const endRaw = getEndDateValue(offer?.validityPeriod || {});
-  if (!endRaw) return true;
-  const end = new Date(endRaw);
-  const today = new Date(new Date().toISOString().slice(0, 10));
-  return end >= today;
-}
+// ---- NEW: compute a neat label for the matched payment method
+function extractPaymentMethodLabel(offerDoc) {
+  if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
 
-// ===== Payment matching (credit matches EMI too) =====
-const GENERIC_WORDS = new Set(['bank', 'card', 'cards', 'emi', 'and', '&']);
-const TYPES = ['credit', 'debit', 'netbanking', 'net', 'banking', 'wallet', 'upi'];
-
-function norm(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/net\s+banking/g, 'netbanking')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-function extractBankAndType(s) {
-  const txt = norm(s);
-  const tokens = txt.split(' ').filter(Boolean);
-  let type = null;
-  for (const t of tokens) {
-    if (TYPES.includes(t)) type = (t === 'net' || t === 'banking') ? 'netbanking' : t;
-  }
-  let bank = null;
-  for (const t of tokens) {
-    if (!GENERIC_WORDS.has(t) && !TYPES.includes(t)) { bank = t; break; }
-  }
-  return { bank, type, raw: txt };
-}
-function offerPaymentStrings(offer) {
-  const pm = offer?.paymentMethods || [];
-  if (Array.isArray(pm)) {
-    return pm.map(x => {
-      if (typeof x === 'string') return x;
-      if (x && typeof x === 'object') {
-        const parts = [x.bank, x.type, x.cardNetwork].filter(Boolean);
-        return parts.length ? parts.join(' ') : JSON.stringify(x);
-      }
-      return String(x);
-    });
-  }
-  return [];
-}
-function matchesAnyPayment(offer, selectedPayments) {
-  if (!Array.isArray(selectedPayments) || selectedPayments.length === 0) return false;
-  const offerPMs = offerPaymentStrings(offer).map(norm);
-  if (offerPMs.length === 0) return false;
-  const parsedSelections = selectedPayments.map(extractBankAndType);
-
-  return parsedSelections.some(sel => {
-    if (!sel.bank && !sel.type) return false;
-    return offerPMs.some(pmStr => {
-      const hasBank = sel.bank ? pmStr.includes(sel.bank) : true;
-
-      // credit selection matches either "credit" OR "emi"
-      const pmHasCredit = pmStr.includes('credit') || pmStr.includes('emi');
-      const hasType = sel.type
-        ? (sel.type === 'credit' ? pmHasCredit : pmStr.includes(sel.type))
-        : true;
-
-      return hasBank && hasType;
-    });
-  });
-}
-
-// ===== Offer rules =====
-function applyOfferRules(baseFare, offer) {
-  const hasCoupon = !!(offer?.couponCode && String(offer.couponCode).trim());
-  if (!hasCoupon) return null;
-  if (!isNotExpired(offer)) return null;
-
-  const minTxn = toNumber(offer?.minTransactionValue, 0);
-  if (baseFare < minTxn) return null;
-
-  const pct = toNumber(offer?.discountPercent, 0);
-  const maxAmt =
-    offer?.maxDiscountAmount !== undefined && offer?.maxDiscountAmount !== null
-      ? toNumber(offer.maxDiscountAmount, Infinity)
-      : Infinity;
-
-  if (pct <= 0 && !isFinite(maxAmt)) return null;
-
-  let discount = baseFare * (pct / 100);
-  if (isFinite(maxAmt) && discount > maxAmt) discount = maxAmt;
-
-  const finalPrice = Math.max(0, baseFare - discount);
-
-  return {
-    discount,
-    finalPrice,
-    applied: {
-      couponCode: offer?.couponCode || null,
-      discountPercent: pct || null,
-      maxDiscountAmount: isFinite(maxAmt) ? maxAmt : null,
-      minTransactionValue: minTxn || null,
-      validityPeriod: offer?.validityPeriod || null,
-      rawDiscount: offer?.rawDiscount || null,
-      title: offer?.title || null,
-      offerId: String(offer?._id || '')
+  if (Array.isArray(offerDoc.paymentMethods) && offerDoc.paymentMethods.length) {
+    const first = offerDoc.paymentMethods[0];
+    if (typeof first === "string") return first.trim();
+    if (first && (first.bank || first.type || first.cardNetwork)) {
+      const parts = [first.bank, first.type, first.cardNetwork]
+        .filter(Boolean)
+        .map((s) => String(s).trim());
+      if (parts.length) return parts.join(" ");
     }
+  }
+
+  const text = `${offerDoc.title || ""} ${offerDoc.rawDiscount || ""}`;
+  if (/wallet/i.test(text)) return "Wallet";
+  if (/upi/i.test(text)) return "UPI";
+  if (/net\s*bank/i.test(text) || /netbank/i.test(text)) return "Netbanking";
+  if (/debit/i.test(text)) return "Debit Card";
+  if (/credit|emi/i.test(text)) return "Credit Card"; // treat EMI as Credit
+  return "—";
+}
+
+// Choose best applicable offer for a single price & portal
+function applyBestOfferForPortal({
+  basePrice,
+  portal,
+  offers,
+  travelISO,
+  selectedPayments,
+}) {
+  let best = {
+    finalPrice: basePrice,
+    discountApplied: 0,
+    appliedOffer: null,
   };
-}
-function pickBestOfferForPortal(baseFare, offers) {
-  let best = null;
+
   for (const offer of offers) {
-    const result = applyOfferRules(baseFare, offer);
-    if (!result) continue;
-    if (!best || result.finalPrice < best.finalPrice) {
-      best = { ...result, offer };
+    // must have coupon (per your rule) & be active & payment match
+    if (!offer.couponCode) continue;
+    if (!isOfferActiveForDate(offer, travelISO)) continue;
+    if (!offerMatchesPayment(offer, selectedPayments)) continue;
+
+    const minTxn = asMoney(offer.minTransactionValue) ?? 0;
+    if (basePrice < minTxn) continue;
+
+    const pct = offer.discountPercent != null ? Number(offer.discountPercent) : null;
+    const cap = asMoney(offer.maxDiscountAmount);
+
+    // percent mandatory per current rule
+    if (pct == null || !Number.isFinite(pct) || pct <= 0) continue;
+
+    let discount = Math.floor((basePrice * pct) / 100);
+    if (cap != null && cap > 0) discount = Math.min(discount, cap);
+    if (discount <= 0) continue;
+
+    const finalPrice = basePrice - discount;
+    if (finalPrice < best.finalPrice) {
+      best = {
+        finalPrice,
+        discountApplied: discount,
+        appliedOffer: {
+          portal: offer?.sourceMetadata?.sourcePortal || portal,
+          couponCode: offer.couponCode,
+          discountPercent: Number.isFinite(pct) ? pct : null,
+          maxDiscountAmount: cap ?? null,
+          minTransactionValue: minTxn || null,
+          validityPeriod: offer.validityPeriod || null,
+          rawDiscount: offer.rawDiscount || null,
+          title: offer.title || null,
+          offerId: String(offer._id),
+          // ---- NEW: attach a friendly label
+          paymentMethodLabel: extractPaymentMethodLabel(offer),
+        },
+      };
     }
   }
+
+  // Log match once per portal (compact)
+  if (best.appliedOffer) {
+    console.log(
+      `✅ Offer: portal=${portal} base=${basePrice} final=${best.finalPrice} code=${best.appliedOffer.couponCode} pm=${best.appliedOffer.paymentMethodLabel}`
+    );
+  } else {
+    console.log(`— No offer: portal=${portal} base=${basePrice}`);
+  }
+
   return best;
 }
 
-// ===== Search =====
-app.post('/search', async (req, res) => {
-  try {
-    const {
-      from, to, departureDate, returnDate,
-      passengers, travelClass, tripType,
-      paymentMethods = []
-    } = req.body;
+// -------------------- AMADEUS TOKEN ----------------
+let cachedToken = null;
+let tokenExpiry = 0;
 
-    const token = await getAccessToken();
+async function getAmadeusToken() {
+  const now = Date.now();
+  if (cachedToken && now < tokenExpiry - 30_000) return cachedToken;
 
-    const params = {
-      originLocationCode: from,
-      destinationLocationCode: to,
-      departureDate,
-      returnDate: tripType === 'round-trip' ? returnDate : undefined,
-      adults: passengers,
-      travelClass,
-      currencyCode: 'INR',
-      nonStop: false,
-      max: 100,
-    };
+  const res = await fetch("https://test.api.amadeus.com/v1/security/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: process.env.AMADEUS_API_KEY,
+      client_secret: process.env.AMADEUS_API_SECRET,
+    }),
+  });
 
-    const response = await axios.get('https://test.api.amadeus.com/v2/shopping/flight-offers', {
-      headers: { Authorization: `Bearer ${token}` },
-      params
-    });
-
-    const rawFlights = response.data.data || [];
-    const outboundFlights = [];
-    const returnFlights = [];
-
-    rawFlights.forEach(flight => {
-      const itineraries = flight.itineraries;
-      const price = flight.price;
-
-      if (tripType === 'round-trip' && itineraries.length === 2) {
-        outboundFlights.push(formatFlight(itineraries[0], price));
-        returnFlights.push(formatFlight(itineraries[1], price));
-      } else if (tripType === 'one-way' && itineraries.length === 1) {
-        outboundFlights.push(formatFlight(itineraries[0], price));
-      }
-    });
-
-    if (!offersCollection) {
-      return res.json({ outboundFlights, returnFlights });
-    }
-
-    const PORTALS = ['MakeMyTrip', 'Goibibo', 'EaseMyTrip', 'Yatra', 'Cleartrip'];
-    const todayISO = new Date().toISOString().slice(0, 10);
-
-    const mongoFilter = {
-      'sourceMetadata.sourcePortal': { $in: PORTALS },
-      couponCode: { $exists: true, $ne: '' },
-      isExpired: { $ne: true },
-      $or: [
-        { validityPeriod: { $exists: false } },
-        {
-          $and: [
-            { 'validityPeriod.end': { $exists: false } },
-            { 'validityPeriod.to': { $exists: false } },
-            { 'validityPeriod.endDate': { $exists: false } },
-            { 'validityPeriod.till': { $exists: false } },
-            { 'validityPeriod.until': { $exists: false } }
-          ]
-        },
-        { 'validityPeriod.end': { $gte: todayISO } },
-        { 'validityPeriod.to': { $gte: todayISO } },
-        { 'validityPeriod.endDate': { $gte: todayISO } },
-        { 'validityPeriod.till': { $gte: todayISO } },
-        { 'validityPeriod.until': { $gte: todayISO } }
-      ]
-    };
-
-    const allCandidateOffers = await offersCollection.find(mongoFilter).toArray();
-    const filteredByPayment = allCandidateOffers.filter(o => matchesAnyPayment(o, paymentMethods));
-
-    const offersByPortal = PORTALS.reduce((acc, p) => (acc[p] = [], acc), {});
-    for (const offer of filteredByPayment) {
-      const portal = offer?.sourceMetadata?.sourcePortal;
-      if (PORTALS.includes(portal)) offersByPortal[portal].push(offer);
-    }
-
-    function attachPortalPrices(flight) {
-      const baseFare = toNumber(flight.price, 0);
-      const portalPrices = PORTALS.map(portal => {
-        const best = pickBestOfferForPortal(baseFare, offersByPortal[portal]);
-        if (!best) {
-          return {
-            portal,
-            basePrice: baseFare,
-            finalPrice: baseFare,
-            appliedOffer: null
-          };
-        }
-        return {
-          portal,
-          basePrice: baseFare,
-          finalPrice: Math.round(best.finalPrice),
-          discountApplied: Math.round(best.discount),
-          appliedOffer: {
-            portal,
-            couponCode: best.applied.couponCode,
-            discountPercent: best.applied.discountPercent,
-            maxDiscountAmount: best.applied.maxDiscountAmount,
-            minTransactionValue: best.applied.minTransactionValue,
-            validityPeriod: best.applied.validityPeriod,
-            rawDiscount: best.applied.rawDiscount,
-            title: best.applied.title,
-            offerId: best.applied.offerId
-          }
-        };
-      });
-      return { ...flight, portalPrices };
-    }
-
-    const outboundWithPrices = outboundFlights.map(attachPortalPrices);
-    const returnWithPrices = returnFlights.map(attachPortalPrices);
-
-    return res.json({ outboundFlights: outboundWithPrices, returnFlights: returnWithPrices });
-
-  } catch (err) {
-    if (err.response) {
-      console.error('❌ Amadeus error:', JSON.stringify(err.response.data, null, 2));
-    } else {
-      console.error('❌ Search error:', err.message);
-    }
-    res.status(500).json({ error: 'Failed to fetch flights' });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Amadeus token error: ${res.status} ${t}`);
   }
+  const data = await res.json();
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in || 1800) * 1000;
+  return cachedToken;
+}
+
+// -------------------- FLIGHT SEARCH ----------------
+// Very small mapper to your UI shape
+function mapAmadeusToUI(itin, dictionaries) {
+  // Pull first segment for times, carrier
+  const seg = itin?.itineraries?.[0]?.segments?.[0];
+  const carrierCode = seg?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
+  const airlineName =
+    dictionaries?.carriers?.[carrierCode] || carrierCode;
+
+  const departure = seg?.departure?.at ? new Date(seg.departure.at).toTimeString().slice(0,5) : "--:--";
+  const arrival   = seg?.arrival?.at   ? new Date(seg.arrival.at).toTimeString().slice(0,5)   : "--:--";
+  const flightNum = `${carrierCode} ${seg?.number || ""}`.trim();
+  const stops = (itin?.itineraries?.[0]?.segments?.length || 1) - 1;
+
+  const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
+
+  return {
+    flightNumber: flightNum,          // (UI still shows, but we also pass airlineName)
+    airlineName,
+    departure,
+    arrival,
+    price: price.toFixed(2),
+    stops,
+  };
+}
+
+async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
+  const token = await getAmadeusToken();
+  const url = new URL("https://test.api.amadeus.com/v2/shopping/flight-offers");
+  url.search = new URLSearchParams({
+    originLocationCode: from,
+    destinationLocationCode: to,
+    departureDate: date,
+    adults: String(adults || 1),
+    travelClass: travelClass || "ECONOMY",
+    currencyCode: "INR",
+    max: "20",
+  });
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Amadeus search error: ${res.status} ${t}`);
+  }
+  const json = await res.json();
+  const dict = json?.dictionaries || {};
+  const flights = (json?.data || []).map((d) => mapAmadeusToUI(d, dict));
+  return flights;
+}
+
+// -------------------- OFFERS LOOKUP ----------------
+async function loadActiveCouponOffersByPortal({ travelISO }) {
+  const collection = (await initMongo()).collection("offers");
+
+  // Offers w/ coupon, not expired, not past validity; portal must be one we support
+  const today = travelISO;
+  const orValidity = [
+    { validityPeriod: { $exists: false } },
+    {
+      $and: [
+        { "validityPeriod.end": { $exists: false } },
+        { "validityPeriod.to": { $exists: false } },
+        { "validityPeriod.endDate": { $exists: false } },
+        { "validityPeriod.till": { $exists: false } },
+        { "validityPeriod.until": { $exists: false } },
+      ],
+    },
+    { "validityPeriod.end": { $gte: today } },
+    { "validityPeriod.to": { $gte: today } },
+    { "validityPeriod.endDate": { $gte: today } },
+    { "validityPeriod.till": { $gte: today } },
+    { "validityPeriod.until": { $gte: today } },
+  ];
+
+  const cursor = collection.find({
+    couponCode: { $exists: true, $ne: "" },
+    isExpired: { $ne: true },
+    "sourceMetadata.sourcePortal": { $in: PORTALS },
+    $or: orValidity,
+    // Optional: category filter if present in your data
+    // offerCategories: { $in: ["Flights", "Flight"] }
+  });
+
+  const byPortal = new Map(PORTALS.map((p) => [p, []]));
+  for await (const doc of cursor) {
+    const portal = doc?.sourceMetadata?.sourcePortal;
+    if (byPortal.has(portal)) {
+      byPortal.get(portal).push(doc);
+    }
+  }
+  return byPortal; // Map(portal -> offers[])
+}
+
+// -------------------- ROUTES -----------------------
+
+// NEW: very small health probe
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    now: new Date().toISOString(),
+  });
 });
 
-// ===== /payment-methods (normalize + collapse EMI into Credit Card) =====
-function canonicalizeLabel(label) {
-  if (!label) return '';
-  let s = String(label).toLowerCase();
-
-  // unify plurals / spacing
-  s = s.replace(/\bcards\b/g, 'card');
-  s = s.replace(/\bcredit\s*cards?\b/g, 'credit card');
-  s = s.replace(/\bdebit\s*cards?\b/g, 'debit card');
-  s = s.replace(/\bnet\s*banking\b/g, 'netbanking');
-
-  // strip punctuation & cleanup
-  s = s.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-
-  // collapse EMI -> credit card (so picker never shows "... EMI")
-  s = s.replace(/\bcredit card emi\b/g, 'credit card');
-  s = s.replace(/\bemi\b/g, '');
-  s = s.replace(/\s+/g, ' ').trim();
-
-  return s;
-}
-function displayLabelFromKey(key) {
-  const UPPER = new Set(['ICICI','HDFC','HSBC','SBI','RBL','IDBI','PNB','AU','BOB','BOBCARD','DBS','YES','J&K']);
-  return key.split(' ').map(w => {
-    const up = w.toUpperCase();
-    if (UPPER.has(up)) return up;
-    return w.charAt(0).toUpperCase() + w.slice(1);
-  }).join(' ');
-}
-
-app.get('/payment-methods', async (req, res) => {
+// Returns unique, cleaned payment method labels (for the dropdown)
+app.get("/payment-methods", async (req, res) => {
   try {
-    if (!offersCollection) return res.json({ methods: [] });
+    const collection = (await initMongo()).collection("offers");
 
-    const PORTALS = ['MakeMyTrip','Goibibo','EaseMyTrip','Yatra','Cleartrip'];
-    const todayISO = new Date().toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    const activeValidityOr = [
+      { validityPeriod: { $exists: false } },
+      {
+        $and: [
+          { "validityPeriod.end": { $exists: false } },
+          { "validityPeriod.to": { $exists: false } },
+          { "validityPeriod.endDate": { $exists: false } },
+          { "validityPeriod.till": { $exists: false } },
+          { "validityPeriod.until": { $exists: false } },
+        ],
+      },
+      { "validityPeriod.end": { $gte: today } },
+      { "validityPeriod.to": { $gte: today } },
+      { "validityPeriod.endDate": { $gte: today } },
+      { "validityPeriod.till": { $gte: today } },
+      { "validityPeriod.until": { $gte: today } },
+    ];
 
-    const mongoFilter = {
-      'sourceMetadata.sourcePortal': { $in: PORTALS },
-      couponCode: { $exists: true, $ne: '' },
+    const cursor = collection.find({
+      couponCode: { $exists: true, $ne: "" },
       isExpired: { $ne: true },
-      $or: [
-        { validityPeriod: { $exists: false } },
-        {
-          $and: [
-            { 'validityPeriod.end': { $exists: false } },
-            { 'validityPeriod.to': { $exists: false } },
-            { 'validityPeriod.endDate': { $exists: false } },
-            { 'validityPeriod.till': { $exists: false } },
-            { 'validityPeriod.until': { $exists: false } }
-          ]
-        },
-        { 'validityPeriod.end': { $gte: todayISO } },
-        { 'validityPeriod.to': { $gte: todayISO } },
-        { 'validityPeriod.endDate': { $gte: todayISO } },
-        { 'validityPeriod.till': { $gte: todayISO } },
-        { 'validityPeriod.until': { $gte: todayISO } }
-      ]
-    };
+      $or: activeValidityOr,
+      "sourceMetadata.sourcePortal": { $in: PORTALS },
+    }, { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } });
 
-    const offers = await offersCollection.find(mongoFilter, { projection: { paymentMethods: 1 } }).toArray();
-
-    const canonicalToDisplay = new Map();
-    for (const off of offers) {
-      const pm = off?.paymentMethods || [];
-      for (const x of pm) {
-        let raw =
-          typeof x === 'string'
-            ? x.trim()
-            : (x && typeof x === 'object')
-              ? [x.bank, x.type, x.cardNetwork].filter(Boolean).join(' ').trim()
-              : '';
-        if (!raw) continue;
-
-        const key = canonicalizeLabel(raw);
-        if (!key) continue;
-
-        if (!canonicalToDisplay.has(key)) {
-          canonicalToDisplay.set(key, displayLabelFromKey(key));
-        }
-      }
+    const set = new Map(); // canonical -> original
+    for await (const doc of cursor) {
+      const label = extractPaymentMethodLabel(doc);
+      const canon = label.toLowerCase().replace(/\s+/g, " ").trim();
+      if (canon && !set.has(canon)) set.set(canon, label);
     }
 
-    const methods = Array.from(canonicalToDisplay.values()).sort((a, b) => a.localeCompare(b));
-    methods.push('Other');
-
+    const methods = Array.from(set.values()).sort((a, b) => a.localeCompare(b));
+    methods.push("Other");
     res.json({ methods });
   } catch (e) {
-    console.error('❌ /payment-methods error:', e);
+    console.error("X /payment-methods error:", e.message);
     res.status(500).json({ methods: [] });
   }
 });
 
-// ===== Start =====
+// Main search endpoint used by the frontend
+app.post("/search", async (req, res) => {
+  try {
+    const {
+      from, to,
+      departureDate, returnDate,
+      passengers = 1,
+      travelClass = "ECONOMY",
+      tripType = "round-trip",
+      paymentMethods = [],
+    } = req.body || {};
+
+    const depISO = toISODateStr(departureDate);
+    const retISO = toISODateStr(returnDate);
+
+    if (!from || !to || !depISO) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
+
+    // Load coupon offers once (by portal)
+    const offersByPortal = await loadActiveCouponOffersByPortal({
+      travelISO: depISO,
+    });
+
+    // Fetch Amadeus outward flights
+    const outbound = await fetchAmadeusOffers({
+      from, to, date: depISO, adults: passengers, travelClass,
+    });
+
+    // If round-trip, also fetch return flights
+    let retFlights = [];
+    if (tripType === "round-trip" && retISO) {
+      retFlights = await fetchAmadeusOffers({
+        from: to, to: from, date: retISO, adults: passengers, travelClass,
+      });
+    }
+
+    // Build portalPrices for each flight
+    function decorateWithPortalPrices(flight, travelISO) {
+      const base = asMoney(flight.price) || 0;
+      const prices = PORTALS.map((portal) => {
+        const portalOffers = offersByPortal.get(portal) || [];
+        const best = applyBestOfferForPortal({
+          basePrice: base,
+          portal,
+          offers: portalOffers,
+          travelISO,
+          selectedPayments,
+        });
+        return {
+          portal,
+          basePrice: base,
+          finalPrice: best.finalPrice,
+          ...(best.discountApplied > 0 ? { discountApplied: best.discountApplied } : {}),
+          appliedOffer: best.appliedOffer, // may be null
+        };
+      });
+      return { ...flight, portalPrices: prices };
+    }
+
+    const outboundDecorated = outbound.map((f) =>
+      decorateWithPortalPrices(f, depISO)
+    );
+    const returnDecorated = retFlights.map((f) =>
+      decorateWithPortalPrices(f, retISO || depISO)
+    );
+
+    res.json({
+      outboundFlights: outboundDecorated,
+      returnFlights: returnDecorated,
+    });
+  } catch (err) {
+    console.error("X /search error:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// -------------------- START ------------------------
 app.listen(PORT, async () => {
-  try { await initMongo(); } catch (e) { console.error('❌ Mongo init failed:', e.message); }
-  console.log(`🚀 Server running on port ${PORT}`);
+  try {
+    await initMongo();
+  } catch (e) {
+    console.error("Mongo init failed:", e.message);
+  }
+  console.log(`🚀 SkyDeal backend listening on :${PORT}`);
 });
