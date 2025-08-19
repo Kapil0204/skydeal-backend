@@ -25,9 +25,7 @@ let mongoClient;
 let db;
 async function initMongo() {
   if (db) return db;
-  mongoClient = new MongoClient(MONGODB_URI, {
-    serverApi: ServerApiVersion.v1,
-  });
+  mongoClient = new MongoClient(MONGODB_URI, { serverApi: ServerApiVersion.v1 });
   await mongoClient.connect();
   db = mongoClient.db(MONGODB_DB);
   console.log("✅ Mongo connected:", MONGODB_DB);
@@ -43,11 +41,22 @@ function asMoney(x) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Parse date-ish string to ISO yyyy-mm-dd (conservative)
+// Parse many date formats to ISO yyyy-mm-dd (supports dd/mm/yyyy & yyyy-mm-dd)
 function toISODateStr(d) {
   try {
     if (!d) return null;
-    const dt = new Date(d);
+    const s = String(d).trim();
+
+    // dd/mm/yyyy
+    const m1 = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m1) { const [, dd, mm, yyyy] = m1; return `${yyyy}-${mm}-${dd}`; }
+
+    // yyyy-mm-dd
+    const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m2) return s;
+
+    // Fallback: Date parse
+    const dt = new Date(s);
     if (Number.isNaN(dt.getTime())) return null;
     return dt.toISOString().slice(0, 10);
   } catch {
@@ -57,10 +66,8 @@ function toISODateStr(d) {
 
 // Check if an offer is *active* for a given travel date
 function isOfferActiveForDate(offer, travelISO) {
-  // If offer explicitly expired, skip
   if (offer.isExpired === true) return false;
 
-  // Accept many shapes of validity
   const end =
     offer?.validityPeriod?.end ??
     offer?.validityPeriod?.to ??
@@ -77,41 +84,28 @@ function isOfferActiveForDate(offer, travelISO) {
 // Normalize payment choice sent by frontend (array of strings)
 function normalizeUserPaymentChoices(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
-  return arr
-    .map((s) => String(s || "").trim().toLowerCase())
-    .filter(Boolean);
+  return arr.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean);
 }
 
 // Does this offer’s paymentMethods match any selected payment choice?
 function offerMatchesPayment(offer, selected) {
-  if (!selected || selected.length === 0) return true; // no filter applied
+  if (!selected || selected.length === 0) return true;
 
-  // Payment may be string list OR structured objects
-  const list = Array.isArray(offer.paymentMethods)
-    ? offer.paymentMethods
-    : [];
-
+  const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
   const labels = list
     .map((pm) => {
       if (typeof pm === "string") return pm.toLowerCase().trim();
       if (pm && (pm.bank || pm.type || pm.cardNetwork)) {
-        return [pm.bank, pm.type, pm.cardNetwork]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .trim();
+        return [pm.bank, pm.type, pm.cardNetwork].filter(Boolean).join(" ").toLowerCase().trim();
       }
       return "";
     })
     .filter(Boolean);
 
-  // simple containment / partial match
-  return selected.some((sel) =>
-    labels.some((l) => l.includes(sel) || sel.includes(l))
-  );
+  return selected.some((sel) => labels.some((l) => l.includes(sel) || sel.includes(l)));
 }
 
-// ---- Friendlier label for a payment method (for UI)
+// Friendlier label for a payment method (for UI)
 function extractPaymentMethodLabel(offerDoc) {
   if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
 
@@ -119,9 +113,7 @@ function extractPaymentMethodLabel(offerDoc) {
     const first = offerDoc.paymentMethods[0];
     if (typeof first === "string") return first.trim();
     if (first && (first.bank || first.type || first.cardNetwork)) {
-      const parts = [first.bank, first.type, first.cardNetwork]
-        .filter(Boolean)
-        .map((s) => String(s).trim());
+      const parts = [first.bank, first.type, first.cardNetwork].filter(Boolean).map((s) => String(s).trim());
       if (parts.length) return parts.join(" ");
     }
   }
@@ -136,21 +128,10 @@ function extractPaymentMethodLabel(offerDoc) {
 }
 
 // Choose best applicable offer for a single price & portal
-function applyBestOfferForPortal({
-  basePrice,
-  portal,
-  offers,
-  travelISO,
-  selectedPayments,
-}) {
-  let best = {
-    finalPrice: basePrice,
-    discountApplied: 0,
-    appliedOffer: null,
-  };
+function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
+  let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
 
   for (const offer of offers) {
-    // must have coupon (per your rule) & be active & payment match
     if (!offer.couponCode) continue;
     if (!isOfferActiveForDate(offer, travelISO)) continue;
     if (!offerMatchesPayment(offer, selectedPayments)) continue;
@@ -161,7 +142,6 @@ function applyBestOfferForPortal({
     const pct = offer.discountPercent != null ? Number(offer.discountPercent) : null;
     const cap = asMoney(offer.maxDiscountAmount);
 
-    // percent mandatory per current rule
     if (pct == null || !Number.isFinite(pct) || pct <= 0) continue;
 
     let discount = Math.floor((basePrice * pct) / 100);
@@ -241,14 +221,7 @@ function mapAmadeusToUI(itin, dictionaries) {
 
   const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
 
-  return {
-    flightNumber: flightNum,
-    airlineName,
-    departure,
-    arrival,
-    price: price.toFixed(2),
-    stops,
-  };
+  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops };
 }
 
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
@@ -264,9 +237,7 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
     max: "20",
   });
 
-  const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`Amadeus search error: ${res.status} ${t}`);
@@ -320,14 +291,10 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
 
 // Health
 app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    uptime: process.uptime(),
-    now: new Date().toISOString(),
-  });
+  res.json({ ok: true, uptime: process.uptime(), now: new Date().toISOString() });
 });
 
-// === Dynamic Payment Type -> Banks (for the 2‑pane selector)
+// Dynamic Payment Type -> Banks (for the 2‑pane selector)
 app.get("/payment-options", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -427,16 +394,13 @@ app.get("/payment-options", async (req, res) => {
           null;
 
         if (type && bank) options[type].add(bank);
-        // If an offer is EMI, it can also be considered a credit-card bank
+        // Offers tagged EMI commonly imply Credit Card bank too
         if (type === "EMI" && bank) options["Credit Card"].add(bank);
       }
 
       // Fallback from title/rawDiscount
       if (!pm?.length) {
-        const banks = new Set([
-          ...banksFromText(doc.title),
-          ...banksFromText(doc.rawDiscount),
-        ]);
+        const banks = new Set([...banksFromText(doc.title), ...banksFromText(doc.rawDiscount)]);
         const text = `${doc.title || ""} ${doc.rawDiscount || ""}`;
 
         const hits = new Set();
@@ -500,7 +464,7 @@ app.get("/payment-methods", async (req, res) => {
       { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
     );
 
-    const set = new Map(); // canonical -> original
+    const set = new Map();
     for await (const doc of cursor) {
       const label = extractPaymentMethodLabel(doc);
       const canon = label.toLowerCase().replace(/\s+/g, " ").trim();
@@ -537,36 +501,20 @@ app.post("/search", async (req, res) => {
 
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
 
-    // Load coupon offers once (by portal)
-    const offersByPortal = await loadActiveCouponOffersByPortal({
-      travelISO: depISO,
-    });
+    const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // Fetch Amadeus outward flights
-    const outbound = await fetchAmadeusOffers({
-      from, to, date: depISO, adults: passengers, travelClass,
-    });
+    const outbound = await fetchAmadeusOffers({ from, to, date: depISO, adults: passengers, travelClass });
 
-    // If round-trip, also fetch return flights
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
-      retFlights = await fetchAmadeusOffers({
-        from: to, to: from, date: retISO, adults: passengers, travelClass,
-      });
+      retFlights = await fetchAmadeusOffers({ from: to, to: from, date: retISO, adults: passengers, travelClass });
     }
 
-    // Build portalPrices for each flight
     function decorateWithPortalPrices(flight, travelISO) {
       const base = asMoney(flight.price) || 0;
       const prices = PORTALS.map((portal) => {
         const portalOffers = offersByPortal.get(portal) || [];
-        const best = applyBestOfferForPortal({
-          basePrice: base,
-          portal,
-          offers: portalOffers,
-          travelISO,
-          selectedPayments,
-        });
+        const best = applyBestOfferForPortal({ basePrice: base, portal, offers: portalOffers, travelISO, selectedPayments });
         return {
           portal,
           basePrice: base,
@@ -578,17 +526,10 @@ app.post("/search", async (req, res) => {
       return { ...flight, portalPrices: prices };
     }
 
-    const outboundDecorated = outbound.map((f) =>
-      decorateWithPortalPrices(f, depISO)
-    );
-    const returnDecorated = retFlights.map((f) =>
-      decorateWithPortalPrices(f, retISO || depISO)
-    );
+    const outboundDecorated = outbound.map((f) => decorateWithPortalPrices(f, depISO));
+    const returnDecorated = retFlights.map((f) => decorateWithPortalPrices(f, retISO || depISO));
 
-    res.json({
-      outboundFlights: outboundDecorated,
-      returnFlights: returnDecorated,
-    });
+    res.json({ outboundFlights: outboundDecorated, returnFlights: returnDecorated });
   } catch (err) {
     console.error("X /search error:", err.message);
     res.status(500).json({ error: "Internal Server Error" });
@@ -597,10 +538,6 @@ app.post("/search", async (req, res) => {
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
-  try {
-    await initMongo();
-  } catch (e) {
-    console.error("Mongo init failed:", e.message);
-  }
+  try { await initMongo(); } catch (e) { console.error("Mongo init failed:", e.message); }
   console.log(`🚀 SkyDeal backend listening on :${PORT}`);
 });
