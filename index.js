@@ -17,6 +17,9 @@ const MONGODB_DB  = process.env.MONGODB_DB || "skydeal";
 // OTA portals we price/compare
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 
+// Canonical payment types (left pane in UI)
+const PAYMENT_TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
+
 // -------------------- MONGO ------------------------
 let mongoClient;
 let db;
@@ -88,21 +91,23 @@ function offerMatchesPayment(offer, selected) {
     ? offer.paymentMethods
     : [];
 
-  const labels = list.map((pm) => {
-    if (typeof pm === "string") return pm.toLowerCase().trim();
-    if (pm && (pm.bank || pm.type || pm.cardNetwork)) {
-      return [pm.bank, pm.type, pm.cardNetwork]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .trim();
-    }
-    return "";
-  }).filter(Boolean);
+  const labels = list
+    .map((pm) => {
+      if (typeof pm === "string") return pm.toLowerCase().trim();
+      if (pm && (pm.bank || pm.type || pm.cardNetwork)) {
+        return [pm.bank, pm.type, pm.cardNetwork]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
 
   // simple containment / partial match
-  return selected.some(sel =>
-    labels.some(l => l.includes(sel) || sel.includes(l))
+  return selected.some((sel) =>
+    labels.some((l) => l.includes(sel) || sel.includes(l))
   );
 }
 
@@ -331,7 +336,72 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Returns unique, cleaned payment method labels (for the dropdown)
+// === NEW === Dynamic Payment Type -> Banks (for the 2‑pane selector)
+app.get("/payment-options", async (req, res) => {
+  try {
+    const collection = (await initMongo()).collection("offers");
+    const today = new Date().toISOString().slice(0, 10);
+
+    const activeValidityOr = [
+      { validityPeriod: { $exists: false } },
+      {
+        $and: [
+          { "validityPeriod.end": { $exists: false } },
+          { "validityPeriod.to": { $exists: false } },
+          { "validityPeriod.endDate": { $exists: false } },
+          { "validityPeriod.till": { $exists: false } },
+          { "validityPeriod.until": { $exists: false } },
+        ],
+      },
+      { "validityPeriod.end": { $gte: today } },
+      { "validityPeriod.to": { $gte: today } },
+      { "validityPeriod.endDate": { $gte: today } },
+      { "validityPeriod.till": { $gte: today } },
+      { "validityPeriod.until": { $gte: today } },
+    ];
+
+    // NOTE: We do NOT require coupon here; presence of any active offer is enough
+    const pipeline = [
+      { $match: {
+          isExpired: { $ne: true },
+          "sourceMetadata.sourcePortal": { $in: PORTALS },
+          $or: activeValidityOr,
+        }
+      },
+      { $unwind: "$paymentMethods" },
+      { $match: {
+          "paymentMethods.type": { $in: PAYMENT_TYPES },
+          "paymentMethods.bank": { $nin: [null, "", undefined] }
+        }
+      },
+      { $group: {
+          _id: "$paymentMethods.type",
+          banks: { $addToSet: "$paymentMethods.bank" }
+        }
+      },
+      { $project: { _id: 0, type: "$_id", banks: 1 } }
+    ];
+
+    const rows = await collection.aggregate(pipeline).toArray();
+
+    // Fill all types, even if empty, and sort banks
+    const options = {};
+    PAYMENT_TYPES.forEach(t => { options[t] = []; });
+    rows.forEach(r => {
+      options[r.type] = (r.banks || [])
+        .map(String)
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+    });
+
+    res.json({ options });
+  } catch (e) {
+    console.error("X /payment-options error:", e.message);
+    res.status(500).json({ options: {} });
+  }
+});
+
+// Returns unique, cleaned payment method labels (legacy simple list)
 app.get("/payment-methods", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -355,12 +425,15 @@ app.get("/payment-methods", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    const cursor = collection.find({
-      couponCode: { $exists: true, $ne: "" },
-      isExpired: { $ne: true },
-      $or: activeValidityOr,
-      "sourceMetadata.sourcePortal": { $in: PORTALS },
-    }, { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } });
+    const cursor = collection.find(
+      {
+        couponCode: { $exists: true, $ne: "" },
+        isExpired: { $ne: true },
+        $or: activeValidityOr,
+        "sourceMetadata.sourcePortal": { $in: PORTALS },
+      },
+      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
+    );
 
     const set = new Map(); // canonical -> original
     for await (const doc of cursor) {
