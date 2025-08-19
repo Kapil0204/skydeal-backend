@@ -111,7 +111,7 @@ function offerMatchesPayment(offer, selected) {
   );
 }
 
-// ---- NEW: compute a neat label for the matched payment method
+// ---- Friendlier label for a payment method (for UI)
 function extractPaymentMethodLabel(offerDoc) {
   if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
 
@@ -183,14 +183,12 @@ function applyBestOfferForPortal({
           rawDiscount: offer.rawDiscount || null,
           title: offer.title || null,
           offerId: String(offer._id),
-          // ---- NEW: attach a friendly label
           paymentMethodLabel: extractPaymentMethodLabel(offer),
         },
       };
     }
   }
 
-  // Log match once per portal (compact)
   if (best.appliedOffer) {
     console.log(
       `✅ Offer: portal=${portal} base=${basePrice} final=${best.finalPrice} code=${best.appliedOffer.couponCode} pm=${best.appliedOffer.paymentMethodLabel}`
@@ -231,13 +229,10 @@ async function getAmadeusToken() {
 }
 
 // -------------------- FLIGHT SEARCH ----------------
-// Very small mapper to your UI shape
 function mapAmadeusToUI(itin, dictionaries) {
-  // Pull first segment for times, carrier
   const seg = itin?.itineraries?.[0]?.segments?.[0];
   const carrierCode = seg?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
-  const airlineName =
-    dictionaries?.carriers?.[carrierCode] || carrierCode;
+  const airlineName = dictionaries?.carriers?.[carrierCode] || carrierCode;
 
   const departure = seg?.departure?.at ? new Date(seg.departure.at).toTimeString().slice(0,5) : "--:--";
   const arrival   = seg?.arrival?.at   ? new Date(seg.arrival.at).toTimeString().slice(0,5)   : "--:--";
@@ -247,7 +242,7 @@ function mapAmadeusToUI(itin, dictionaries) {
   const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
 
   return {
-    flightNumber: flightNum,          // (UI still shows, but we also pass airlineName)
+    flightNumber: flightNum,
     airlineName,
     departure,
     arrival,
@@ -286,7 +281,6 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
 async function loadActiveCouponOffersByPortal({ travelISO }) {
   const collection = (await initMongo()).collection("offers");
 
-  // Offers w/ coupon, not expired, not past validity; portal must be one we support
   const today = travelISO;
   const orValidity = [
     { validityPeriod: { $exists: false } },
@@ -311,23 +305,20 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
     isExpired: { $ne: true },
     "sourceMetadata.sourcePortal": { $in: PORTALS },
     $or: orValidity,
-    // Optional: category filter if present in your data
-    // offerCategories: { $in: ["Flights", "Flight"] }
+    // offerCategories: { $in: ["Flights", "Flight"] } // optional
   });
 
   const byPortal = new Map(PORTALS.map((p) => [p, []]));
   for await (const doc of cursor) {
     const portal = doc?.sourceMetadata?.sourcePortal;
-    if (byPortal.has(portal)) {
-      byPortal.get(portal).push(doc);
-    }
+    if (byPortal.has(portal)) byPortal.get(portal).push(doc);
   }
   return byPortal; // Map(portal -> offers[])
 }
 
 // -------------------- ROUTES -----------------------
 
-// NEW: very small health probe
+// Health
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -336,7 +327,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-// === NEW === Dynamic Payment Type -> Banks (for the 2‑pane selector)
+// === Dynamic Payment Type -> Banks (for the 2‑pane selector)
 app.get("/payment-options", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -360,43 +351,117 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    // NOTE: We do NOT require coupon here; presence of any active offer is enough
-    const pipeline = [
-      { $match: {
-          isExpired: { $ne: true },
-          "sourceMetadata.sourcePortal": { $in: PORTALS },
-          $or: activeValidityOr,
-        }
+    const cursor = collection.find(
+      {
+        isExpired: { $ne: true },
+        "sourceMetadata.sourcePortal": { $in: PORTALS },
+        $or: activeValidityOr,
       },
-      { $unwind: "$paymentMethods" },
-      { $match: {
-          "paymentMethods.type": { $in: PAYMENT_TYPES },
-          "paymentMethods.bank": { $nin: [null, "", undefined] }
-        }
-      },
-      { $group: {
-          _id: "$paymentMethods.type",
-          banks: { $addToSet: "$paymentMethods.bank" }
-        }
-      },
-      { $project: { _id: 0, type: "$_id", banks: 1 } }
+      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
+    );
+
+    const TYPES = PAYMENT_TYPES;
+    const KNOWN_BANKS = [
+      "ICICI Bank","HDFC Bank","Axis Bank","State Bank of India","SBI","Kotak",
+      "YES Bank","IDFC First Bank","IndusInd Bank","Bank of Baroda","RBL Bank",
+      "HSBC","Standard Chartered","AU Small Finance Bank","Federal Bank","IDBI Bank"
     ];
 
-    const rows = await collection.aggregate(pipeline).toArray();
+    const norm = (s) => String(s || "").trim();
+    const normLower = (s) => norm(s).toLowerCase();
 
-    // Fill all types, even if empty, and sort banks
-    const options = {};
-    PAYMENT_TYPES.forEach(t => { options[t] = []; });
-    rows.forEach(r => {
-      options[r.type] = (r.banks || [])
-        .map(String)
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b));
-    });
+    function normalizeType(t) {
+      const x = normLower(t);
+      if (!x) return null;
+      if (/(^|[^a-z])(cc|credit)([^a-z]|$)/i.test(t) || /credit\s*card/i.test(t)) return "Credit Card";
+      if (/debit/i.test(t)) return "Debit Card";
+      if (/\bemi\b/i.test(t)) return "EMI";
+      if (/net\s*bank/i.test(t) || /netbank/i.test(t)) return "NetBanking";
+      if (/wallet/i.test(t)) return "Wallet";
+      if (/\bupi\b/i.test(t)) return "UPI";
+      return null;
+    }
 
-    res.json({ options });
+    function banksFromText(text) {
+      const res = new Set();
+      const t = norm(text);
+      if (!t) return res;
+      KNOWN_BANKS.forEach((b) => {
+        const rx = new RegExp(`\\b${b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+        if (rx.test(t)) res.add(b);
+      });
+      if (res.has("SBI") && !res.has("State Bank of India")) {
+        res.delete("SBI");
+        res.add("State Bank of India");
+      }
+      return res;
+    }
+
+    const options = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
+
+    for await (const doc of cursor) {
+      const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
+
+      // Structured entries
+      for (const entry of pm) {
+        if (typeof entry === "string") {
+          const bankHit = [...banksFromText(entry)];
+          const typeHit = normalizeType(entry);
+          if (typeHit && bankHit.length) bankHit.forEach((b) => options[typeHit].add(b));
+          continue;
+        }
+
+        const bank =
+          norm(entry.bank) ||
+          norm(entry.cardBank) ||
+          norm(entry.issuer) ||
+          norm(entry.cardIssuer) ||
+          norm(entry.provider) ||
+          "";
+
+        const type =
+          normalizeType(entry.type) ||
+          normalizeType(entry.method) ||
+          normalizeType(entry.category) ||
+          normalizeType(entry.mode) ||
+          null;
+
+        if (type && bank) options[type].add(bank);
+        // If an offer is EMI, it can also be considered a credit-card bank
+        if (type === "EMI" && bank) options["Credit Card"].add(bank);
+      }
+
+      // Fallback from title/rawDiscount
+      if (!pm?.length) {
+        const banks = new Set([
+          ...banksFromText(doc.title),
+          ...banksFromText(doc.rawDiscount),
+        ]);
+        const text = `${doc.title || ""} ${doc.rawDiscount || ""}`;
+
+        const hits = new Set();
+        const rxMap = {
+          "Credit Card": /(credit|cc)/i,
+          "Debit Card": /debit/i,
+          "EMI": /\bemi\b/i,
+          "NetBanking": /net\s*bank|netbank/i,
+          "Wallet": /wallet/i,
+          "UPI": /\bupi\b/i,
+        };
+        Object.entries(rxMap).forEach(([k, rx]) => { if (rx.test(text)) hits.add(k); });
+        if (hits.has("EMI")) hits.add("Credit Card");
+
+        if (banks.size && hits.size) {
+          for (const t of hits) banks.forEach((b) => options[t].add(b));
+        }
+      }
+    }
+
+    const out = {};
+    TYPES.forEach((t) => { out[t] = Array.from(options[t]).sort((a,b)=>a.localeCompare(b)); });
+    res.json({ options: out });
   } catch (e) {
-    console.error("X /payment-options error:", e.message);
+    console.error("X /payment-options error:", e);
     res.status(500).json({ options: {} });
   }
 });
