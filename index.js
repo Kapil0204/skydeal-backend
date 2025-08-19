@@ -6,7 +6,27 @@ import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
-app.use(cors());
+
+// ---------- CORS (explicit allowlist + preflight) ----------
+const ALLOWED_ORIGINS = [
+  "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
+  "https://skydeal-frontend.vercel.app",
+];
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);             // allow curl/postman
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
+    maxAge: 86400,
+  })
+);
+app.options("*", cors()); // preflight
+
 app.use(express.json());
 
 // -------------------- CONFIG -----------------------
@@ -276,7 +296,6 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
     isExpired: { $ne: true },
     "sourceMetadata.sourcePortal": { $in: PORTALS },
     $or: orValidity,
-    // offerCategories: { $in: ["Flights", "Flight"] } // optional
   });
 
   const byPortal = new Map(PORTALS.map((p) => [p, []]));
