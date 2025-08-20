@@ -335,8 +335,9 @@ app.get("/health", (req, res) => {
 app.get("/payment-options", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
-    const today = new Date().toISOString().slice(0, 10);
 
+    // consider offers that are not explicitly expired (no portal restriction here)
+    const today = new Date().toISOString().slice(0, 10);
     const activeValidityOr = [
       { validityPeriod: { $exists: false } },
       {
@@ -355,106 +356,98 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    // 🔧 keep the same identifier (cur) for both declaration and iteration
-    const query = {
-  isExpired: { $ne: true },
-  $or: activeValidityOr,
-};
-const proj  = { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } };
-const cur   = collection.find(query, proj);
-
-
-    const TYPES = PAYMENT_TYPES;
-    const KNOWN_BANKS = [
-      "ICICI Bank","HDFC Bank","Axis Bank","State Bank of India","SBI","Kotak",
-      "YES Bank","IDFC First Bank","IndusInd Bank","Bank of Baroda","RBL Bank",
-      "HSBC","Standard Chartered","AU Small Finance Bank","Federal Bank","IDBI Bank",
-      "Bajaj Finserv","BOBCARD LTD"
+    // Unwind paymentMethods and normalize type/bank inside the pipeline
+    const pipeline = [
+      { $match: { isExpired: { $ne: true }, $or: activeValidityOr } },
+      {
+        $project: {
+          pm: {
+            $cond: [
+              { $isArray: "$paymentMethods" },
+              "$paymentMethods",
+              []
+            ]
+          }
+        }
+      },
+      { $unwind: "$pm" },
+      {
+        $addFields: {
+          _rawType: {
+            $toLower: {
+              $ifNull: [
+                { $ifNull: ["$pm.type", "$pm.method"] },
+                ""
+              ]
+            }
+          },
+          _bankRaw: {
+            $ifNull: [
+              "$pm.bank",
+              {
+                $ifNull: [
+                  "$pm.cardBank",
+                  {
+                    $ifNull: [
+                      "$pm.issuer",
+                      {
+                        $ifNull: ["$pm.cardIssuer", { $ifNull: ["$pm.provider", ""] }]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        $addFields: {
+          type: {
+            $switch: {
+              branches: [
+                { case: { $regexMatch: { input: "$_rawType", regex: /credit|cc/ } }, then: "Credit Card" },
+                { case: { $regexMatch: { input: "$_rawType", regex: /debit/ } }, then: "Debit Card" },
+                { case: { $regexMatch: { input: "$_rawType", regex: /\bemi\b/ } }, then: "EMI" },
+                { case: { $regexMatch: { input: "$_rawType", regex: /net\s*bank|netbank/ } }, then: "NetBanking" },
+                { case: { $regexMatch: { input: "$_rawType", regex: /wallet/ } }, then: "Wallet" },
+                { case: { $regexMatch: { input: "$_rawType", regex: /\bupi\b/ } }, then: "UPI" }
+              ],
+              default: null
+            }
+          },
+          bank: {
+            $trim: { input: { $toString: { $ifNull: ["$_bankRaw", ""] } } }
+          }
+        }
+      },
+      { $match: { type: { $in: ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"] }, bank: { $ne: "" } } },
+      { $group: { _id: "$type", banks: { $addToSet: "$bank" } } }
     ];
 
-    const norm = (s) => String(s || "").trim();
-    const normLower = (s) => norm(s).toLowerCase();
-    const normalizeType = (t) => {
-      const x = normLower(t);
-      if (!x) return null;
-      if (/(^|[^a-z])(cc|credit)([^a-z]|$)/i.test(t) || /credit\s*card/i.test(t)) return "Credit Card";
-      if (/debit/i.test(t)) return "Debit Card";
-      if (/\bemi\b/i.test(t)) return "EMI";
-      if (/net\s*bank/i.test(t) || /netbank/i.test(t)) return "NetBanking";
-      if (/wallet/i.test(t)) return "Wallet";
-      if (/\bupi\b/i.test(t)) return "UPI";
-      return null;
-    };
-    function banksFromText(text) {
-      const res = new Set();
-      const t = norm(text);
-      if (!t) return res;
-      KNOWN_BANKS.forEach((b) => {
-        const rx = new RegExp(`\\b${b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-        if (rx.test(t)) res.add(b);
-      });
-      if (res.has("SBI") && !res.has("State Bank of India")) {
-        res.delete("SBI");
-        res.add("State Bank of India");
-      }
-      return res;
-    }
+    const rows = await collection.aggregate(pipeline).toArray();
 
-    const options = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
+    // Build the response shape your frontend expects
+    const TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
+    const options = Object.fromEntries(TYPES.map(t => [t, []]));
 
-    // ✅ iterate the same variable: cur
-    for await (const doc of cur) {
-      const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
-
-      for (const entry of pm) {
-        if (typeof entry === "string") {
-          const bankHit = [...banksFromText(entry)];
-          const typeHit = normalizeType(entry);
-          if (typeHit && bankHit.length) bankHit.forEach((b) => options[typeHit].add(b));
-          continue;
-        }
-        const bank =
-          norm(entry.bank) ||
-          norm(entry.cardBank) ||
-          norm(entry.issuer) ||
-          norm(entry.cardIssuer) ||
-          norm(entry.provider) || "";
-        const type =
-          normalizeType(entry.type) ||
-          normalizeType(entry.method) ||
-          normalizeType(entry.category) ||
-          normalizeType(entry.mode) || null;
-
-        if (type && bank) options[type].add(bank);
-        if (type === "EMI" && bank) options["Credit Card"].add(bank);
-      }
-
-      if (!pm?.length) {
-        const banks = new Set([...banksFromText(doc.title), ...banksFromText(doc.rawDiscount)]);
-        const text = `${doc.title || ""} ${doc.rawDiscount || ""}`;
-        const hits = new Set();
-        const rxMap = {
-          "Credit Card": /(credit|cc)/i,
-          "Debit Card": /debit/i,
-          "EMI": /\bemi\b/i,
-          "NetBanking": /net\s*bank|netbank/i,
-          "Wallet": /wallet/i,
-          "UPI": /\bupi\b/i,
-        };
-        Object.entries(rxMap).forEach(([k, rx]) => { if (rx.test(text)) hits.add(k); });
-        if (hits.has("EMI")) hits.add("Credit Card");
-        if (banks.size && hits.size) for (const t of hits) banks.forEach((b) => options[t].add(b));
+    for (const r of rows) {
+      const list = Array.isArray(r.banks) ? r.banks.slice().sort((a, b) => a.localeCompare(b)) : [];
+      options[r._id] = list;
+      // Many EMI offers are card-based; mirror EMI banks to Credit Card for discoverability
+      if (r._id === "EMI") {
+        const merged = new Set([...(options["Credit Card"] || []), ...list]);
+        options["Credit Card"] = Array.from(merged).sort((a, b) => a.localeCompare(b));
       }
     }
 
-    const out = {};
-    TYPES.forEach((t) => { out[t] = Array.from(options[t]).sort((a,b)=>a.localeCompare(b)); });
-    res.json({ options: out });
+    return res.json({ options });
   } catch (e) {
-    console.error("X /payment-options error:", e);
-    res.status(500).json({ options: {} });
+    console.error("X /payment-options error (agg):", e);
+    return res.status(500).json({ options: {} });
   }
 });
+
 
 app.get("/payment-methods", async (req, res) => {
   try {
