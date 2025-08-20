@@ -11,13 +11,11 @@ const app = express();
 const ALLOWED_ORIGINS = [
   "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
   "https://skydeal-frontend.vercel.app",
-  // Add other preview domains here if you use them:
-  // "https://<your-other-vercel-preview>.vercel.app",
 ];
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true);             // allow curl/postman
+      if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(null, false);
     },
@@ -27,7 +25,7 @@ app.use(
     maxAge: 86400,
   })
 );
-app.options("*", cors()); // preflight
+app.options("*", cors());
 
 app.use(express.json());
 
@@ -104,6 +102,55 @@ function offerMatchesPayment(offer, selected) {
     .filter(Boolean);
   return selected.some((sel) => labels.some((l) => l.includes(sel) || sel.includes(l)));
 }
+
+// --------- NEW: build human-friendly payment labels ----------
+const DISPLAY = {
+  "credit card": "Credit Card",
+  "debit card": "Debit Card",
+  "emi": "Credit Card EMI",
+  "netbanking": "NetBanking",
+  "wallet": "Wallet",
+  "upi": "UPI",
+};
+function titleCase(s) {
+  return s.replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+function looksComplete(bank) {
+  return /(card|emi|net ?bank|wallet|upi)/i.test(bank);
+}
+function makePaymentLabel(bank, type) {
+  if (/^(all|any)$/i.test(bank)) return DISPLAY[type.toLowerCase()] || type;
+  if (looksComplete(bank)) return titleCase(bank);
+  return `${titleCase(bank)} ${DISPLAY[type.toLowerCase()] || type}`;
+}
+
+function extractPaymentMethodLabel(offerDoc) {
+  if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
+  if (Array.isArray(offerDoc.paymentMethods) && offerDoc.paymentMethods.length) {
+    const first = offerDoc.paymentMethods[0];
+    if (typeof first === "string") return first.trim();
+    if (first && (first.bank || first.type || first.cardNetwork)) {
+      const bank = first.bank || "";
+      const type = first.type || "";
+      return makePaymentLabel(bank, type);
+    }
+  }
+  const text = `${offerDoc.title || ""} ${offerDoc.rawDiscount || ""}`;
+  if (/wallet/i.test(text)) return "Wallet";
+  if (/upi/i.test(text)) return "UPI";
+  if (/net\s*bank/i.test(text) || /netbank/i.test(text)) return "NetBanking";
+  if (/debit/i.test(text)) return "Debit Card";
+  if (/credit|emi/i.test(text)) return "Credit Card";
+  return "—";
+}
+
+// ---------------------------------------------------
+// (rest of your file continues UNCHANGED)
+// ---------------------------------------------------
+
 
 function extractPaymentMethodLabel(offerDoc) {
   if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
