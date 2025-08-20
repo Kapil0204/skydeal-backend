@@ -357,12 +357,12 @@ app.get("/payment-options", async (req, res) => {
 
     // 🔧 keep the same identifier (cur) for both declaration and iteration
     const query = {
-      isExpired: { $ne: true },
-      "sourceMetadata.sourcePortal": { $in: PORTALS },
-      $or: activeValidityOr,
-    };
-    const proj  = { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } };
-    const cur   = collection.find(query, proj);
+  isExpired: { $ne: true },
+  $or: activeValidityOr,
+};
+const proj  = { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } };
+const cur   = collection.find(query, proj);
+
 
     const TYPES = PAYMENT_TYPES;
     const KNOWN_BANKS = [
