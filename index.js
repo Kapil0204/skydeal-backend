@@ -331,6 +331,16 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, uptime: process.uptime(), now: new Date().toISOString() });
 });
 
+// 🔍 Debug EMI route (temporary)
+app.get("/debug-emi", async (req, res) => {
+  const collection = (await initMongo()).collection("offers");
+  const docs = await collection.find(
+    { "paymentMethods.type": /emi/i },
+    { projection: { paymentMethods: 1, title: 1 } }
+  ).limit(20).toArray();
+  res.json(docs);
+});
+
 // -------------------- PAYMENT OPTIONS -----------------------
 app.get("/payment-options", async (req, res) => {
   try {
