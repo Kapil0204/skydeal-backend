@@ -331,6 +331,7 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, uptime: process.uptime(), now: new Date().toISOString() });
 });
 
+// -------------------- PAYMENT OPTIONS -----------------------
 app.get("/payment-options", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -354,13 +355,21 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-
+    // 🔧 keep the same identifier (cur) for both declaration and iteration
+    const query = {
+      isExpired: { $ne: true },
+      "sourceMetadata.sourcePortal": { $in: PORTALS },
+      $or: activeValidityOr,
+    };
+    const proj  = { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } };
+    const cur   = collection.find(query, proj);
 
     const TYPES = PAYMENT_TYPES;
     const KNOWN_BANKS = [
       "ICICI Bank","HDFC Bank","Axis Bank","State Bank of India","SBI","Kotak",
       "YES Bank","IDFC First Bank","IndusInd Bank","Bank of Baroda","RBL Bank",
-      "HSBC","Standard Chartered","AU Small Finance Bank","Federal Bank","IDBI Bank"
+      "HSBC","Standard Chartered","AU Small Finance Bank","Federal Bank","IDBI Bank",
+      "Bajaj Finserv","BOBCARD LTD"
     ];
 
     const norm = (s) => String(s || "").trim();
@@ -392,7 +401,9 @@ app.get("/payment-options", async (req, res) => {
     }
 
     const options = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
-    for await (const doc of cursor) {
+
+    // ✅ iterate the same variable: cur
+    for await (const doc of cur) {
       const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
 
       for (const entry of pm) {
@@ -413,6 +424,7 @@ app.get("/payment-options", async (req, res) => {
           normalizeType(entry.method) ||
           normalizeType(entry.category) ||
           normalizeType(entry.mode) || null;
+
         if (type && bank) options[type].add(bank);
         if (type === "EMI" && bank) options["Credit Card"].add(bank);
       }
