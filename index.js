@@ -371,68 +371,49 @@ app.get("/payment-options", async (req, res) => {
       { $match: { isExpired: { $ne: true }, $or: activeValidityOr } },
       {
         $project: {
-          pm: {
-            $cond: [
-              { $isArray: "$paymentMethods" },
-              "$paymentMethods",
-              []
-            ]
-          }
+          pm: { $cond: [{ $isArray: "$paymentMethods" }, "$paymentMethods", []] }
         }
       },
       { $unwind: "$pm" },
+      // --- compute raw strings ---
       {
         $addFields: {
           _rawType: {
             $toLower: {
-              $ifNull: [
-                { $ifNull: ["$pm.type", "$pm.method"] },
-                ""
-              ]
+              $ifNull: [{ $ifNull: ["$pm.type", "$pm.method"] }, ""]
             }
           },
           _bankRaw: {
             $ifNull: [
               "$pm.bank",
-              {
-                $ifNull: [
-                  "$pm.cardBank",
-                  {
-                    $ifNull: [
-                      "$pm.issuer",
-                      {
-                        $ifNull: ["$pm.cardIssuer", { $ifNull: ["$pm.provider", ""] }]
-                      }
-                    ]
-                  }
-                ]
-              }
+              { $ifNull: ["$pm.cardBank",
+                { $ifNull: ["$pm.issuer",
+                  { $ifNull: ["$pm.cardIssuer", { $ifNull: ["$pm.provider", ""] }] }
+                ] }
+              ] }
             ]
           }
         }
       },
+      // --- map to one-or-more logical types (handles "Credit Card EMI") ---
       {
         $addFields: {
-          type: {
-            $switch: {
-              branches: [
-                { case: { $regexMatch: { input: "$_rawType", regex: /credit|cc/ } }, then: "Credit Card" },
-                { case: { $regexMatch: { input: "$_rawType", regex: /debit/ } }, then: "Debit Card" },
-                { case: { $regexMatch: { input: "$_rawType", regex: /\bemi\b/ } }, then: "EMI" },
-                { case: { $regexMatch: { input: "$_rawType", regex: /net\s*bank|netbank/ } }, then: "NetBanking" },
-                { case: { $regexMatch: { input: "$_rawType", regex: /wallet/ } }, then: "Wallet" },
-                { case: { $regexMatch: { input: "$_rawType", regex: /\bupi\b/ } }, then: "UPI" }
-              ],
-              default: null
-            }
+          types: {
+            $setUnion: [
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /\bemi\b/ } }, ["EMI"], []] },
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /credit|cc/ } }, ["Credit Card"], []] },
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /debit/ } }, ["Debit Card"], []] },
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /net\s*bank|netbank/ } }, ["NetBanking"], []] },
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /wallet/ } }, ["Wallet"], []] },
+              { $cond: [{ $regexMatch: { input: "$_rawType", regex: /\bupi\b/ } }, ["UPI"], []] }
+            ]
           },
-          bank: {
-            $trim: { input: { $toString: { $ifNull: ["$_bankRaw", ""] } } }
-          }
+          bank: { $trim: { input: { $toString: { $ifNull: ["$_bankRaw", ""] } } } }
         }
       },
-      { $match: { type: { $in: ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"] }, bank: { $ne: "" } } },
-      { $group: { _id: "$type", banks: { $addToSet: "$bank" } } }
+      { $match: { bank: { $ne: "" }, types: { $ne: [] } } },
+      { $unwind: "$types" },
+      { $group: { _id: "$types", banks: { $addToSet: "$bank" } } }
     ];
 
     const rows = await collection.aggregate(pipeline).toArray();
@@ -444,7 +425,7 @@ app.get("/payment-options", async (req, res) => {
     for (const r of rows) {
       const list = Array.isArray(r.banks) ? r.banks.slice().sort((a, b) => a.localeCompare(b)) : [];
       options[r._id] = list;
-      // Many EMI offers are card-based; mirror EMI banks to Credit Card for discoverability
+      // If we want EMI banks also discoverable under Credit Card (optional):
       if (r._id === "EMI") {
         const merged = new Set([...(options["Credit Card"] || []), ...list]);
         options["Credit Card"] = Array.from(merged).sort((a, b) => a.localeCompare(b));
@@ -462,29 +443,11 @@ app.get("/payment-options", async (req, res) => {
 app.get("/payment-methods", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
-    const today = new Date().toISOString().slice(0, 10);
-    const activeValidityOr = [
-      { validityPeriod: { $exists: false } },
-      {
-        $and: [
-          { "validityPeriod.end": { $exists: false } },
-          { "validityPeriod.to": { $exists: false } },
-          { "validityPeriod.endDate": { $exists: false } },
-          { "validityPeriod.till": { $exists: false } },
-          { "validityPeriod.until": { $exists: false } },
-        ],
-      },
-      { "validityPeriod.end": { $gte: today } },
-      { "validityPeriod.to": { $gte: today } },
-      { "validityPeriod.endDate": { $gte: today } },
-      { "validityPeriod.till": { $gte: today } },
-      { "validityPeriod.until": { $gte: today } },
-    ];
 
     const cursor = collection.find(
-  {},
-  { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
-);
+      {},
+      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
+    );
 
     const set = new Map();
     for await (const doc of cursor) {
