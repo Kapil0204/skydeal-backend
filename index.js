@@ -341,12 +341,13 @@ app.get("/debug-emi", async (req, res) => {
   res.json(docs);
 });
 
-// -------------------- PAYMENT OPTIONS -----------------------
+// -------------------- PAYMENT OPTIONS (robust, Node-side) -----------------------
 app.get("/payment-options", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
-    const today = new Date().toISOString().slice(0, 10);
 
+    // Keep it wide: not expired. (No portal restriction here since you just want the menu.)
+    const today = new Date().toISOString().slice(0, 10);
     const activeValidityOr = [
       { validityPeriod: { $exists: false } },
       {
@@ -365,55 +366,64 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    const pipeline = [
-      { $match: { isExpired: { $ne: true }, $or: activeValidityOr } },
-      { $unwind: "$paymentMethods" },
-      {
-        $project: {
-          type: { $ifNull: ["$paymentMethods.type", ""] },
-          bank: { $ifNull: ["$paymentMethods.bank", ""] },
-        },
-      },
-      {
-        $addFields: {
-          type: {
-            $switch: {
-              branches: [
-                { case: { $regexMatch: { input: "$type", regex: /credit/i } }, then: "Credit Card" },
-                { case: { $regexMatch: { input: "$type", regex: /debit/i } }, then: "Debit Card" },
-                { case: { $regexMatch: { input: "$type", regex: /\bemi\b/i } }, then: "EMI" },
-                { case: { $regexMatch: { input: "$type", regex: /net\s*bank/i } }, then: "NetBanking" },
-                { case: { $regexMatch: { input: "$type", regex: /wallet/i } }, then: "Wallet" },
-                { case: { $regexMatch: { input: "$type", regex: /\bupi\b/i } }, then: "UPI" },
-              ],
-              default: null,
-            },
-          },
-          bank: { $trim: { input: "$bank" } },
-        },
-      },
-      { $match: { type: { $ne: null }, bank: { $ne: "" } } },
-      { $group: { _id: "$type", banks: { $addToSet: "$bank" } } },
-    ];
+    // Pull only what we need
+    const cursor = collection.find(
+      { isExpired: { $ne: true }, $or: activeValidityOr },
+      { projection: { paymentMethods: 1 } }
+    );
 
-    const rows = await collection.aggregate(pipeline).toArray();
+    // Normalizers
+    const norm = (s) => (typeof s === "string" ? s.trim() : "");
+    const normType = (t) => {
+      const x = norm(t).toLowerCase();
+      if (!x) return null;
 
+      // Order matters: match EMI before credit/debit
+      if (/\bemi\b/.test(x)) return "EMI";
+      if (/credit|cc/.test(x)) return "Credit Card";
+      if (/debit/.test(x)) return "Debit Card";
+      if (/net\s*bank|netbank/.test(x)) return "NetBanking";
+      if (/wallet/.test(x)) return "Wallet";
+      if (/\bupi\b/.test(x)) return "UPI";
+      return null;
+    };
+    const pickBank = (pm) =>
+      norm(pm?.bank) ||
+      norm(pm?.cardBank) ||
+      norm(pm?.issuer) ||
+      norm(pm?.cardIssuer) ||
+      norm(pm?.provider) ||
+      ""; // if empty, we ignore it
+
+    // Buckets
     const TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
-    const options = Object.fromEntries(TYPES.map(t => [t, []]));
+    const buckets = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
 
-    for (const r of rows) {
-      options[r._id] = r.banks.sort((a, b) => a.localeCompare(b));
+    // Iterate all docs
+    for await (const doc of cursor) {
+      const arr = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
+      for (const pm of arr) {
+        if (!pm || typeof pm !== "object") continue; // ignore string-y PM entries entirely
+        const t = normType(pm.type ?? pm.method ?? pm.category ?? pm.mode);
+        if (!t) continue;
+        const bank = pickBank(pm);
+        if (!bank) continue;
+        buckets[t].add(bank);
+      }
     }
 
-    return res.json({ options });
+    // Serialize to arrays
+    const options = {};
+    for (const t of TYPES) {
+      options[t] = Array.from(buckets[t]).sort((a, b) => a.localeCompare(b));
+    }
+
+    res.json({ options });
   } catch (e) {
-    console.error("X /payment-options error (agg):", e);
-    return res.status(500).json({ options: {} });
+    console.error("X /payment-options (node-side) error:", e);
+    res.status(500).json({ options: {} });
   }
 });
-
-
-
 app.get("/payment-methods", async (req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
