@@ -152,25 +152,6 @@ function extractPaymentMethodLabel(offerDoc) {
 // ---------------------------------------------------
 
 
-function extractPaymentMethodLabel(offerDoc) {
-  if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
-  if (Array.isArray(offerDoc.paymentMethods) && offerDoc.paymentMethods.length) {
-    const first = offerDoc.paymentMethods[0];
-    if (typeof first === "string") return first.trim();
-    if (first && (first.bank || first.type || first.cardNetwork)) {
-      const parts = [first.bank, first.type, first.cardNetwork].filter(Boolean).map((s) => String(s).trim());
-      if (parts.length) return parts.join(" ");
-    }
-  }
-  const text = `${offerDoc.title || ""} ${offerDoc.rawDiscount || ""}`;
-  if (/wallet/i.test(text)) return "Wallet";
-  if (/upi/i.test(text)) return "UPI";
-  if (/net\s*bank/i.test(text) || /netbank/i.test(text)) return "Netbanking";
-  if (/debit/i.test(text)) return "Debit Card";
-  if (/credit|emi/i.test(text)) return "Credit Card";
-  return "—";
-}
-
 function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
   let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
   for (const offer of offers) {
