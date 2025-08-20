@@ -479,14 +479,9 @@ app.get("/payment-methods", async (req, res) => {
     ];
 
     const cursor = collection.find(
-      {
-        couponCode: { $exists: true, $ne: "" },
-        isExpired: { $ne: true },
-        $or: activeValidityOr,
-        "sourceMetadata.sourcePortal": { $in: PORTALS },
-      },
-      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
-    );
+  {},
+  { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
+);
 
     const set = new Map();
     for await (const doc of cursor) {
