@@ -354,14 +354,7 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    const cursor = collection.find(
-      {
-        isExpired: { $ne: true },
-        "sourceMetadata.sourcePortal": { $in: PORTALS },
-        $or: activeValidityOr,
-      },
-      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
-    );
+
 
     const TYPES = PAYMENT_TYPES;
     const KNOWN_BANKS = [
