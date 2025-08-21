@@ -103,7 +103,7 @@ function offerMatchesPayment(offer, selected) {
   return selected.some((sel) => labels.some((l) => l.includes(sel) || sel.includes(l)));
 }
 
-// --------- NEW: build human-friendly payment labels ----------
+// --------- Payment label helpers (kept simple) ----------
 const DISPLAY = {
   "credit card": "Credit Card",
   "debit card": "Debit Card",
@@ -113,18 +113,19 @@ const DISPLAY = {
   "upi": "UPI",
 };
 function titleCase(s) {
-  return s.replace(/\s+/g, " ")
+  return String(s || "")
+    .replace(/\s+/g, " ")
     .trim()
     .toLowerCase()
     .replace(/\b[a-z]/g, (c) => c.toUpperCase());
 }
 function looksComplete(bank) {
-  return /(card|emi|net ?bank|wallet|upi)/i.test(bank);
+  return /(card|emi|net ?bank|wallet|upi)/i.test(bank || "");
 }
 function makePaymentLabel(bank, type) {
-  if (/^(all|any)$/i.test(bank)) return DISPLAY[type.toLowerCase()] || type;
+  if (/^(all|any)$/i.test(bank)) return DISPLAY[type?.toLowerCase()] || type || "";
   if (looksComplete(bank)) return titleCase(bank);
-  return `${titleCase(bank)} ${DISPLAY[type.toLowerCase()] || type}`;
+  return `${titleCase(bank)} ${DISPLAY[type?.toLowerCase()] || type || ""}`.trim();
 }
 
 function extractPaymentMethodLabel(offerDoc) {
@@ -140,90 +141,11 @@ function extractPaymentMethodLabel(offerDoc) {
   }
   const text = `${offerDoc.title || ""} ${offerDoc.rawDiscount || ""}`;
   if (/wallet/i.test(text)) return "Wallet";
-  if (/upi/i.test(text)) return "UPI";
-  if (/net\s*bank/i.test(text) || /netbank/i.test(text)) return "NetBanking";
+  if (/\bupi\b/i.test(text)) return "UPI";
+  if (/net\s*bank|netbank/i.test(text)) return "NetBanking";
   if (/debit/i.test(text)) return "Debit Card";
   if (/credit|emi/i.test(text)) return "Credit Card";
   return "—";
-}
-
-// ---------------------------------------------------
-// (rest of your file continues UNCHANGED)
-// ---------------------------------------------------
-
-
-function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
-  let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
-  for (const offer of offers) {
-    if (!offer.couponCode) continue;
-    if (!isOfferActiveForDate(offer, travelISO)) continue;
-    if (!offerMatchesPayment(offer, selectedPayments)) continue;
-
-    const minTxn = asMoney(offer.minTransactionValue) ?? 0;
-    if (basePrice < minTxn) continue;
-
-    const pct = offer.discountPercent != null ? Number(offer.discountPercent) : null;
-    const cap = asMoney(offer.maxDiscountAmount);
-    if (pct == null || !Number.isFinite(pct) || pct <= 0) continue;
-
-    let discount = Math.floor((basePrice * pct) / 100);
-    if (cap != null && cap > 0) discount = Math.min(discount, cap);
-    if (discount <= 0) continue;
-
-    const finalPrice = basePrice - discount;
-    if (finalPrice < best.finalPrice) {
-      best = {
-        finalPrice,
-        discountApplied: discount,
-        appliedOffer: {
-          portal: offer?.sourceMetadata?.sourcePortal || portal,
-          couponCode: offer.couponCode,
-          discountPercent: Number.isFinite(pct) ? pct : null,
-          maxDiscountAmount: cap ?? null,
-          minTransactionValue: minTxn || null,
-          validityPeriod: offer.validityPeriod || null,
-          rawDiscount: offer.rawDiscount || null,
-          title: offer.title || null,
-          offerId: String(offer._id),
-          paymentMethodLabel: extractPaymentMethodLabel(offer),
-        },
-      };
-    }
-  }
-  if (best.appliedOffer) {
-    console.log(`✅ Offer: portal=${portal} base=${basePrice} final=${best.finalPrice} code=${best.appliedOffer.couponCode} pm=${best.appliedOffer.paymentMethodLabel}`);
-  } else {
-    console.log(`— No offer: portal=${portal} base=${basePrice}`);
-  }
-  return best;
-}
-
-// ---- Mock flights fallback (keeps UI usable if Amadeus fails)
-function makeMockFlights({ from, to, date, count = 6 }) {
-  const carriers = [
-    { code: "AI", name: "Air India" },
-    { code: "UK", name: "Vistara" },
-    { code: "6E", name: "IndiGo" },
-    { code: "SG", name: "SpiceJet" },
-    { code: "G8", name: "Go First" },
-  ];
-  const base = 4500;
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const c = carriers[i % carriers.length];
-    const dep = new Date(`${date}T0${(8 + i) % 10}:00:00Z`);
-    const arr = new Date(dep.getTime() + (90 + i * 10) * 60000);
-    const price = base + i * 350 + Math.round(Math.random() * 400);
-    out.push({
-      flightNumber: `${c.code} ${100 + i}`,
-      airlineName: c.name,
-      departure: dep.toISOString().slice(11, 16),
-      arrival: arr.toISOString().slice(11, 16),
-      price: price.toFixed(2),
-      stops: i % 3 === 0 ? 1 : 0,
-    });
-  }
-  return out;
 }
 
 // -------------------- AMADEUS ----------------------
@@ -331,22 +253,62 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, uptime: process.uptime(), now: new Date().toISOString() });
 });
 
-// 🔍 Debug EMI route (temporary)
-app.get("/debug-emi", async (req, res) => {
+// 🔍 Debug helpers (optional)
+app.get("/debug-emi", async (_req, res) => {
   const collection = (await initMongo()).collection("offers");
   const docs = await collection.find(
     { "paymentMethods.type": /emi/i },
     { projection: { paymentMethods: 1, title: 1 } }
-  ).limit(20).toArray();
+  ).limit(40).toArray();
   res.json(docs);
 });
 
-// -------------------- PAYMENT OPTIONS (robust, Node-side) -----------------------
-app.get("/payment-options", async (req, res) => {
+app.get("/debug-types", async (_req, res) => {
+  const c = (await initMongo()).collection("offers");
+  const cur = c.find({}, { projection: { paymentMethods: 1 }, limit: 2000 });
+  const counts = {};
+  const norm = (s) => (typeof s === "string" ? s.trim() : "");
+  const normType = (t) => {
+    const x = norm(t).toLowerCase();
+    if (!x) return "(empty)";
+    if (/\bemi\b/.test(x)) return "EMI";
+    if (/credit|cc/.test(x)) return "Credit Card";
+    if (/debit/.test(x)) return "Debit Card";
+    if (/net\s*bank|netbank/.test(x)) return "NetBanking";
+    if (/wallet/.test(x)) return "Wallet";
+    if (/\bupi\b/.test(x)) return "UPI";
+    return `other:${x}`;
+  };
+  for await (const d of cur) {
+    const a = Array.isArray(d.paymentMethods) ? d.paymentMethods : [];
+    for (const pm of a) {
+      if (typeof pm === "string") {
+        // e.g. "HSBC Credit Card EMI"
+        const s = pm.toLowerCase();
+        const bank = pm.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
+        const type =
+          /\bemi\b/.test(s) ? "EMI" :
+          /credit|cc/.test(s) ? "Credit Card" :
+          /debit/.test(s) ? "Debit Card" :
+          /net\s*bank|netbank/.test(s) ? "NetBanking" :
+          /wallet/.test(s) ? "Wallet" :
+          /\bupi\b/.test(s) ? "UPI" : "other";
+        counts[type] = (counts[type] || 0) + 1;
+      } else if (pm && typeof pm === "object") {
+        const k = normType(pm.type ?? pm.method ?? pm.category ?? pm.mode);
+        counts[k] = (counts[k] || 0) + 1;
+      }
+    }
+  }
+  res.json(counts);
+});
+
+// -------------------- PAYMENT OPTIONS -----------------------
+// Returns { options: { "EMI": ["HSBC", "Bajaj Finserv", ...], "Credit Card": [...], ... } }
+app.get("/payment-options", async (_req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
 
-    // Keep it wide: not expired. (No portal restriction here since you just want the menu.)
     const today = new Date().toISOString().slice(0, 10);
     const activeValidityOr = [
       { validityPeriod: { $exists: false } },
@@ -366,19 +328,41 @@ app.get("/payment-options", async (req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    // Pull only what we need
+    // Pull a manageable slice; we only need paymentMethods/title/rawDiscount
     const cursor = collection.find(
       { isExpired: { $ne: true }, $or: activeValidityOr },
-      { projection: { paymentMethods: 1 } }
+      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 }, limit: 4000 }
     );
 
-    // Normalizers
-    const norm = (s) => (typeof s === "string" ? s.trim() : "");
-    const normType = (t) => {
-      const x = norm(t).toLowerCase();
-      if (!x) return null;
+    const TYPES = PAYMENT_TYPES;
+    const optionsSets = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
 
-      // Order matters: match EMI before credit/debit
+    // A small list to catch string-only bank mentions in title/rawDiscount
+    const KNOWN_BANKS = [
+      "ICICI Bank","HDFC Bank","Axis Bank","State Bank of India","SBI","Kotak",
+      "YES Bank","IDFC First Bank","IndusInd Bank","Bank of Baroda","RBL Bank",
+      "HSBC","Standard Chartered","AU Small Finance Bank","Federal Bank","IDBI Bank",
+      "Bajaj Finserv","Canara Bank","Flipkart Axis"
+    ];
+    const banksFromText = (text) => {
+      const res = new Set();
+      const t = String(text || "");
+      if (!t) return res;
+      KNOWN_BANKS.forEach((b) => {
+        const rx = new RegExp(`\\b${b.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i");
+        if (rx.test(t)) res.add(b);
+      });
+      // normalize SBI -> State Bank of India
+      if (res.has("SBI") && !res.has("State Bank of India")) {
+        res.delete("SBI");
+        res.add("State Bank of India");
+      }
+      return res;
+    };
+
+    const normType = (t) => {
+      const x = String(t || "").toLowerCase();
+      if (!x) return null;
       if (/\bemi\b/.test(x)) return "EMI";
       if (/credit|cc/.test(x)) return "Credit Card";
       if (/debit/.test(x)) return "Debit Card";
@@ -387,50 +371,91 @@ app.get("/payment-options", async (req, res) => {
       if (/\bupi\b/.test(x)) return "UPI";
       return null;
     };
-    const pickBank = (pm) =>
-      norm(pm?.bank) ||
-      norm(pm?.cardBank) ||
-      norm(pm?.issuer) ||
-      norm(pm?.cardIssuer) ||
-      norm(pm?.provider) ||
-      ""; // if empty, we ignore it
 
-    // Buckets
-    const TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
-    const buckets = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
-
-    // Iterate all docs
+    // Walk docs and collect
     for await (const doc of cursor) {
-      const arr = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
-      for (const pm of arr) {
-        if (!pm || typeof pm !== "object") continue; // ignore string-y PM entries entirely
-        const t = normType(pm.type ?? pm.method ?? pm.category ?? pm.mode);
-        if (!t) continue;
-        const bank = pickBank(pm);
-        if (!bank) continue;
-        buckets[t].add(bank);
+      const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
+
+      // 1) Structured entries (objects)
+      for (const entry of pm) {
+        if (entry && typeof entry === "object") {
+          const type =
+            normType(entry.type) ||
+            normType(entry.method) ||
+            normType(entry.category) ||
+            normType(entry.mode);
+          const bank =
+            String(entry.bank || entry.cardBank || entry.issuer || entry.cardIssuer || entry.provider || "").trim();
+
+          if (type && bank) {
+            optionsSets[type].add(bank);
+            // EMI is still card-based; surface those banks also under Credit Card for discovery
+            if (type === "EMI") optionsSets["Credit Card"].add(bank);
+          }
+        }
+        // 2) String-only entries ("HSBC Credit Card EMI")
+        else if (typeof entry === "string") {
+          const s = entry;
+          const type =
+            /\bemi\b/i.test(s) ? "EMI" :
+            /credit|cc/i.test(s) ? "Credit Card" :
+            /debit/i.test(s) ? "Debit Card" :
+            /net\s*bank|netbank/i.test(s) ? "NetBanking" :
+            /wallet/i.test(s) ? "Wallet" :
+            /\bupi\b/i.test(s) ? "UPI" : null;
+
+          if (type) {
+            // strip keywords to leave the bank-ish part
+            const bank = s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
+            if (bank) {
+              optionsSets[type].add(titleCase(bank));
+              if (type === "EMI") optionsSets["Credit Card"].add(titleCase(bank));
+            }
+          }
+        }
+      }
+
+      // 3) Titles / rawDiscount fallbacks (in case paymentMethods is empty or vague)
+      if (!pm.length) {
+        const text = `${doc.title || ""} ${doc.rawDiscount || ""}`;
+        const hits = new Set();
+        if (/\bemi\b/i.test(text)) hits.add("EMI");
+        if (/credit|cc/i.test(text)) hits.add("Credit Card");
+        if (/debit/i.test(text)) hits.add("Debit Card");
+        if (/net\s*bank|netbank/i.test(text)) hits.add("NetBanking");
+        if (/wallet/i.test(text)) hits.add("Wallet");
+        if (/\bupi\b/i.test(text)) hits.add("UPI");
+
+        const banks = banksFromText(text);
+        if (banks.size && hits.size) {
+          for (const t of hits) {
+            banks.forEach((b) => optionsSets[t].add(b));
+            if (hits.has("EMI")) banks.forEach((b) => optionsSets["Credit Card"].add(b));
+          }
+        }
       }
     }
 
-    // Serialize to arrays
-    const options = {};
-    for (const t of TYPES) {
-      options[t] = Array.from(buckets[t]).sort((a, b) => a.localeCompare(b));
-    }
+    // Final shape: arrays sorted
+    const out = {};
+    PAYMENT_TYPES.forEach((t) => {
+      out[t] = Array.from(optionsSets[t]).sort((a, b) => a.localeCompare(b));
+    });
 
-    res.json({ options });
+    res.json({ options: out });
   } catch (e) {
-    console.error("X /payment-options (node-side) error:", e);
+    console.error("X /payment-options error:", e);
     res.status(500).json({ options: {} });
   }
 });
-app.get("/payment-methods", async (req, res) => {
+
+app.get("/payment-methods", async (_req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
 
     const cursor = collection.find(
       {},
-      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 } }
+      { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 }, limit: 4000 }
     );
 
     const set = new Map();
@@ -449,6 +474,79 @@ app.get("/payment-methods", async (req, res) => {
 });
 
 // -------------------- SEARCH -----------------------
+function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
+  let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
+  for (const offer of offers) {
+    if (!offer.couponCode) continue;
+    if (!isOfferActiveForDate(offer, travelISO)) continue;
+    if (!offerMatchesPayment(offer, selectedPayments)) continue;
+
+    const minTxn = asMoney(offer.minTransactionValue) ?? 0;
+    if (basePrice < minTxn) continue;
+
+    const pct = offer.discountPercent != null ? Number(offer.discountPercent) : null;
+    const cap = asMoney(offer.maxDiscountAmount);
+    if (pct == null || !Number.isFinite(pct) || pct <= 0) continue;
+
+    let discount = Math.floor((basePrice * pct) / 100);
+    if (cap != null && cap > 0) discount = Math.min(discount, cap);
+    if (discount <= 0) continue;
+
+    const finalPrice = basePrice - discount;
+    if (finalPrice < best.finalPrice) {
+      best = {
+        finalPrice,
+        discountApplied: discount,
+        appliedOffer: {
+          portal: offer?.sourceMetadata?.sourcePortal || portal,
+          couponCode: offer.couponCode,
+          discountPercent: Number.isFinite(pct) ? pct : null,
+          maxDiscountAmount: cap ?? null,
+          minTransactionValue: minTxn || null,
+          validityPeriod: offer.validityPeriod || null,
+          rawDiscount: offer.rawDiscount || null,
+          title: offer.title || null,
+          offerId: String(offer._id),
+          paymentMethodLabel: extractPaymentMethodLabel(offer),
+        },
+      };
+    }
+  }
+  if (best.appliedOffer) {
+    console.log(`✅ Offer: portal=${portal} base=${basePrice} final=${best.finalPrice} code=${best.appliedOffer.couponCode} pm=${best.appliedOffer.paymentMethodLabel}`);
+  } else {
+    console.log(`— No offer: portal=${portal} base=${basePrice}`);
+  }
+  return best;
+}
+
+function makeMockFlights({ from, to, date, count = 6 }) {
+  const carriers = [
+    { code: "AI", name: "Air India" },
+    { code: "UK", name: "Vistara" },
+    { code: "6E", name: "IndiGo" },
+    { code: "SG", name: "SpiceJet" },
+    { code: "G8", name: "Go First" },
+  ];
+  const base = 4500;
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const c = carriers[i % carriers.length];
+    const dep = new Date(`${date}T0${(8 + i) % 10}:00:00Z`);
+    const arr = new Date(dep.getTime() + (90 + i * 10) * 60000);
+    const price = base + i * 350 + Math.round(Math.random() * 400);
+    out.push({
+      flightNumber: `${c.code} ${100 + i}`,
+      airlineName: c.name,
+      departure: dep.toISOString().slice(11, 16),
+      arrival: arr.toISOString().slice(11, 16),
+      price: price.toFixed(2),
+      stops: i % 3 === 0 ? 1 : 0,
+    });
+  }
+  return out;
+}
+
 app.post("/search", async (req, res) => {
   try {
     const {
@@ -467,7 +565,7 @@ app.post("/search", async (req, res) => {
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // Outbound (graceful fallback)
+    // Outbound
     let outbound = [];
     try {
       outbound = await fetchAmadeusOffers({ from, to, date: depISO, adults: passengers, travelClass });
@@ -476,7 +574,7 @@ app.post("/search", async (req, res) => {
       outbound = makeMockFlights({ from, to, date: depISO });
     }
 
-    // Return (graceful fallback)
+    // Return
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
       try {
