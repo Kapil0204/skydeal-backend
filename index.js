@@ -8,16 +8,31 @@ import { MongoClient, ServerApiVersion } from "mongodb";
 const app = express();
 
 // ---------- CORS (explicit allowlist + preflight) ----------
-const ALLOWED_ORIGINS = [
+const ALLOWED_ORIGINS = new Set([
   "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
   "https://skydeal-frontend.vercel.app",
-];
+]);
+
+// also allow any preview like https://skydeal-frontend-<branch>-<team>.vercel.app
+const ALLOWED_PATTERNS = [/^https:\/\/skydeal-frontend.*\.vercel\.app$/];
+
+function isAllowedOrigin(origin = "") {
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  return ALLOWED_PATTERNS.some((rx) => rx.test(origin));
+}
+
+// make caches behave with multiple origins
+app.use((req, res, next) => {
+  res.setHeader("Vary", "Origin");
+  next();
+});
+
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(null, false);
+      if (!origin) return cb(null, true); // curl / Postman
+      if (isAllowedOrigin(origin)) return cb(null, true);
+      cb(new Error(`CORS: blocked origin ${origin}`));
     },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -25,9 +40,18 @@ app.use(
     maxAge: 86400,
   })
 );
-app.options("*", cors());
 
-app.use(express.json());
+// robust preflight handler
+app.options("*", (req, res) => {
+  const origin = req.headers.origin || "";
+  if (isAllowedOrigin(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return res.sendStatus(200);
+  }
+  return res.sendStatus(403);
+});
 
 // -------------------- CONFIG -----------------------
 const PORT = process.env.PORT || 3000;
