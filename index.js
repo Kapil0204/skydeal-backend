@@ -88,21 +88,6 @@ function normalizeUserPaymentChoices(arr) {
   return arr.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean);
 }
 
-function offerMatchesPayment(offer, selected) {
-  if (!selected || selected.length === 0) return true;
-  const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
-  const labels = list
-    .map((pm) => {
-      if (typeof pm === "string") return pm.toLowerCase().trim();
-      if (pm && (pm.bank || pm.type || pm.cardNetwork)) {
-        return [pm.bank, pm.type, pm.cardNetwork].filter(Boolean).join(" ").toLowerCase().trim();
-      }
-      return "";
-    })
-    .filter(Boolean);
-  return selected.some((sel) => labels.some((l) => l.includes(sel) || sel.includes(l)));
-}
-
 // --------- Payment label helpers ----------
 const DISPLAY = {
   "credit card": "Credit Card",
@@ -128,7 +113,7 @@ function makePaymentLabel(bank, type) {
   return `${titleCase(bank)} ${DISPLAY[type?.toLowerCase()] || type || ""}`.trim();
 }
 
-// --- NEW: Canonical bank normalization to clean the options list ---
+// --- Canonical bank normalization so options list stays clean ---
 function normalizeBankName(raw) {
   if (!raw) return "";
   let s = String(raw).trim().replace(/\s+/g, " ").toLowerCase();
@@ -169,7 +154,6 @@ function normalizeBankName(raw) {
     if (rx.test(s)) return canon;
   }
 
-  // remove generic words like "bank" trailing/leading junk
   const cleaned = titleCase(s.replace(/\b(bank|card|cards)\b/gi, "").trim());
   return cleaned || titleCase(String(raw).trim());
 }
@@ -348,7 +332,7 @@ app.get("/debug-types", async (_req, res) => {
 });
 
 // -------------------- PAYMENT OPTIONS -----------------------
-// Returns { options: { "EMI": ["HSBC", ...], "Credit Card": [...], ... } }
+// Returns { options: { "EMI": ["HSBC (Credit Card EMI)", "Federal Bank (Debit Card EMI)", ...], ... } }
 app.get("/payment-options", async (_req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -413,6 +397,11 @@ app.get("/payment-options", async (_req, res) => {
       return null;
     };
 
+    const emiLabel = (bank, via) => {
+      const v = (String(via||"").toLowerCase().includes("debit")) ? "Debit Card EMI" : "Credit Card EMI";
+      return `${bank} (${v})`;
+    };
+
     for await (const doc of cursor) {
       const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
 
@@ -430,8 +419,13 @@ app.get("/payment-options", async (_req, res) => {
           if (type && rawBank) {
             const bank = normalizeBankName(rawBank);
             if (bank) {
-              optionsSets[type].add(bank);
-              if (type === "EMI") optionsSets["Credit Card"].add(bank);
+              if (type === "EMI") {
+                const via = (entry.type || entry.mode || entry.category || "").toLowerCase();
+                optionsSets["EMI"].add(emiLabel(bank, via));
+                optionsSets["Credit Card"].add(bank); // discovery
+              } else {
+                optionsSets[type].add(bank);
+              }
             }
           }
         }
@@ -450,8 +444,13 @@ app.get("/payment-options", async (_req, res) => {
             const rawBank = s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
             const bank = normalizeBankName(rawBank);
             if (bank) {
-              optionsSets[type].add(bank);
-              if (type === "EMI") optionsSets["Credit Card"].add(bank);
+              if (type === "EMI") {
+                const via = /\bdebit\b/i.test(s) ? "debit" : "credit";
+                optionsSets["EMI"].add(emiLabel(bank, via));
+                optionsSets["Credit Card"].add(bank);
+              } else {
+                optionsSets[type].add(bank);
+              }
             }
           }
         }
@@ -471,8 +470,13 @@ app.get("/payment-options", async (_req, res) => {
         const banks = banksFromText(text);
         if (banks.size && hits.size) {
           for (const t of hits) {
-            banks.forEach((b) => optionsSets[t].add(b));
-            if (hits.has("EMI")) banks.forEach((b) => optionsSets["Credit Card"].add(b));
+            if (t === "EMI") {
+              const via = /\bdebit\b/i.test(text) ? "debit" : "credit";
+              banks.forEach((b) => optionsSets["EMI"].add(emiLabel(b, via)));
+              banks.forEach((b) => optionsSets["Credit Card"].add(b));
+            } else {
+              banks.forEach((b) => optionsSets[t].add(b));
+            }
           }
         }
       }
@@ -514,6 +518,62 @@ app.get("/payment-methods", async (_req, res) => {
     res.status(500).json({ methods: [] });
   }
 });
+
+// -------------------- STRICT PAYMENT MATCHING -----------------------
+function offerMatchesPayment(offer, selected) {
+  // if nothing selected, allow all (frontend fix should prevent this)
+  if (!selected || selected.length === 0) return true;
+
+  // normalize selected into lower-case labels
+  const sel = selected.map(s => String(s||'').toLowerCase().trim()).filter(Boolean);
+  if (sel.length === 0) return true;
+
+  // build canonical labels for the offer's payment methods
+  const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
+  const labels = [];
+
+  for (const pm of list) {
+    if (typeof pm === "string") {
+      const s = pm.toLowerCase().trim();
+      labels.push(s);
+
+      const bankOnly = s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
+      if (bankOnly) {
+        const b = normalizeBankName(bankOnly).toLowerCase();
+        labels.push(b);
+        if (/\bemi\b/i.test(s)) {
+          const via = /\bdebit\b/i.test(s) ? "debit card emi" : "credit card emi";
+          labels.push(`${b} ${via}`);
+        } else if (/credit|cc/i.test(s)) {
+          labels.push(`${b} credit card`);
+        } else if (/debit/i.test(s)) {
+          labels.push(`${b} debit card`);
+        }
+      }
+    } else if (pm && typeof pm === "object") {
+      const bank = normalizeBankName(pm.bank || pm.cardBank || pm.issuer || pm.cardIssuer || pm.provider || "");
+      const typeStr = String(pm.type || pm.method || pm.category || pm.mode || "").toLowerCase();
+      const b = bank.toLowerCase().trim();
+      if (b) {
+        labels.push(b);
+        if (/\bemi\b/.test(typeStr)) {
+          const via = /debit/.test(typeStr) ? "debit card emi" : "credit card emi";
+          labels.push(`${b} ${via}`);
+        } else if (/credit|cc/.test(typeStr)) {
+          labels.push(`${b} credit card`);
+        } else if (/debit/.test(typeStr)) {
+          labels.push(`${b} debit card`);
+        }
+      }
+    }
+  }
+
+  // match if any selected token overlaps our canonicalized label set
+  return sel.some(s => {
+    const simplified = s.replace(/[()]/g, "").replace(/\s+/g, " ").trim();
+    return labels.some(l => l.includes(s) || s.includes(l) || l.includes(simplified));
+  });
+}
 
 // -------------------- SEARCH -----------------------
 function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
