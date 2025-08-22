@@ -335,11 +335,17 @@ app.get("/payment-options", async (_req, res) => {
           if (typeKey === "emi") {
             optionsSets["EMI"].add(`${bank} (Credit Card EMI)`);
             optionsSets["Credit Card"].add(bank);
-          } else if (typeKey === "credit") optionsSets["Credit Card"].add(bank);
-          else if (typeKey === "debit") optionsSets["Debit Card"].add(bank;
-          else if (typeKey === "netbanking") optionsSets["NetBanking"].add(bank);
-          else if (typeKey === "wallet") optionsSets["Wallet"].add(bank);
-          else if (typeKey === "upi") optionsSets["UPI"].add(bank);
+          } else if (typeKey === "credit") {
+            optionsSets["Credit Card"].add(bank);
+          } else if (typeKey === "debit") {
+            optionsSets["Debit Card"].add(bank); // ← fixed )
+          } else if (typeKey === "netbanking") {
+            optionsSets["NetBanking"].add(bank);
+          } else if (typeKey === "wallet") {
+            optionsSets["Wallet"].add(bank);
+          } else if (typeKey === "upi") {
+            optionsSets["UPI"].add(bank);
+          }
         } else if (typeof entry === "string") {
           const typeKey = normTypeKey(entry);
           const bank = titleCase(normalizeBankName(
@@ -438,7 +444,7 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selecte
           rawDiscount: offer.rawDiscount || null,
           title: offer.title || null,
           offerId: String(offer._id),
-          paymentMethodLabel: extractPaymentMethodLabel(offer), // uses single definition above
+          paymentMethodLabel: extractPaymentMethodLabel(offer),
         },
       };
     }
