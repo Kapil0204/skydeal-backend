@@ -11,7 +11,6 @@ const ALLOWED_ORIGINS = new Set([
   "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
   "https://skydeal-frontend.vercel.app",
 ]);
-// allow any preview of this app
 const ALLOWED_PATTERNS = [/^https:\/\/skydeal-frontend.*\.vercel\.app$/];
 
 function isAllowedOrigin(origin = "") {
@@ -19,15 +18,12 @@ function isAllowedOrigin(origin = "") {
   return ALLOWED_PATTERNS.some((rx) => rx.test(origin));
 }
 
-app.use((req, res, next) => {
-  res.setHeader("Vary", "Origin");
-  next();
-});
+app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true); // curl/Postman
+      if (!origin) return cb(null, true);
       if (isAllowedOrigin(origin)) return cb(null, true);
       cb(new Error(`CORS: blocked origin ${origin}`));
     },
@@ -38,7 +34,6 @@ app.use(
   })
 );
 
-// strong preflight
 app.options("*", (req, res) => {
   const origin = req.headers.origin || "";
   if (isAllowedOrigin(origin)) {
@@ -106,37 +101,17 @@ function isOfferActiveForDate(offer, travelISO) {
   return travelISO <= endISO;
 }
 
-function normalizeUserPaymentChoices(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  return arr.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean);
-}
-
-// labels for display
-const DISPLAY = {
-  "credit card": "Credit Card",
-  "debit card": "Debit Card",
-  "emi": "Credit Card EMI",
-  "netbanking": "NetBanking",
-  "wallet": "Wallet",
-  "upi": "UPI",
-};
-
-function titleCase(s) {
-  return String(s || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase()
-    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
-}
-
-function looksComplete(bank) {
-  return /(card|emi|net ?bank|wallet|upi)/i.test(bank || "");
-}
-
-function makePaymentLabel(bank, type) {
-  if (/^(all|any)$/i.test(bank)) return DISPLAY[type?.toLowerCase()] || type || "";
-  if (looksComplete(bank)) return titleCase(bank);
-  return `${titleCase(bank)} ${DISPLAY[type?.toLowerCase()] || type || ""}`.trim();
+// --- type normalization ---
+function normTypeKey(t) {
+  const x = String(t || "").toLowerCase();
+  if (!x) return null;
+  if (/\bemi\b/.test(x)) return "emi";
+  if (/credit|cc/.test(x)) return "credit";
+  if (/debit/.test(x)) return "debit";
+  if (/net\s*bank|netbank/.test(x)) return "netbanking";
+  if (/wallet/.test(x)) return "wallet";
+  if (/\bupi\b/.test(x)) return "upi";
+  return null;
 }
 
 function normalizeBankName(raw) {
@@ -155,8 +130,61 @@ function normalizeBankName(raw) {
     [/hsbc/i, "HSBC"], [/canara/i, "Canara Bank"],
   ];
   for (const [rx, canon] of map) { if (rx.test(raw) || rx.test(s)) return canon; }
-  const cleaned = titleCase(s.replace(/\b(bank|card|cards)\b/gi, "").trim());
-  return cleaned || titleCase(String(raw).trim());
+  const cleaned = String(s).replace(/\b(bank|card|cards)\b/gi, "").trim();
+  return cleaned ? cleaned.replace(/\b[a-z]/g, c => c.toUpperCase()) : String(raw).trim();
+}
+
+function titleCase(s) {
+  return String(s || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+function looksComplete(bank) {
+  return /(card|emi|net ?bank|wallet|upi)/i.test(bank || "");
+}
+
+const DISPLAY = {
+  "credit card": "Credit Card",
+  "debit card": "Debit Card",
+  "emi": "Credit Card EMI",
+  "netbanking": "NetBanking",
+  "wallet": "Wallet",
+  "upi": "UPI",
+};
+
+function makePaymentLabel(bank, type) {
+  if (/^(all|any)$/i.test(bank)) return DISPLAY[type?.toLowerCase()] || type || "";
+  if (looksComplete(bank)) return titleCase(bank);
+  return `${titleCase(bank)} ${DISPLAY[type?.toLowerCase()] || type || ""}`.trim();
+}
+
+// -------------------- Selected payment parsing --------------------
+/**
+ * Accepts:
+ *  - [{ type: "Credit Card", bank: "HSBC" }, ...]
+ *  - ["HSBC Credit Card", "Axis Debit Card", ...] (legacy)
+ * Returns normalized array: [{ bank: "hsbc", type: "credit" | "debit" | "emi" | ... | null }]
+ */
+function normalizeUserPaymentChoices(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const out = [];
+  for (const it of arr) {
+    if (it && typeof it === "object") {
+      const bank = normalizeBankName(it.bank || "");
+      const type = normTypeKey(it.type);
+      if (bank) out.push({ bank: bank.toLowerCase(), type: type || null });
+    } else if (typeof it === "string") {
+      const type = normTypeKey(it);
+      const bank = normalizeBankName(
+        String(it).replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "")
+      );
+      if (bank) out.push({ bank: bank.toLowerCase(), type: type || null });
+    }
+  }
+  return out.length ? out : null;
 }
 
 function extractPaymentMethodLabel(offerDoc) {
@@ -279,13 +307,7 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
   return byPortal;
 }
 
-// -------------------- ROUTES -----------------------
-app.get("/health", (req, res) => {
-  res.json({ ok: true, uptime: process.uptime(), now: new Date().toISOString() });
-});
-
-// ---------- PAYMENT OPTIONS (RESTORED) ------------
-// Returns { options: { "EMI":[ "HSBC (Credit Card EMI)", "HSBC (Debit Card EMI)", ... ], "Credit Card":[...], ... } }
+// -------------------- PAYMENT OPTIONS -----------------------
 app.get("/payment-options", async (_req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -314,64 +336,42 @@ app.get("/payment-options", async (_req, res) => {
       { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 }, limit: 4000 }
     );
 
-    const TYPES = PAYMENT_TYPES;
-    const optionsSets = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
-
-    const titleize = (s) => titleCase(String(s || "").replace(/\s+/g, " ").trim());
+    const optionsSets = Object.fromEntries(PAYMENT_TYPES.map((t) => [t, new Set()]));
 
     for await (const doc of cursor) {
       const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
 
       for (const entry of pm) {
         if (entry && typeof entry === "object") {
-          const typeStr = String(
-            entry.type || entry.method || entry.category || entry.mode || ""
-          ).toLowerCase();
-          const bankRaw =
-            entry.bank || entry.cardBank || entry.issuer || entry.cardIssuer || entry.provider || "";
-          const bank = titleize(normalizeBankName(bankRaw));
+          const typeKey = normTypeKey(entry.type || entry.method || entry.category || entry.mode);
+          const bank = titleCase(normalizeBankName(
+            entry.bank || entry.cardBank || entry.issuer || entry.cardIssuer || entry.provider || ""
+          ));
+          if (!typeKey || !bank) continue;
 
-          if (!bank) continue;
-
-          if (/\bemi\b/.test(typeStr)) {
-            // Try to infer credit vs debit EMI – default to Credit Card EMI
-            const isDebit = /debit/.test(typeStr);
-            const emiLabel = `${bank} (${isDebit ? "Debit Card EMI" : "Credit Card EMI"})`;
-            optionsSets["EMI"].add(emiLabel);
-            optionsSets["Credit Card"].add(bank); // discoverable under CC as well
-          } else if (/credit|cc/.test(typeStr)) {
+          if (typeKey === "emi") {
+            optionsSets["EMI"].add(`${bank} (Credit Card EMI)`);
             optionsSets["Credit Card"].add(bank);
-          } else if (/debit/.test(typeStr)) {
-            optionsSets["Debit Card"].add(bank);
-          } else if (/net\s*bank|netbank/.test(typeStr)) {
-            optionsSets["NetBanking"].add(bank);
-          } else if (/wallet/.test(typeStr)) {
-            optionsSets["Wallet"].add(bank);
-          } else if (/\bupi\b/.test(typeStr)) {
-            optionsSets["UPI"].add(bank);
-          }
+          } else if (typeKey === "credit") optionsSets["Credit Card"].add(bank);
+          else if (typeKey === "debit") optionsSets["Debit Card"].add(bank);
+          else if (typeKey === "netbanking") optionsSets["NetBanking"].add(bank);
+          else if (typeKey === "wallet") optionsSets["Wallet"].add(bank);
+          else if (typeKey === "upi") optionsSets["UPI"].add(bank);
         } else if (typeof entry === "string") {
-          const s = entry;
-          const bank = titleize(
-            s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim()
-          );
+          const typeKey = normTypeKey(entry);
+          const bank = titleCase(normalizeBankName(
+            entry.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "")
+          ));
           if (!bank) continue;
 
-          if (/\bemi\b/i.test(s)) {
-            const emiLabel = `${bank} (Credit Card EMI)`;
-            optionsSets["EMI"].add(emiLabel);
+          if (typeKey === "emi") {
+            optionsSets["EMI"].add(`${bank} (Credit Card EMI)`);
             optionsSets["Credit Card"].add(bank);
-          } else if (/credit|cc/i.test(s)) {
-            optionsSets["Credit Card"].add(bank);
-          } else if (/debit/i.test(s)) {
-            optionsSets["Debit Card"].add(bank);
-          } else if (/net\s*bank|netbank/i.test(s)) {
-            optionsSets["NetBanking"].add(bank);
-          } else if (/wallet/i.test(s)) {
-            optionsSets["Wallet"].add(bank);
-          } else if (/\bupi\b/i.test(s)) {
-            optionsSets["UPI"].add(bank);
-          }
+          } else if (typeKey === "credit") optionsSets["Credit Card"].add(bank);
+          else if (typeKey === "debit") optionsSets["Debit Card"].add(bank);
+          else if (typeKey === "netbanking") optionsSets["NetBanking"].add(bank);
+          else if (typeKey === "wallet") optionsSets["Wallet"].add(bank);
+          else if (typeKey === "upi") optionsSets["UPI"].add(bank);
         }
       }
     }
@@ -380,7 +380,6 @@ app.get("/payment-options", async (_req, res) => {
     PAYMENT_TYPES.forEach((t) => {
       out[t] = Array.from(optionsSets[t]).sort((a, b) => a.localeCompare(b));
     });
-
     res.json({ options: out });
   } catch (e) {
     console.error("X /payment-options error:", e);
@@ -388,42 +387,61 @@ app.get("/payment-options", async (_req, res) => {
   }
 });
 
-// -------------------- SEARCH -----------------------
+// -------------------- MATCHING (type-aware) -----------------------
 function offerMatchesPayment(offer, selected) {
   if (!selected || selected.length === 0) return true;
-  const sel = selected.map(s => String(s || "").toLowerCase().trim()).filter(Boolean);
 
+  // Extract (bank, typeKey) pairs the OFFER supports
+  const pairs = [];
   const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
-  const labels = [];
-
   for (const pm of list) {
     if (typeof pm === "string") {
-      labels.push(pm.toLowerCase().trim());
-      continue;
-    }
-    if (pm && typeof pm === "object") {
-      const bank = normalizeBankName(pm.bank || pm.cardBank || pm.issuer || pm.cardIssuer || pm.provider || "");
-      const typeStr = String(pm.type || pm.method || pm.category || pm.mode || "").toLowerCase();
-      const b = bank.toLowerCase().trim();
-      if (!b) continue;
-
-      // raw bank
-      labels.push(b);
-
-      // enriched combos
-      if (/\bemi\b/.test(typeStr)) {
-        const debit = /debit/.test(typeStr);
-        labels.push(`${b} ${debit ? "debit card emi" : "credit card emi"}`);
-      } else if (/credit|cc/.test(typeStr)) {
-        labels.push(`${b} credit card`);
-      } else if (/debit/.test(typeStr)) {
-        labels.push(`${b} debit card`);
-      }
+      const typeKey = normTypeKey(pm);
+      const bank = normalizeBankName(
+        pm.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "")
+      ).toLowerCase();
+      if (bank) pairs.push({ bank, type: typeKey });
+    } else if (pm && typeof pm === "object") {
+      const typeKey = normTypeKey(pm.type || pm.method || pm.category || pm.mode);
+      const bank = normalizeBankName(pm.bank || pm.cardBank || pm.issuer || pm.cardIssuer || pm.provider || "").toLowerCase();
+      if (bank) pairs.push({ bank, type: typeKey });
     }
   }
 
-  // loose contains either way
-  return sel.some(s => labels.some(l => l.includes(s) || s.includes(l)));
+  // A selection with a type requires the SAME type on the offer. Bank-only selection matches any type for that bank.
+  return selected.some(sel => {
+    const wantBank = (sel.bank || "").toLowerCase();
+    const wantType = sel.type || null; // 'credit' | 'debit' | 'emi' | ...
+    if (!wantBank) return false;
+    return pairs.some(p => {
+      if (p.bank !== wantBank) return false;
+      if (!wantType) return true;            // bank-only selection
+      if (!p.type)   return false;           // offer type unknown -> no
+      if (wantType === "emi") return p.type === "emi";
+      return p.type === wantType;            // strict match (credit vs debit)
+    });
+  });
+}
+
+// -------------------- SEARCH -----------------------
+function extractPaymentMethodLabel(offerDoc) {
+  if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
+  if (Array.isArray(offerDoc.paymentMethods) && offerDoc.paymentMethods.length) {
+    const first = offerDoc.paymentMethods[0];
+    if (typeof first === "string") return first.trim();
+    if (first && (first.bank || first.type || first.cardNetwork)) {
+      const bank = normalizeBankName(first.bank || "");
+      const type = first.type || "";
+      return makePaymentLabel(bank, type);
+    }
+  }
+  const text = `${offerDoc.title || ""} ${offerDoc.rawDiscount || ""}`;
+  if (/wallet/i.test(text)) return "Wallet";
+  if (/\bupi\b/i.test(text)) return "UPI";
+  if (/net\s*bank|netbank/i.test(text)) return "NetBanking";
+  if (/debit/i.test(text)) return "Debit Card";
+  if (/credit|emi/i.test(text)) return "Credit Card";
+  return "—";
 }
 
 function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
@@ -513,7 +531,6 @@ app.post("/search", async (req, res) => {
     if (!to) missing.push("to");
     if (!depISO) missing.push("departureDate (invalid format)");
     if (missing.length) {
-      console.warn("⚠️ /search bad request", { body: req.body, depISO, retISO, missing });
       return res.status(400).json({ error: "Missing required fields", missing, depISO, retISO });
     }
 
@@ -522,35 +539,21 @@ app.post("/search", async (req, res) => {
 
     // Outbound
     let outbound = [];
-    try {
-      outbound = await fetchAmadeusOffers({ from, to, date: depISO, adults: passengers, travelClass });
-    } catch (e) {
-      console.error("Amadeus outbound failed:", e.message);
-      outbound = makeMockFlights({ from, to, date: depISO });
-    }
+    try { outbound = await fetchAmadeusOffers({ from, to, date: depISO, adults: passengers, travelClass }); }
+    catch { outbound = makeMockFlights({ from, to, date: depISO }); }
 
     // Return
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
-      try {
-        retFlights = await fetchAmadeusOffers({ from: to, to: from, date: retISO, adults: passengers, travelClass });
-      } catch (e) {
-        console.error("Amadeus return failed:", e.message);
-        retFlights = makeMockFlights({ from: to, to: from, date: retISO });
-      }
+      try { retFlights = await fetchAmadeusOffers({ from: to, to: from, date: retISO, adults: passengers, travelClass }); }
+      catch { retFlights = makeMockFlights({ from: to, to: from, date: retISO }); }
     }
 
     function decorateWithPortalPrices(flight, travelISO) {
       const base = asMoney(flight.price) || 0;
       const prices = PORTALS.map((portal) => {
         const portalOffers = offersByPortal.get(portal) || [];
-        const best = applyBestOfferForPortal({
-          basePrice: base,
-          portal,
-          offers: portalOffers,
-          travelISO,
-          selectedPayments
-        });
+        const best = applyBestOfferForPortal({ basePrice: base, portal, offers: portalOffers, travelISO, selectedPayments });
         return {
           portal,
           basePrice: base,
