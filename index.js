@@ -103,7 +103,7 @@ function offerMatchesPayment(offer, selected) {
   return selected.some((sel) => labels.some((l) => l.includes(sel) || sel.includes(l)));
 }
 
-// --------- Payment label helpers (kept simple) ----------
+// --------- Payment label helpers ----------
 const DISPLAY = {
   "credit card": "Credit Card",
   "debit card": "Debit Card",
@@ -128,13 +128,59 @@ function makePaymentLabel(bank, type) {
   return `${titleCase(bank)} ${DISPLAY[type?.toLowerCase()] || type || ""}`.trim();
 }
 
+// --- NEW: Canonical bank normalization to clean the options list ---
+function normalizeBankName(raw) {
+  if (!raw) return "";
+  let s = String(raw).trim().replace(/\s+/g, " ").toLowerCase();
+
+  // common noise
+  s = s.replace(/\bltd\.?\b/g, "").replace(/\blimited\b/g, "").replace(/\bplc\b/g, "").trim();
+
+  // co-brands & aliases → parent bank
+  const map = [
+    [/amazon\s*pay\s*icici/i, "ICICI Bank"],
+    [/^icici\b/i, "ICICI Bank"],
+
+    [/flipkart\s*axis/i, "Axis Bank"],
+    [/^axis\b/i, "Axis Bank"],
+
+    [/\bau\s*small\s*finance\b/i, "AU Small Finance Bank"],
+
+    [/\bbobcard\b/i, "Bank of Baroda"],
+    [/bank\s*of\s*baroda|^bob\b/i, "Bank of Baroda"],
+
+    [/\bsbi\b|state\s*bank\s*of\s*india/i, "State Bank of India"],
+
+    [/hdfc/i, "HDFC Bank"],
+    [/kotak/i, "Kotak"],
+    [/yes\s*bank/i, "YES Bank"],
+    [/idfc/i, "IDFC First Bank"],
+    [/indusind/i, "IndusInd Bank"],
+    [/federal/i, "Federal Bank"],
+    [/rbl/i, "RBL Bank"],
+    [/standard\s*chartered/i, "Standard Chartered"],
+    [/hsbc/i, "HSBC"],
+    [/canara/i, "Canara Bank"],
+    [/bob\s*card/i, "Bank of Baroda"],
+  ];
+
+  for (const [rx, canon] of map) {
+    if (rx.test(raw)) return canon;
+    if (rx.test(s)) return canon;
+  }
+
+  // remove generic words like "bank" trailing/leading junk
+  const cleaned = titleCase(s.replace(/\b(bank|card|cards)\b/gi, "").trim());
+  return cleaned || titleCase(String(raw).trim());
+}
+
 function extractPaymentMethodLabel(offerDoc) {
   if (offerDoc.paymentMethodLabel) return offerDoc.paymentMethodLabel;
   if (Array.isArray(offerDoc.paymentMethods) && offerDoc.paymentMethods.length) {
     const first = offerDoc.paymentMethods[0];
     if (typeof first === "string") return first.trim();
     if (first && (first.bank || first.type || first.cardNetwork)) {
-      const bank = first.bank || "";
+      const bank = normalizeBankName(first.bank || "");
       const type = first.type || "";
       return makePaymentLabel(bank, type);
     }
@@ -283,9 +329,7 @@ app.get("/debug-types", async (_req, res) => {
     const a = Array.isArray(d.paymentMethods) ? d.paymentMethods : [];
     for (const pm of a) {
       if (typeof pm === "string") {
-        // e.g. "HSBC Credit Card EMI"
         const s = pm.toLowerCase();
-        const bank = pm.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
         const type =
           /\bemi\b/.test(s) ? "EMI" :
           /credit|cc/.test(s) ? "Credit Card" :
@@ -304,7 +348,7 @@ app.get("/debug-types", async (_req, res) => {
 });
 
 // -------------------- PAYMENT OPTIONS -----------------------
-// Returns { options: { "EMI": ["HSBC", "Bajaj Finserv", ...], "Credit Card": [...], ... } }
+// Returns { options: { "EMI": ["HSBC", ...], "Credit Card": [...], ... } }
 app.get("/payment-options", async (_req, res) => {
   try {
     const collection = (await initMongo()).collection("offers");
@@ -328,7 +372,6 @@ app.get("/payment-options", async (_req, res) => {
       { "validityPeriod.until": { $gte: today } },
     ];
 
-    // Pull a manageable slice; we only need paymentMethods/title/rawDiscount
     const cursor = collection.find(
       { isExpired: { $ne: true }, $or: activeValidityOr },
       { projection: { paymentMethods: 1, title: 1, rawDiscount: 1 }, limit: 4000 }
@@ -337,7 +380,6 @@ app.get("/payment-options", async (_req, res) => {
     const TYPES = PAYMENT_TYPES;
     const optionsSets = Object.fromEntries(TYPES.map((t) => [t, new Set()]));
 
-    // A small list to catch string-only bank mentions in title/rawDiscount
     const KNOWN_BANKS = [
       "ICICI Bank","HDFC Bank","Axis Bank","State Bank of India","SBI","Kotak",
       "YES Bank","IDFC First Bank","IndusInd Bank","Bank of Baroda","RBL Bank",
@@ -350,9 +392,8 @@ app.get("/payment-options", async (_req, res) => {
       if (!t) return res;
       KNOWN_BANKS.forEach((b) => {
         const rx = new RegExp(`\\b${b.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "i");
-        if (rx.test(t)) res.add(b);
+        if (rx.test(t)) res.add(normalizeBankName(b));
       });
-      // normalize SBI -> State Bank of India
       if (res.has("SBI") && !res.has("State Bank of India")) {
         res.delete("SBI");
         res.add("State Bank of India");
@@ -372,7 +413,6 @@ app.get("/payment-options", async (_req, res) => {
       return null;
     };
 
-    // Walk docs and collect
     for await (const doc of cursor) {
       const pm = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
 
@@ -384,13 +424,15 @@ app.get("/payment-options", async (_req, res) => {
             normType(entry.method) ||
             normType(entry.category) ||
             normType(entry.mode);
-          const bank =
+          const rawBank =
             String(entry.bank || entry.cardBank || entry.issuer || entry.cardIssuer || entry.provider || "").trim();
 
-          if (type && bank) {
-            optionsSets[type].add(bank);
-            // EMI is still card-based; surface those banks also under Credit Card for discovery
-            if (type === "EMI") optionsSets["Credit Card"].add(bank);
+          if (type && rawBank) {
+            const bank = normalizeBankName(rawBank);
+            if (bank) {
+              optionsSets[type].add(bank);
+              if (type === "EMI") optionsSets["Credit Card"].add(bank);
+            }
           }
         }
         // 2) String-only entries ("HSBC Credit Card EMI")
@@ -405,17 +447,17 @@ app.get("/payment-options", async (_req, res) => {
             /\bupi\b/i.test(s) ? "UPI" : null;
 
           if (type) {
-            // strip keywords to leave the bank-ish part
-            const bank = s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
+            const rawBank = s.replace(/credit\s*card|debit\s*card|\bemi\b|net\s*bank(?:ing)?|upi|wallet/gi, "").trim();
+            const bank = normalizeBankName(rawBank);
             if (bank) {
-              optionsSets[type].add(titleCase(bank));
-              if (type === "EMI") optionsSets["Credit Card"].add(titleCase(bank));
+              optionsSets[type].add(bank);
+              if (type === "EMI") optionsSets["Credit Card"].add(bank);
             }
           }
         }
       }
 
-      // 3) Titles / rawDiscount fallbacks (in case paymentMethods is empty or vague)
+      // 3) Titles / rawDiscount fallbacks
       if (!pm.length) {
         const text = `${doc.title || ""} ${doc.rawDiscount || ""}`;
         const hits = new Set();
