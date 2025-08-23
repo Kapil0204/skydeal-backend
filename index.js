@@ -214,9 +214,10 @@ const BRAND_OVERRIDES = {
 };
 
 function mapAmadeusToUI(itin, dictionaries) {
-  const seg = itin?.itineraries?.[0]?.segments?.[0];
-  const carrierCode = seg?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
-  const numStr = String(seg?.number || "");
+  const seg0 = itin?.itineraries?.[0]?.segments?.[0];
+  const segments = itin?.itineraries?.[0]?.segments || [];
+  const carrierCode = seg0?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
+  const numStr = String(seg0?.number || "");
   let airlineName = dictionaries?.carriers?.[carrierCode] || carrierCode;
 
   if (BRAND_OVERRIDES[carrierCode]) {
@@ -226,12 +227,20 @@ function mapAmadeusToUI(itin, dictionaries) {
     airlineName = "Air India Express";
   }
 
-  const departure = seg?.departure?.at ? new Date(seg.departure.at).toTimeString().slice(0,5) : "--:--";
-  const arrival   = seg?.arrival?.at   ? new Date(seg.arrival.at).toTimeString().slice(0,5)   : "--:--";
-  const flightNum = `${carrierCode} ${seg?.number || ""}`.trim();
-  const stops = (itin?.itineraries?.[0]?.segments?.length || 1) - 1;
+  // NEW: collect stop IATA codes (intermediate connections)
+  const stopCodes =
+    segments.length > 1
+      ? segments.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.iata || "").filter(Boolean)
+      : [];
+
+  const departure = seg0?.departure?.at ? new Date(seg0.departure.at).toTimeString().slice(0,5) : "--:--";
+  const lastSeg   = segments[segments.length - 1] || seg0;
+  const arrival   = lastSeg?.arrival?.at ? new Date(lastSeg.arrival.at).toTimeString().slice(0,5) : "--:--";
+  const flightNum = `${carrierCode} ${seg0?.number || ""}`.trim();
+  const stops = (segments.length || 1) - 1;
   const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
-  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops };
+
+  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops, stopCodes };
 }
 
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
@@ -248,7 +257,7 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
     adults: String(adults || 1),
     travelClass: CLASS,
     currencyCode: "INR",
-    max: "20",                           // ← 20 results
+    max: "20",
   });
   const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
@@ -389,7 +398,6 @@ app.get("/payment-options", async (_req, res) => {
 });
 
 // -------------------- MATCHING (type-aware) -----------------------
-// NEW: if no user selection, only allow offers with NO payment restriction
 function offerHasPaymentRestriction(offer) {
   const arr = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
   return arr.length > 0;
@@ -473,34 +481,6 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selecte
   return best;
 }
 
-// (kept for local dev if needed; NOT used by /search)
-function makeMockFlights({ from, to, date, count = 6 }) {
-  const carriers = [
-    { code: "AI", name: "Air India" },
-    { code: "UK", name: "Vistara" },
-    { code: "6E", name: "IndiGo" },
-    { code: "SG", name: "SpiceJet" },
-    { code: "G8", name: "Go First" },
-  ];
-  const base = 4500;
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const c = carriers[i % carriers.length];
-    const dep = new Date(`${date}T0${(8 + i) % 10}:00:00Z`);
-    const arr = new Date(dep.getTime() + (90 + i * 10) * 60000);
-    const price = base + i * 350 + Math.round(Math.random() * 400);
-    out.push({
-      flightNumber: `${c.code} ${100 + i}`,
-      airlineName: c.name,
-      departure: dep.toISOString().slice(11, 16),
-      arrival: arr.toISOString().slice(11, 16),
-      price: price.toFixed(2),
-      stops: i % 3 === 0 ? 1 : 0,
-    });
-  }
-  return out;
-}
-
 app.post("/search", async (req, res) => {
   try {
     const {
@@ -529,12 +509,10 @@ app.post("/search", async (req, res) => {
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // Outbound (REAL Amadeus)
     const outbound = await fetchAmadeusOffers({
       from: ORG, to: DST, date: depISO, adults: passengers, travelClass
     });
 
-    // Return (REAL Amadeus)
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
       retFlights = await fetchAmadeusOffers({
