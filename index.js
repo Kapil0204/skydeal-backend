@@ -200,7 +200,7 @@ async function getAmadeusToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiry - 30_000) return cachedToken;
 
-  const res = await fetch("https://test.api.amadeus.com/v1/security/oauth2/token", {
+  const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -232,7 +232,7 @@ function mapAmadeusToUI(itin, dictionaries) {
 }
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
   const token = await getAmadeusToken();
-  const url = new URL("https://test.api.amadeus.com/v2/shopping/flight-offers");
+  const url = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
   url.search = new URLSearchParams({
     originLocationCode: from,
     destinationLocationCode: to,
