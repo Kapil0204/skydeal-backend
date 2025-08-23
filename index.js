@@ -196,17 +196,27 @@ function normalizeUserPaymentChoices(arr) {
 let cachedToken = null;
 let tokenExpiry = 0;
 
+// Support both env naming styles
+const AMADEUS_ID =
+  process.env.AMADEUS_CLIENT_ID || process.env.AMADEUS_API_KEY;
+const AMADEUS_SECRET =
+  process.env.AMADEUS_CLIENT_SECRET || process.env.AMADEUS_API_SECRET;
+
 async function getAmadeusToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiry - 30_000) return cachedToken;
+
+  if (!AMADEUS_ID || !AMADEUS_SECRET) {
+    throw new Error("Amadeus env missing: set AMADEUS_CLIENT_ID & AMADEUS_CLIENT_SECRET");
+  }
 
   const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
-      client_id: process.env.AMADEUS_API_KEY,
-      client_secret: process.env.AMADEUS_API_SECRET,
+      client_id: AMADEUS_ID,
+      client_secret: AMADEUS_SECRET,
     }),
   });
 
@@ -344,7 +354,7 @@ app.get("/payment-options", async (_req, res) => {
           } else if (typeKey === "credit") {
             optionsSets["Credit Card"].add(bank);
           } else if (typeKey === "debit") {
-            optionsSets["Debit Card"].add(bank); // ← fixed )
+            optionsSets["Debit Card"].add(bank); // fixed
           } else if (typeKey === "netbanking") {
             optionsSets["NetBanking"].add(bank);
           } else if (typeKey === "wallet") {
@@ -458,7 +468,7 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selecte
   return best;
 }
 
-// NOTE: keep the mock generator for local dev if you want, but we DO NOT use it anymore in /search.
+// (kept for local dev if you ever want it again; NOT used by /search)
 function makeMockFlights({ from, to, date, count = 6 }) {
   const carriers = [
     { code: "AI", name: "Air India" },
