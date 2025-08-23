@@ -240,19 +240,18 @@ function mapAmadeusToUI(itin, dictionaries) {
   const stops = (segments.length || 1) - 1;
   const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
 
-  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops, stopCodes };
+  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops, stopCodes, carrierCode };
 }
 
 // Fetch ALL flight offers available from Amadeus (paginate if needed)
-async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
+// NEW: support optional includedAirlineCodes (array of codes) to probe coverage for 6E/QP etc.
+async function fetchAmadeusOffers({ from, to, date, adults, travelClass, includedAirlineCodes }) {
   const token = await getAmadeusToken();
   const ORG = String(from || "").trim().toUpperCase();
   const DST = String(to || "").trim().toUpperCase();
   const CLASS = String(travelClass || "ECONOMY").toUpperCase();
 
-  // start with the largest allowed page (Amadeus caps; commonly 250)
-  const base = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
-  base.search = new URLSearchParams({
+  const params = new URLSearchParams({
     originLocationCode: ORG,
     destinationLocationCode: DST,
     departureDate: date,
@@ -262,12 +261,19 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
     max: "250",
   });
 
+  if (Array.isArray(includedAirlineCodes) && includedAirlineCodes.length) {
+    params.set("includedAirlineCodes", includedAirlineCodes.join(","));
+  }
+
+  const base = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
+  base.search = params;
+
   const all = [];
   let carriersDict = {};
   let nextUrl = base.toString();
   let pageGuard = 0;
 
-  while (nextUrl && pageGuard < 10) { // safety guard for unexpected loops
+  while (nextUrl && pageGuard < 10) {
     const res = await fetch(nextUrl, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) {
       const t = await res.text();
@@ -282,11 +288,7 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
       all.push(...json.data);
     }
 
-    // detect pagination 'next' link if present
-    nextUrl =
-      json?.meta?.links?.next ||
-      json?.links?.next ||
-      null;
+    nextUrl = json?.meta?.links?.next || json?.links?.next || null;
     pageGuard += 1;
   }
 
@@ -515,6 +517,8 @@ app.post("/search", async (req, res) => {
       travelClass = "ECONOMY",
       tripType = "round-trip",
       paymentMethods = [],
+      // NEW (optional): probe specific carriers, e.g. ["6E"] or ["QP"]
+      includedAirlineCodes,
     } = req.body || {};
 
     const depISO = toISODateStr(departureDate);
@@ -535,13 +539,13 @@ app.post("/search", async (req, res) => {
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
     const outbound = await fetchAmadeusOffers({
-      from: ORG, to: DST, date: depISO, adults: passengers, travelClass
+      from: ORG, to: DST, date: depISO, adults: passengers, travelClass, includedAirlineCodes
     });
 
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
       retFlights = await fetchAmadeusOffers({
-        from: DST, to: ORG, date: retISO, adults: passengers, travelClass
+        from: DST, to: ORG, date: retISO, adults: passengers, travelClass, includedAirlineCodes
       });
     }
 
@@ -564,10 +568,19 @@ app.post("/search", async (req, res) => {
     const outboundDecorated = outbound.map((f) => decorateWithPortalPrices(f, depISO));
     const returnDecorated = retFlights.map((f) => decorateWithPortalPrices(f, retISO || depISO));
 
+    // NEW: carrier debug in response
+    const carrierSet = new Set([
+      ...outbound.map(f => f.carrierCode || ""),
+      ...retFlights.map(f => f.carrierCode || "")
+    ].filter(Boolean));
+
     res.json({
       outboundFlights: outboundDecorated,
       returnFlights: returnDecorated,
-      meta: { fallback: "live" }
+      meta: {
+        fallback: "live",
+        returnedCarriers: Array.from(carrierSet).sort()
+      }
     });
   } catch (err) {
     console.error("X /search error:", err.message);
