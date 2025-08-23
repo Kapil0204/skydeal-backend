@@ -206,10 +206,26 @@ async function getAmadeusToken() {
   return cachedToken;
 }
 
+// --- Brand overrides to separate AI vs IX (and fallback on AI+9xxx) ---
+const BRAND_OVERRIDES = {
+  IX: "Air India Express",
+  I5: "AIX Connect",
+  AI: (numStr) => (String(numStr || "").startsWith("9") ? "Air India Express" : "Air India"),
+};
+
 function mapAmadeusToUI(itin, dictionaries) {
   const seg = itin?.itineraries?.[0]?.segments?.[0];
   const carrierCode = seg?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
-  const airlineName = dictionaries?.carriers?.[carrierCode] || carrierCode;
+  const numStr = String(seg?.number || "");
+  let airlineName = dictionaries?.carriers?.[carrierCode] || carrierCode;
+
+  if (BRAND_OVERRIDES[carrierCode]) {
+    const ov = BRAND_OVERRIDES[carrierCode];
+    airlineName = typeof ov === "function" ? ov(numStr) : ov;
+  } else if (carrierCode === "AI" && numStr.startsWith("9")) {
+    airlineName = "Air India Express";
+  }
+
   const departure = seg?.departure?.at ? new Date(seg.departure.at).toTimeString().slice(0,5) : "--:--";
   const arrival   = seg?.arrival?.at   ? new Date(seg.arrival.at).toTimeString().slice(0,5)   : "--:--";
   const flightNum = `${carrierCode} ${seg?.number || ""}`.trim();
@@ -232,7 +248,7 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
     adults: String(adults || 1),
     travelClass: CLASS,
     currencyCode: "INR",
-    max: "20",
+    max: "20",                           // ← 20 results
   });
   const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
@@ -373,8 +389,17 @@ app.get("/payment-options", async (_req, res) => {
 });
 
 // -------------------- MATCHING (type-aware) -----------------------
+// NEW: if no user selection, only allow offers with NO payment restriction
+function offerHasPaymentRestriction(offer) {
+  const arr = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  return arr.length > 0;
+}
+
 function offerMatchesPayment(offer, selected) {
-  if (!selected || selected.length === 0) return true;
+  // No selection → apply only generic (non-payment-restricted) offers
+  if (!selected || selected.length === 0) {
+    return !offerHasPaymentRestriction(offer);
+  }
 
   const pairs = [];
   const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
