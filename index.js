@@ -6,44 +6,17 @@ import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
 
-// ---------- CORS (allow prod + vercel previews) ----------
-const ALLOWED_ORIGINS = new Set([
-  "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
-  "https://skydeal-frontend.vercel.app",
-]);
-const ALLOWED_PATTERNS = [/^https:\/\/skydeal-frontend.*\.vercel\.app$/];
-
-function isAllowedOrigin(origin = "") {
-  if (ALLOWED_ORIGINS.has(origin)) return true;
-  return ALLOWED_PATTERNS.some((rx) => rx.test(origin));
-}
-
+// ---------- CORS (robust & simple) ----------
+const corsConfig = {
+  origin: true, // reflect request Origin
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+  maxAge: 86400
+};
 app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
-
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (isAllowedOrigin(origin)) return cb(null, true);
-      cb(new Error(`CORS: blocked origin ${origin}`));
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-    maxAge: 86400,
-  })
-);
-
-app.options("*", (req, res) => {
-  const origin = req.headers.origin || "";
-  if (isAllowedOrigin(origin)) {
-    res.header("Access-Control-Allow-Origin", origin);
-    res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    return res.sendStatus(200);
-  }
-  return res.sendStatus(403);
-});
+app.use(cors(corsConfig));
+app.options("*", cors(corsConfig)); // ensure preflight always returns the headers
 
 app.use(express.json());
 
@@ -60,6 +33,10 @@ let mongoClient;
 let db;
 async function initMongo() {
   if (db) return db;
+  if (!MONGODB_URI) {
+    console.warn("⚠️  MONGODB_URI not set; offers/filters will not work.");
+    return null;
+  }
   mongoClient = new MongoClient(MONGODB_URI, { serverApi: ServerApiVersion.v1 });
   await mongoClient.connect();
   db = mongoClient.db(MONGODB_DB);
@@ -87,7 +64,7 @@ function toISODateStr(d) {
   } catch { return null; }
 }
 function isOfferActiveForDate(offer, travelISO) {
-  if (offer.isExpired === true) return false;
+  if (offer?.isExpired === true) return false;
   const end =
     offer?.validityPeriod?.end ??
     offer?.validityPeriod?.to ??
@@ -172,7 +149,6 @@ function extractPaymentMethodLabel(offerDoc) {
 }
 
 // -------------------- Selected payment parsing --------------------
-/** normalize selections to { bank: 'hsbc', type: 'credit'|'debit'|'emi'|'netbanking'|'wallet'|'upi'|null } */
 function normalizeUserPaymentChoices(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
   const out = [];
@@ -270,8 +246,10 @@ async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
 
 // -------------------- DB LOOKUP --------------------
 async function loadActiveCouponOffersByPortal({ travelISO }) {
-  const collection = (await initMongo()).collection("offers");
+  const database = await initMongo();
+  if (!database) return new Map(PORTALS.map(p => [p, []]));
 
+  const collection = database.collection("offers");
   const today = travelISO;
   const orValidity = [
     { validityPeriod: { $exists: false } },
@@ -309,8 +287,10 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
 // -------------------- PAYMENT OPTIONS -----------------------
 app.get("/payment-options", async (_req, res) => {
   try {
-    const collection = (await initMongo()).collection("offers");
+    const database = await initMongo();
+    if (!database) return res.json({ options: {} });
 
+    const collection = database.collection("offers");
     const today = new Date().toISOString().slice(0, 10);
     const activeValidityOr = [
       { validityPeriod: { $exists: false } },
@@ -354,7 +334,7 @@ app.get("/payment-options", async (_req, res) => {
           } else if (typeKey === "credit") {
             optionsSets["Credit Card"].add(bank);
           } else if (typeKey === "debit") {
-            optionsSets["Debit Card"].add(bank); // fixed
+            optionsSets["Debit Card"].add(bank);
           } else if (typeKey === "netbanking") {
             optionsSets["NetBanking"].add(bank);
           } else if (typeKey === "wallet") {
@@ -468,7 +448,7 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selecte
   return best;
 }
 
-// (kept for local dev if you ever want it again; NOT used by /search)
+// (kept for local dev if needed; NOT used by /search)
 function makeMockFlights({ from, to, date, count = 6 }) {
   const carriers = [
     { code: "AI", name: "Air India" },
@@ -518,19 +498,18 @@ app.post("/search", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields", missing, depISO, retISO });
     }
 
-    // normalize inputs for Amadeus
     const ORG = String(from).trim().toUpperCase();
     const DST = String(to).trim().toUpperCase();
 
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // Outbound (REAL Amadeus; no mock fallback)
+    // Outbound (REAL Amadeus)
     const outbound = await fetchAmadeusOffers({
       from: ORG, to: DST, date: depISO, adults: passengers, travelClass
     });
 
-    // Return (REAL Amadeus; no mock fallback)
+    // Return (REAL Amadeus)
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
       retFlights = await fetchAmadeusOffers({
@@ -564,7 +543,6 @@ app.post("/search", async (req, res) => {
     });
   } catch (err) {
     console.error("X /search error:", err.message);
-    // If Amadeus fails, surface it; do not return mock so we can debug real issues
     res.status(502).json({ error: "amadeus_failed", message: err.message });
   }
 });
