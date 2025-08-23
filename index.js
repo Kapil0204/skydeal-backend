@@ -219,6 +219,7 @@ async function getAmadeusToken() {
   tokenExpiry = Date.now() + (data.expires_in || 1800) * 1000;
   return cachedToken;
 }
+
 function mapAmadeusToUI(itin, dictionaries) {
   const seg = itin?.itineraries?.[0]?.segments?.[0];
   const carrierCode = seg?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
@@ -230,15 +231,20 @@ function mapAmadeusToUI(itin, dictionaries) {
   const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
   return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops };
 }
+
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
   const token = await getAmadeusToken();
+  const ORG = String(from || "").trim().toUpperCase();
+  const DST = String(to || "").trim().toUpperCase();
+  const CLASS = String(travelClass || "ECONOMY").toUpperCase();
+
   const url = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
   url.search = new URLSearchParams({
-    originLocationCode: from,
-    destinationLocationCode: to,
+    originLocationCode: ORG,
+    destinationLocationCode: DST,
     departureDate: date,
     adults: String(adults || 1),
-    travelClass: travelClass || "ECONOMY",
+    travelClass: CLASS,
     currencyCode: "INR",
     max: "20",
   });
@@ -402,8 +408,8 @@ function offerMatchesPayment(offer, selected) {
     if (!wantBank) return false;
     return pairs.some(p => {
       if (p.bank !== wantBank) return false;
+      if (!p.type && wantType) return false;
       if (!wantType) return true;
-      if (!p.type)   return false;
       if (wantType === "emi") return p.type === "emi";
       return p.type === wantType;
     });
@@ -452,6 +458,7 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selecte
   return best;
 }
 
+// NOTE: keep the mock generator for local dev if you want, but we DO NOT use it anymore in /search.
 function makeMockFlights({ from, to, date, count = 6 }) {
   const carriers = [
     { code: "AI", name: "Air India" },
@@ -501,19 +508,24 @@ app.post("/search", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields", missing, depISO, retISO });
     }
 
+    // normalize inputs for Amadeus
+    const ORG = String(from).trim().toUpperCase();
+    const DST = String(to).trim().toUpperCase();
+
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // Outbound
-    let outbound = [];
-    try { outbound = await fetchAmadeusOffers({ from, to, date: depISO, adults: passengers, travelClass }); }
-    catch { outbound = makeMockFlights({ from, to, date: depISO }); }
+    // Outbound (REAL Amadeus; no mock fallback)
+    const outbound = await fetchAmadeusOffers({
+      from: ORG, to: DST, date: depISO, adults: passengers, travelClass
+    });
 
-    // Return
+    // Return (REAL Amadeus; no mock fallback)
     let retFlights = [];
     if (tripType === "round-trip" && retISO) {
-      try { retFlights = await fetchAmadeusOffers({ from: to, to: from, date: retISO, adults: passengers, travelClass }); }
-      catch { retFlights = makeMockFlights({ from: to, to: from, date: retISO }); }
+      retFlights = await fetchAmadeusOffers({
+        from: DST, to: ORG, date: retISO, adults: passengers, travelClass
+      });
     }
 
     function decorateWithPortalPrices(flight, travelISO) {
@@ -535,19 +547,15 @@ app.post("/search", async (req, res) => {
     const outboundDecorated = outbound.map((f) => decorateWithPortalPrices(f, depISO));
     const returnDecorated = retFlights.map((f) => decorateWithPortalPrices(f, retISO || depISO));
 
-    const usedFallback =
-      outbound.some(f => !/^[A-Z0-9]+ \d+$/.test(f.flightNumber || "")) ||
-      (tripType === "round-trip" && retFlights.length > 0 &&
-       retFlights.some(f => !/^[A-Z0-9]+ \d+$/.test(f.flightNumber || "")));
-
     res.json({
       outboundFlights: outboundDecorated,
       returnFlights: returnDecorated,
-      meta: { fallback: usedFallback ? "mock" : "live" }
+      meta: { fallback: "live" }
     });
   } catch (err) {
     console.error("X /search error:", err.message);
-    res.status(500).json({ error: "Internal Server Error" });
+    // If Amadeus fails, surface it; do not return mock so we can debug real issues
+    res.status(502).json({ error: "amadeus_failed", message: err.message });
   }
 });
 
