@@ -227,7 +227,7 @@ function mapAmadeusToUI(itin, dictionaries) {
     airlineName = "Air India Express";
   }
 
-  // NEW: collect stop IATA codes (intermediate connections)
+  // collect stop IATA codes (intermediate connections)
   const stopCodes =
     segments.length > 1
       ? segments.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.iata || "").filter(Boolean)
@@ -243,30 +243,55 @@ function mapAmadeusToUI(itin, dictionaries) {
   return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops, stopCodes };
 }
 
+// Fetch ALL flight offers available from Amadeus (paginate if needed)
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass }) {
   const token = await getAmadeusToken();
   const ORG = String(from || "").trim().toUpperCase();
   const DST = String(to || "").trim().toUpperCase();
   const CLASS = String(travelClass || "ECONOMY").toUpperCase();
 
-  const url = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
-  url.search = new URLSearchParams({
+  // start with the largest allowed page (Amadeus caps; commonly 250)
+  const base = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
+  base.search = new URLSearchParams({
     originLocationCode: ORG,
     destinationLocationCode: DST,
     departureDate: date,
     adults: String(adults || 1),
     travelClass: CLASS,
     currencyCode: "INR",
-    max: "20",
+    max: "250",
   });
-  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`Amadeus search error: ${res.status} ${t}`);
+
+  const all = [];
+  let carriersDict = {};
+  let nextUrl = base.toString();
+  let pageGuard = 0;
+
+  while (nextUrl && pageGuard < 10) { // safety guard for unexpected loops
+    const res = await fetch(nextUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Amadeus search error: ${res.status} ${t}`);
+    }
+    const json = await res.json();
+
+    if (json?.dictionaries?.carriers) {
+      carriersDict = { ...carriersDict, ...json.dictionaries.carriers };
+    }
+    if (Array.isArray(json?.data)) {
+      all.push(...json.data);
+    }
+
+    // detect pagination 'next' link if present
+    nextUrl =
+      json?.meta?.links?.next ||
+      json?.links?.next ||
+      null;
+    pageGuard += 1;
   }
-  const json = await res.json();
-  const dict = json?.dictionaries || {};
-  return (json?.data || []).map((d) => mapAmadeusToUI(d, dict));
+
+  const dict = { carriers: carriersDict };
+  return all.map((d) => mapAmadeusToUI(d, dict));
 }
 
 // -------------------- DB LOOKUP --------------------
