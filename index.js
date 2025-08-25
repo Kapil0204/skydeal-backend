@@ -6,19 +6,32 @@ import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
 
-// ---------- CORS (robust & simple) ----------
+/* ===== CORS FIX (only change) =====
+   Always set CORS headers (even on errors/preflight) */
+app.use((req, res, next) => {
+  const origin = req.headers.origin || "*";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+/* keep cors() too — this just guarantees headers regardless */
 const corsConfig = {
-  origin: true, // reflect request Origin
+  origin: true,
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: false,
   maxAge: 86400
 };
-app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 app.use(cors(corsConfig));
-app.options("*", cors(corsConfig)); // ensure preflight always returns the headers
+app.options("*", cors(corsConfig));
 
 app.use(express.json());
+
+/* Health check (helps verify CORS quickly) */
+app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 // -------------------- CONFIG -----------------------
 const PORT = process.env.PORT || 3000;
@@ -184,7 +197,7 @@ async function getAmadeusToken() {
 
   if (!AMADEUS_ID || !AMADEUS_SECRET) {
     throw new Error("Amadeus env missing: set AMADEUS_CLIENT_ID & AMADEUS_CLIENT_SECRET");
-  }
+    }
 
   const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
     method: "POST",
@@ -244,7 +257,6 @@ function mapAmadeusToUI(itin, dictionaries) {
 }
 
 // Fetch ALL flight offers available from Amadeus (paginate if needed)
-// NEW: support optional includedAirlineCodes (array of codes) to probe coverage for 6E/QP etc.
 async function fetchAmadeusOffers({ from, to, date, adults, travelClass, includedAirlineCodes }) {
   const token = await getAmadeusToken();
   const ORG = String(from || "").trim().toUpperCase();
@@ -431,9 +443,8 @@ function offerHasPaymentRestriction(offer) {
 }
 
 function offerMatchesPayment(offer, selected) {
-  // No selection → apply only generic (non-payment-restricted) offers
   if (!selected || selected.length === 0) {
-    return !offerHasPaymentRestriction(offer);
+    return !offerHasPaymentRestriction(offer); // only generic offers if nothing selected
   }
 
   const pairs = [];
@@ -517,8 +528,7 @@ app.post("/search", async (req, res) => {
       travelClass = "ECONOMY",
       tripType = "round-trip",
       paymentMethods = [],
-      // NEW (optional): probe specific carriers, e.g. ["6E"] or ["QP"]
-      includedAirlineCodes,
+      includedAirlineCodes, // optional probe
     } = req.body || {};
 
     const depISO = toISODateStr(departureDate);
@@ -568,7 +578,6 @@ app.post("/search", async (req, res) => {
     const outboundDecorated = outbound.map((f) => decorateWithPortalPrices(f, depISO));
     const returnDecorated = retFlights.map((f) => decorateWithPortalPrices(f, retISO || depISO));
 
-    // NEW: carrier debug in response
     const carrierSet = new Set([
       ...outbound.map(f => f.carrierCode || ""),
       ...retFlights.map(f => f.carrierCode || "")
