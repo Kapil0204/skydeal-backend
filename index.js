@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
+import { kiwiRoundTrip, lccPresence, findAnyPrice } from "./services/kiwiAdapter.js";
 
 const app = express();
 
@@ -596,6 +597,37 @@ app.post("/search", async (req, res) => {
     res.status(502).json({ error: "amadeus_failed", message: err.message });
   }
 });
+
+// POST /kiwi/probe
+// Body: { from, to, departureDate, returnDate?, adults?, travelClass? }
+app.post("/kiwi/probe", async (req, res) => {
+  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
+  if (!from || !to || !departureDate) {
+    return res.status(400).json({ error: "from, to, departureDate are required (IATA + YYYY-MM-DD)" });
+  }
+
+  try {
+    const json = await kiwiRoundTrip({
+      from, to, departureDate, returnDate, adults, travelClass, currency: "INR"
+    });
+
+    const presence = lccPresence(json);
+    const priceSample = findAnyPrice(json);
+
+    res.json({
+      query: { from, to, departureDate, returnDate, adults, travelClass },
+      lccFound: { indigo: presence.indigo, akasa: presence.akasa, spicejet: presence.spicejet },
+      carriersSample: presence.carriersSample,
+      priceSampleINR: priceSample ?? null,
+      source: "kiwi-rapidapi",
+      fetchedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Kiwi probe error:", err);
+    res.status(500).json({ error: err.message || "Kiwi probe failed" });
+  }
+});
+
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
