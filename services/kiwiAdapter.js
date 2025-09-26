@@ -223,3 +223,140 @@ export function lccPresence(json) {
     carriersSample: carriers.slice(0, 20),
   };
 }
+// ---------------- Normalization for SkyDeal (date/time/cost only) ---------------
+function pickTime(obj) {
+  // return ISO-like string if found (prioritize UTC/ISO-looking fields)
+  if (!obj || typeof obj !== "object") return null;
+  const candidates = [];
+  const pushIf = (v) => { if (v && typeof v === "string") candidates.push(v); };
+  // common shapes
+  pushIf(obj.utc); pushIf(obj.UTC); pushIf(obj.timeUtc); pushIf(obj.dateUtc);
+  pushIf(obj.at); pushIf(obj.time); pushIf(obj.datetime); pushIf(obj.dateTime || obj.date_time);
+  pushIf(obj.localDateTime || obj.localTime || obj.local);
+  // pick the first ISO-like
+  const iso = candidates.find(s => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s));
+  return iso || candidates[0] || null;
+}
+
+function pickAirport(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const vals = [];
+  for (const k of ["iata", "IATA", "code", "airportCode", "airport", "id"]) {
+    const v = obj[k];
+    if (typeof v === "string" && /^[A-Z]{3}$/.test(v)) return v;
+    if (typeof v === "string") vals.push(v.toUpperCase());
+  }
+  // last resort: scan strings for IATA-looking tokens
+  for (const v of vals) {
+    const m = v.match(/\b([A-Z]{3})\b/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function pickCarrier(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const v = obj.marketingCarrier || obj.operatingCarrier || obj.carrier || obj.airline || {};
+  if (typeof v === "string") return v.toUpperCase();
+  if (v && typeof v.code === "string") return v.code.toUpperCase();
+  if (v && typeof v.name === "string") return v.name.toUpperCase();
+  return null;
+}
+
+function pickFlightNo(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  for (const k of ["flightNumber", "number", "flightNo", "no"]) {
+    const v = obj[k];
+    if (v != null) return String(v).toUpperCase();
+  }
+  return null;
+}
+
+// Try to extract a price (INR) from an itinerary node
+function pickPriceINR(it) {
+  const tryPaths = [
+    it?.pricing?.grandTotal, it?.pricing?.total, it?.price?.total, it?.price?.amount,
+    it?.fare?.total, it?.total, it?.amount, it?.grandTotal
+  ];
+  for (const v of tryPaths) {
+    const n = typeof v === "string" ? parseFloat(v.replace(/[, ₹$€]/g, "")) : Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  // fallback: scan object
+  let found = null;
+  (function walk(n) {
+    if (found !== null || !n) return;
+    if (Array.isArray(n)) { for (const x of n) { walk(x); if (found !== null) break; } return; }
+    if (typeof n !== "object") return;
+    for (const [k, v] of Object.entries(n)) {
+      if (found !== null) break;
+      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
+      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
+        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (Number.isNaN(n2)) continue; found = n2; break;
+      }
+      if (typeof v === "object") walk(v);
+    }
+  })(it);
+  return found;
+}
+
+/**
+ * Normalize Kiwi wrapper payload into rows: { carrier, flightNo, depTime, arrTime, depIATA, arrIATA, priceINR }
+ * We try several common layouts: itineraries[].segments, .legs, .outbound.segments, .bounds[0].segments.
+ */
+export function normalizeKiwiItineraries(json, maxRows = 30) {
+  const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
+  const out = [];
+
+  for (const it of itins) {
+    let segs =
+      Array.isArray(it?.segments) ? it.segments :
+      Array.isArray(it?.legs) ? it.legs :
+      Array.isArray(it?.bounds?.[0]?.segments) ? it.bounds[0].segments :
+      Array.isArray(it?.outbound?.segments) ? it.outbound.segments :
+      null;
+
+    // If no recognizable segment list, scan for any array that looks like segments
+    if (!segs) {
+      for (const [k, v] of Object.entries(it)) {
+        if (Array.isArray(v) && v.length && typeof v[0] === "object" && (
+          /segment|leg|bound|slice/i.test(k)
+        )) { segs = v; break; }
+      }
+    }
+
+    if (!Array.isArray(segs) || segs.length === 0) continue;
+
+    const first = segs[0];
+    const last  = segs[segs.length - 1];
+
+    const depTime = pickTime(first?.departure || first?.depart || first);
+    const arrTime = pickTime(last?.arrival || last?.arrive || last);
+
+    const depIATA = pickAirport(first?.departure?.airport || first?.origin || first?.from || first);
+    const arrIATA = pickAirport(last?.arrival?.airport  || last?.destination || last?.to  || last);
+
+    const carrier = (pickCarrier(first) || pickCarrier(it) || "").toUpperCase();
+    const flightNoRaw = pickFlightNo(first) || pickFlightNo(it);
+    const flightNo = flightNoRaw ? `${carrier ? carrier : ""}${carrier && flightNoRaw ? "-" : ""}${flightNoRaw}` : null;
+
+    const priceINR = pickPriceINR(it);
+
+    if (depTime || arrTime || priceINR) {
+      out.push({
+        carrier: carrier || null,
+        flightNo: flightNo || null,
+        depTime: depTime || null,
+        arrTime: arrTime || null,
+        depIATA: depIATA || null,
+        arrIATA: arrIATA || null,
+        priceINR: priceINR ?? null,
+        source: "kiwi-rapidapi"
+      });
+    }
+
+    if (out.length >= maxRows) break;
+  }
+
+  return out;
+}

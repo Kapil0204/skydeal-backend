@@ -727,6 +727,29 @@ app.post("/kiwi/probe", async (req, res) => {
   }
 });
 
+import { normalizeKiwiItineraries } from "./services/kiwiAdapter.js";
+
+app.post("/kiwi/search", async (req, res) => {
+  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
+  if (!from || !to || !departureDate) {
+    return res.status(400).json({ error: "from, to, departureDate are required" });
+  }
+  try {
+    const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
+    const rows = normalizeKiwiItineraries(json, 50);
+    return res.json({
+      count: rows.length,
+      items: rows,
+      fetchedAt: new Date().toISOString(),
+      requestUrl: json?._meta?.requestUrl || null
+    });
+  } catch (err) {
+    console.error("Kiwi search error:", err);
+    return res.status(500).json({ error: err.message || "Kiwi search failed" });
+  }
+});
+
+
 
 
 
