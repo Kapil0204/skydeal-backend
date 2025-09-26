@@ -602,7 +602,7 @@ app.post("/search", async (req, res) => {
 // Body: { from, to, departureDate, returnDate?, adults?, travelClass? }
 // Add ?debug=1 to include a rawSnippet of the Kiwi response
 app.post("/kiwi/probe", async (req, res) => {
-  const debug = "debug" in req.query; // enable via /kiwi/probe?debug=1
+  const debug = "debug" in req.query;
 
   const {
     from,
@@ -621,17 +621,64 @@ app.post("/kiwi/probe", async (req, res) => {
 
   try {
     const json = await kiwiRoundTrip({
-      from,
-      to,
-      departureDate,
-      returnDate,
-      adults,
-      travelClass,
-      currency: "INR",
+      from, to, departureDate, returnDate, adults, travelClass, currency: "INR",
     });
+
+    // --- helpers to pull concrete evidence from the payload ---
+    const itinerariesCount =
+      (json && json.metadata && typeof json.metadata.itinerariesCount === "number")
+        ? json.metadata.itinerariesCount
+        : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
+
+    function summarizeFirstItinerary(j) {
+      const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
+      if (!itins.length) return null;
+      const it0 = itins[0];
+
+      // collect any carrier codes/names on the first itinerary
+      const carriers = new Set();
+      (function walk(n) {
+        if (!n) return;
+        if (Array.isArray(n)) { n.forEach(walk); return; }
+        if (typeof n !== "object") return;
+        for (const [k, v] of Object.entries(n)) {
+          const lk = k.toLowerCase();
+          if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
+            carriers.add(v.toUpperCase());
+          } else if (typeof v === "object") {
+            walk(v);
+          }
+        }
+      })(it0);
+
+      // try to find a clear price field on the first itinerary
+      let price = null;
+      (function walkForPrice(n) {
+        if (price !== null || !n) return;
+        if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
+        if (typeof n !== "object") return;
+        for (const [k, v] of Object.entries(n)) {
+          if (price !== null) break;
+          if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) {
+            price = v; break;
+          }
+          if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
+            const n2 = parseFloat(v.replace(/[, ₹$€]/g, ""));
+            if (!Number.isNaN(n2)) { price = n2; break; }
+          }
+          if (typeof v === "object") walkForPrice(v);
+        }
+      })(it0);
+
+      return {
+        carriers: Array.from(carriers).slice(0, 8),
+        priceINR_guess: price
+      };
+    }
 
     const presence = lccPresence(json);
     const priceSample = findAnyPrice(json);
+    const firstItin = summarizeFirstItinerary(json);
 
     const payload = {
       query: { from, to, departureDate, returnDate, adults, travelClass },
@@ -641,7 +688,10 @@ app.post("/kiwi/probe", async (req, res) => {
         spicejet: presence.spicejet,
       },
       carriersSample: presence.carriersSample,
+      itinerariesCount,
+      firstItinerary: firstItin,
       priceSampleINR: priceSample ?? null,
+      requestUrl: json?._meta?.requestUrl || null,
       source: "kiwi-rapidapi",
       fetchedAt: new Date().toISOString(),
     };
@@ -658,6 +708,7 @@ app.post("/kiwi/probe", async (req, res) => {
     return res.status(500).json({ error: err.message || "Kiwi probe failed" });
   }
 });
+
 
 
 
