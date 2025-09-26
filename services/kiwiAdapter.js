@@ -16,7 +16,7 @@ function toDDMMYYYY(input) {
   if (!input) return "";
   if (typeof input === "string") {
     const s = input.trim();
-    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s; // already DD/MM/YYYY
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s; // DD/MM/YYYY
     const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); // YYYY-MM-DD
     if (iso) { const [, y, m, d] = iso; return `${d}/${m}/${y}`; }
     const slash = s.match(/^(\d{4})\/(\d{2})\/(\d{2})$/); // YYYY/MM/DD
@@ -29,10 +29,7 @@ function toDDMMYYYY(input) {
 }
 
 /* =========== Provider location mapping (wrapper-specific) =========== */
-/**
- * Some RapidAPI travel wrappers expect "City:slug_cc" for source/destination.
- * Best-effort slugs for common Indian cities + a few globals.
- */
+
 const IATA_TO_CITY_SLUG = {
   // India
   BLR: "City:bangalore_in",
@@ -217,60 +214,28 @@ export function lccPresence(json) {
   };
 }
 
-/* ======================= Normalization ======================= */
-// ---------------- Normalization for SkyDeal (date/time/cost only) ---------------
-function isObj(x){ return x && typeof x === "object"; }
+/* ======================= Normalization (ultra-agnostic) ======================= */
 
-function pickTimeNode(n) {
-  if (!isObj(n)) return null;
-  const s =
-    n.timeUtc || n.utc || n.dateUtc || n.at ||
-    n.time || n.datetime || n.dateTime || n.date_time ||
-    n.localDateTime || n.local || n.iso;
-  if (typeof s === "string") return s;
-  if (typeof s === "number" && Number.isFinite(s)) {
-    const d = new Date(s > 1e12 ? s : s * 1000);
-    if (!Number.isNaN(d)) return d.toISOString();
+/** Utilities */
+const isObj = (x) => x && typeof x === "object";
+
+function numify(x) {
+  if (x == null) return null;
+  if (typeof x === "number") return Number.isFinite(x) ? x : null;
+  if (typeof x === "string") {
+    const n = parseFloat(x.replace(/[, ₹$€]/g, ""));
+    return Number.isFinite(n) ? n : null;
   }
   return null;
 }
 
-function pickAirportCode(n) {
-  if (!isObj(n)) return null;
-  const a = n.airport || n.airportInfo || n.origin || n.destination || n;
-  const c = a?.code || a?.iata || a?.IATA || a?.id;
-  if (typeof c === "string") {
-    const up = c.toUpperCase();
-    if (/^[A-Z]{3}$/.test(up)) return up;
-    const m = up.match(/\b([A-Z]{3})\b/);
-    return m ? m[1] : up;
-  }
-  return null;
-}
-
-function pickCarrierCode(n) {
-  if (!isObj(n)) return null;
-  const cand = n.marketingCarrier || n.operatingCarrier || n.carrier || n.airline || n.company || {};
-  if (typeof cand === "string") return cand.toUpperCase();
-  if (isObj(cand)) {
-    if (typeof cand.code === "string") return cand.code.toUpperCase();
-    if (typeof cand.name === "string") return cand.name.toUpperCase();
-  }
-  return null;
-}
-
-function pickFlightNumber(n) {
-  if (!isObj(n)) return null;
-  const v = n.marketingFlightNumber ?? n.flightNumber ?? n.number ?? n.flightNo ?? n.no;
-  return v != null ? String(v).toUpperCase() : null;
-}
-
+/** Price extractor (broad scan) */
 function pickPriceINR(it) {
-  const asNum = (x) => (typeof x === "string" ? parseFloat(x.replace(/[, ₹$€]/g, "")) : Number(x));
-  const p1 = it?.pricing?.grandTotal ?? it?.pricing?.total ??
-             it?.price?.grandTotal ?? it?.price?.total ??
-             it?.fare?.total ?? it?.total ?? it?.amount ?? it?.grandTotal;
-  if (p1 != null && Number.isFinite(asNum(p1))) return asNum(p1);
+  const direct = it?.pricing?.grandTotal ?? it?.pricing?.total ??
+                 it?.price?.grandTotal ?? it?.price?.total ??
+                 it?.fare?.total ?? it?.total ?? it?.amount ?? it?.grandTotal;
+  const d = numify(direct);
+  if (d != null) return d;
 
   let found = null;
   (function walk(n) {
@@ -279,9 +244,9 @@ function pickPriceINR(it) {
     if (!isObj(n)) return;
     for (const [k, v] of Object.entries(n)) {
       if (found !== null) break;
-      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
-      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (Number.isFinite(n2)) { found = n2; break; }
+      if (/price|total|amount|fare|value|grand/i.test(k)) {
+        const n2 = numify(v);
+        if (n2 != null) { found = n2; break; }
       }
       if (isObj(v) || Array.isArray(v)) walk(v);
     }
@@ -289,41 +254,82 @@ function pickPriceINR(it) {
   return found;
 }
 
-// Find the “segments” array wherever it lives (segments/legs/slices/bounds…)
-function collectSegmentsFrom(it) {
-  // Common direct shapes
-  if (Array.isArray(it?.segments) && it.segments.length) return it.segments;
-  if (Array.isArray(it?.legs) && it.legs.length) return it.legs;
-
-  // Kiwi-like nested shapes
-  if (Array.isArray(it?.bounds)) {
-    for (const b of it.bounds) {
-      if (Array.isArray(b?.segments) && b.segments.length) return b.segments;
-      if (Array.isArray(b?.legs) && b.legs.length) return b.legs;
+/** Generic key-based string/number finder (deep) */
+function deepFindByKeyRegex(node, keyRegex) {
+  let out = null;
+  (function walk(n) {
+    if (out !== null || !n) return;
+    if (Array.isArray(n)) { for (const x of n) { walk(x); if (out !== null) break; } return; }
+    if (!isObj(n)) return;
+    for (const [k, v] of Object.entries(n)) {
+      if (out !== null) break;
+      if (keyRegex.test(k)) {
+        if (typeof v === "string" || typeof v === "number") { out = v; break; }
+        if (isObj(v) && typeof v.iso === "string") { out = v.iso; break; }
+      }
+      if (isObj(v) || Array.isArray(v)) walk(v);
     }
-  }
-  if (Array.isArray(it?.slices)) {
-    for (const s of it.slices) {
-      if (Array.isArray(s?.segments) && s.segments.length) return s.segments;
-      if (Array.isArray(s?.legs) && s.legs.length) return s.legs;
-    }
-  }
-  if (Array.isArray(it?.outbound?.segments) && it.outbound.segments.length) return it.outbound.segments;
+  })(node);
+  return out;
+}
 
-  // Deep probe: any array of objects with departure/arrival-like nodes
-  const candidates = [];
-  (function scan(node) {
-    if (!isObj(node)) return;
-    for (const [, v] of Object.entries(node)) {
-      if (Array.isArray(v) && v.length && isObj(v[0])) {
-        const looksSegmenty = v.some(s =>
-          isObj(s) && (s.departure || s.arrival || s.depart || s.arrive)
-        );
-        if (looksSegmenty) candidates.push(v);
-      } else if (isObj(v)) scan(v);
+/** For airport codes, also accept 3-letter tokens inside strings */
+function deepFindIATA(node, keyRegex) {
+  const val = deepFindByKeyRegex(node, keyRegex);
+  if (val == null) return null;
+  const s = String(val).toUpperCase();
+  const m = s.match(/\b([A-Z]{3})\b/);
+  return m ? m[1] : /^[A-Z]{3}$/.test(s) ? s : null;
+}
+
+/** Choose the “best” array of segment-like objects anywhere in the itinerary */
+function deepFindSegmentArray(it) {
+  let best = null;
+
+  function scoreSegmentArray(arr) {
+    // Look at first few elements to score: dep/arr presence, times, airports, carrier/number
+    let score = 0;
+    for (let i = 0; i < Math.min(arr.length, 3); i++) {
+      const s = arr[i];
+      if (!isObj(s)) continue;
+      const hasDep = s.departure || s.depart || s.from || s.origin || s.start;
+      const hasArr = s.arrival || s.arrive || s.to || s.destination || s.end;
+      if (hasDep) score += 2;
+      if (hasArr) score += 2;
+
+      const depTime = deepFindByKeyRegex(s, /(dep|origin|from|start).*(utc|time|date|iso)|^(dep|origin|from|start)$/i);
+      const arrTime = deepFindByKeyRegex(s, /(arr|dest|to|end).*(utc|time|date|iso)|^(arr|dest|to|end)$/i);
+      if (depTime) score += 2;
+      if (arrTime) score += 2;
+
+      const depIata = deepFindIATA(s, /(dep|origin|from|start).*(iata|code|airport)|^(dep|origin|from|start)$/i);
+      const arrIata = deepFindIATA(s, /(arr|dest|to|end).*(iata|code|airport)|^(arr|dest|to|end)$/i);
+      if (depIata) score += 2;
+      if (arrIata) score += 2;
+
+      const carrier = deepFindByKeyRegex(s, /(marketing|operating|carrier|airline|company).*(code|name)?/i);
+      const number  = deepFindByKeyRegex(s, /(marketing)?flight(number)?|^number$|^no$/i);
+      if (carrier) score += 1;
+      if (number) score += 1;
+    }
+    return score;
+  }
+
+  (function walk(n) {
+    if (!n) return;
+    if (Array.isArray(n) && n.length && isObj(n[0])) {
+      const sc = scoreSegmentArray(n);
+      if (sc > 0 && (!best || sc > best.score)) best = { arr: n, score: sc };
+      // also walk into items to find nested arrays
+      for (const item of n) walk(item);
+      return;
+    }
+    if (isObj(n)) {
+      for (const v of Object.values(n)) walk(v);
     }
   })(it);
-  return candidates[0] || null;
+
+  return best ? best.arr : null;
 }
 
 /**
@@ -335,27 +341,31 @@ export function normalizeKiwiItineraries(json, maxRows = 50) {
   const out = [];
 
   for (const it of itins) {
-    const segs = collectSegmentsFrom(it);
+    const segs = deepFindSegmentArray(it);
     if (!Array.isArray(segs) || segs.length === 0) continue;
 
     const first = segs[0];
     const last  = segs[segs.length - 1];
 
     // times
-    const depTime = pickTimeNode(first?.departure || first?.depart || first);
-    const arrTime = pickTimeNode(last?.arrival  || last?.arrive  || last);
+    const depTime = deepFindByKeyRegex(first, /(dep|origin|from|start).*(utc|time|date|iso)|^(dep|origin|from|start)$/i);
+    const arrTime = deepFindByKeyRegex(last,  /(arr|dest|to|end).*(utc|time|date|iso)|^(arr|dest|to|end)$/i);
 
     // airports
-    const depIATA = pickAirportCode(
-      (first?.departure || first)?.airport || first?.origin || first?.from || first
-    );
-    const arrIATA = pickAirportCode(
-      (last?.arrival || last)?.airport || last?.destination || last?.to || last
-    );
+    const depIATA = deepFindIATA(first, /(dep|origin|from|start).*(iata|code|airport)|^(dep|origin|from|start)$/i);
+    const arrIATA = deepFindIATA(last,  /(arr|dest|to|end).*(iata|code|airport)|^(arr|dest|to|end)$/i);
 
     // carrier + flight
-    const carrier = (pickCarrierCode(first) || pickCarrierCode(it) || "").toUpperCase();
-    const number  = pickFlightNumber(first) || pickFlightNumber(it);
+    const carrier = String(
+      deepFindByKeyRegex(first, /(marketing|operating|carrier|airline|company).*(code|name)?/i) ||
+      deepFindByKeyRegex(it,    /(marketing|operating|carrier|airline|company).*(code|name)?/i) || ""
+    ).toUpperCase();
+
+    const number  = String(
+      deepFindByKeyRegex(first, /(marketing)?flight(number)?|^number$|^no$/i) ||
+      deepFindByKeyRegex(it,    /(marketing)?flight(number)?|^number$|^no$/i) || ""
+    ).toUpperCase().replace(/\s+/g, "");
+
     const flightNo = number ? `${carrier ? carrier : ""}${carrier && number ? "-" : ""}${number}` : null;
 
     // price
