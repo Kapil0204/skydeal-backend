@@ -3,7 +3,7 @@
 // Requires: process.env.RAPIDAPI_KEY
 // Note: This is a RapidAPI wrapper, not Kiwi Tequila. Param names differ.
 
-/* ---------------- Date helpers ---------------- */
+/* ======================= Date helpers ======================= */
 
 function ddmmyyyy(d) {
   const dd = String(d.getDate()).padStart(2, "0");
@@ -28,10 +28,10 @@ function toDDMMYYYY(input) {
   return ddmmyyyy(new Date(input));
 }
 
-/* ----------- Provider location mapping ---------- */
+/* =========== Provider location mapping (wrapper-specific) =========== */
 /**
  * Some RapidAPI travel wrappers expect "City:slug_cc" for source/destination.
- * These are best-effort slugs for common Indian cities + a few globals.
+ * Best-effort slugs for common Indian cities + a few globals.
  */
 const IATA_TO_CITY_SLUG = {
   // India
@@ -66,20 +66,17 @@ function iataToCitySlug(iata) {
   const key = String(iata || "").toUpperCase();
   return IATA_TO_CITY_SLUG[key] || null;
 }
-
 function iataToCountry(iata) {
   const key = String(iata || "").toUpperCase();
   return IATA_TO_COUNTRY[key] || "IN"; // default to India
 }
 
-/* ----------------- Fetch helpers ---------------- */
-
+/* ======================= Fetch helpers ======================= */
 async function safeText(res) {
   try { return await res.text(); } catch { return ""; }
 }
 
-/* ----------------- Core API call ---------------- */
-
+/* ======================= Core API call ======================= */
 /**
  * Call RapidAPI "Kiwi.com Cheap Flights" (Round trip).
  * For one-way, leave returnDate empty.
@@ -132,7 +129,7 @@ export async function kiwiRoundTrip({
   url.searchParams.set("infants", "0");
   url.searchParams.set("selectedCabins", String(travelClass || "economy").toLowerCase());
 
-  // Search behaviour (these matter for this wrapper)
+  // Search behaviour (these help this wrapper)
   url.searchParams.set("transportTypes", "FLIGHT");
   url.searchParams.set("sort", "QUALITY");
   url.searchParams.set("sortOrder", "ASCENDING");
@@ -159,15 +156,14 @@ export async function kiwiRoundTrip({
   return json;
 }
 
-/* ---------------- Result utilities ---------------- */
+/* ======================= Utility scanners ======================= */
 
 export function extractCarriers(json) {
   const carriers = new Set();
-  const walk = (node) => {
+  (function walk(node) {
     if (!node) return;
     if (Array.isArray(node)) { node.forEach(walk); return; }
     if (typeof node !== "object") return;
-
     for (const [k, v] of Object.entries(node)) {
       const lk = k.toLowerCase();
       if (typeof v === "string") {
@@ -187,28 +183,25 @@ export function extractCarriers(json) {
         walk(v);
       }
     }
-  };
-  walk(json);
+  })(json);
   return [...carriers].slice(0, 100);
 }
 
 export function findAnyPrice(json) {
   let found = null;
-  const walk = (node) => {
-    if (found !== null || !node) return;
-    if (Array.isArray(node)) { for (const v of node) { walk(v); if (found !== null) break; } return; }
-    if (typeof node !== "object") return;
-
-    for (const [k, v] of Object.entries(node)) {
+  (function walk(n) {
+    if (found !== null || !n) return;
+    if (Array.isArray(n)) { for (const x of n) { walk(x); if (found !== null) break; } return; }
+    if (typeof n !== "object") return;
+    for (const [k, v] of Object.entries(n)) {
       if (found !== null) break;
       if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
       if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-        const n = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n)) { found = n; break; }
+        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n2)) { found = n2; break; }
       }
       if (typeof v === "object") walk(v);
     }
-  };
-  walk(json);
+  })(json);
   return found;
 }
 
@@ -223,203 +216,43 @@ export function lccPresence(json) {
     carriersSample: carriers.slice(0, 20),
   };
 }
+
+/* ======================= Normalization ======================= */
 // ---------------- Normalization for SkyDeal (date/time/cost only) ---------------
-function pickTime(obj) {
-  // return ISO-like string if found (prioritize UTC/ISO-looking fields)
-  if (!obj || typeof obj !== "object") return null;
-  const candidates = [];
-  const pushIf = (v) => { if (v && typeof v === "string") candidates.push(v); };
-  // common shapes
-  pushIf(obj.utc); pushIf(obj.UTC); pushIf(obj.timeUtc); pushIf(obj.dateUtc);
-  pushIf(obj.at); pushIf(obj.time); pushIf(obj.datetime); pushIf(obj.dateTime || obj.date_time);
-  pushIf(obj.localDateTime || obj.localTime || obj.local);
-  // pick the first ISO-like
-  const iso = candidates.find(s => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s));
-  return iso || candidates[0] || null;
-}
-
-function pickAirport(obj) {
-  if (!obj || typeof obj !== "object") return null;
-  const vals = [];
-  for (const k of ["iata", "IATA", "code", "airportCode", "airport", "id"]) {
-    const v = obj[k];
-    if (typeof v === "string" && /^[A-Z]{3}$/.test(v)) return v;
-    if (typeof v === "string") vals.push(v.toUpperCase());
-  }
-  // last resort: scan strings for IATA-looking tokens
-  for (const v of vals) {
-    const m = v.match(/\b([A-Z]{3})\b/);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-function pickCarrier(obj) {
-  if (!obj || typeof obj !== "object") return null;
-  const v = obj.marketingCarrier || obj.operatingCarrier || obj.carrier || obj.airline || {};
-  if (typeof v === "string") return v.toUpperCase();
-  if (v && typeof v.code === "string") return v.code.toUpperCase();
-  if (v && typeof v.name === "string") return v.name.toUpperCase();
-  return null;
-}
-
-function pickFlightNo(obj) {
-  if (!obj || typeof obj !== "object") return null;
-  for (const k of ["flightNumber", "number", "flightNo", "no"]) {
-    const v = obj[k];
-    if (v != null) return String(v).toUpperCase();
-  }
-  return null;
-}
-
-// Try to extract a price (INR) from an itinerary node
-function pickPriceINR(it) {
-  const tryPaths = [
-    it?.pricing?.grandTotal, it?.pricing?.total, it?.price?.total, it?.price?.amount,
-    it?.fare?.total, it?.total, it?.amount, it?.grandTotal
-  ];
-  for (const v of tryPaths) {
-    const n = typeof v === "string" ? parseFloat(v.replace(/[, ₹$€]/g, "")) : Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  // fallback: scan object
-  let found = null;
-  (function walk(n) {
-    if (found !== null || !n) return;
-    if (Array.isArray(n)) { for (const x of n) { walk(x); if (found !== null) break; } return; }
-    if (typeof n !== "object") return;
-    for (const [k, v] of Object.entries(n)) {
-      if (found !== null) break;
-      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
-      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (Number.isNaN(n2)) continue; found = n2; break;
-      }
-      if (typeof v === "object") walk(v);
-    }
-  })(it);
-  return found;
-}
-
-/**
- * Normalize Kiwi wrapper payload into rows: { carrier, flightNo, depTime, arrTime, depIATA, arrIATA, priceINR }
- * We try several common layouts: itineraries[].segments, .legs, .outbound.segments, .bounds[0].segments.
- */
-export function normalizeKiwiItineraries(json, maxRows = 30) {
-  const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
-  const out = [];
-
-  for (const it of itins) {
-    let segs =
-      Array.isArray(it?.segments) ? it.segments :
-      Array.isArray(it?.legs) ? it.legs :
-      Array.isArray(it?.bounds?.[0]?.segments) ? it.bounds[0].segments :
-      Array.isArray(it?.outbound?.segments) ? it.outbound.segments :
-      null;
-
-    // If no recognizable segment list, scan for any array that looks like segments
-    if (!segs) {
-      for (const [k, v] of Object.entries(it)) {
-        if (Array.isArray(v) && v.length && typeof v[0] === "object" && (
-          /segment|leg|bound|slice/i.test(k)
-        )) { segs = v; break; }
-      }
-    }
-
-    if (!Array.isArray(segs) || segs.length === 0) continue;
-
-    const first = segs[0];
-    const last  = segs[segs.length - 1];
-
-    const depTime = pickTime(first?.departure || first?.depart || first);
-    const arrTime = pickTime(last?.arrival || last?.arrive || last);
-
-    const depIATA = pickAirport(first?.departure?.airport || first?.origin || first?.from || first);
-    const arrIATA = pickAirport(last?.arrival?.airport  || last?.destination || last?.to  || last);
-
-    const carrier = (pickCarrier(first) || pickCarrier(it) || "").toUpperCase();
-    const flightNoRaw = pickFlightNo(first) || pickFlightNo(it);
-    const flightNo = flightNoRaw ? `${carrier ? carrier : ""}${carrier && flightNoRaw ? "-" : ""}${flightNoRaw}` : null;
-
-    const priceINR = pickPriceINR(it);
-
-    if (depTime || arrTime || priceINR) {
-      out.push({
-        carrier: carrier || null,
-        flightNo: flightNo || null,
-        depTime: depTime || null,
-        arrTime: arrTime || null,
-        depIATA: depIATA || null,
-        arrIATA: arrIATA || null,
-        priceINR: priceINR ?? null,
-        source: "kiwi-rapidapi"
-      });
-    }
-
-    if (out.length >= maxRows) break;
-  }
-
-  return out;
-}
-// ---------------- Normalization for SkyDeal (date/time/cost only) ---------------
-function isObject(x){ return x && typeof x === "object"; }
-
-function collectSegmentsFrom(it) {
-  // Priority paths
-  if (Array.isArray(it?.segments) && it.segments.length) return it.segments;
-  if (Array.isArray(it?.legs) && it.legs.length) return it.legs;
-  if (Array.isArray(it?.bounds?.[0]?.segments) && it.bounds[0].segments.length) return it.bounds[0].segments;
-  if (Array.isArray(it?.outbound?.segments) && it.outbound.segments.length) return it.outbound.segments;
-  if (Array.isArray(it?.slices?.[0]?.segments) && it.slices[0].segments.length) return it.slices[0].segments;
-
-  // Exhaustive search: find any array of objects that seems like segments (has departure+arrival)
-  const candidates = [];
-  (function scan(node) {
-    if (!isObject(node)) return;
-    for (const [k,v] of Object.entries(node)) {
-      if (Array.isArray(v) && v.length && isObject(v[0])) {
-        const hasDepArr = v.some(s => isObject(s) && (s.departure || s.arrival));
-        if (hasDepArr) candidates.push(v);
-      } else if (isObject(v)) scan(v);
-    }
-  })(it);
-  return candidates[0] || null;
-}
+function isObj(x){ return x && typeof x === "object"; }
 
 function pickTimeNode(n) {
-  if (!isObject(n)) return null;
+  if (!isObj(n)) return null;
   const s =
-    n.timeUtc || n.utc || n.dateUtc || n.at || n.time || n.datetime || n.dateTime || n.localDateTime || n.local;
+    n.timeUtc || n.utc || n.dateUtc || n.at ||
+    n.time || n.datetime || n.dateTime || n.date_time ||
+    n.localDateTime || n.local || n.iso;
   if (typeof s === "string") return s;
   if (typeof s === "number" && Number.isFinite(s)) {
-    const d = new Date(s > 1e12 ? s : s*1000);
+    const d = new Date(s > 1e12 ? s : s * 1000);
     if (!Number.isNaN(d)) return d.toISOString();
   }
-  // sometimes nested { iso: "..." }
-  if (isObject(n.iso) && typeof n.iso === "string") return n.iso;
-  if (typeof n.iso === "string") return n.iso;
   return null;
 }
 
 function pickAirportCode(n) {
-  if (!isObject(n)) return null;
-  const a = n.airport || n.airportInfo || n;
+  if (!isObj(n)) return null;
+  const a = n.airport || n.airportInfo || n.origin || n.destination || n;
   const c = a?.code || a?.iata || a?.IATA || a?.id;
   if (typeof c === "string") {
     const up = c.toUpperCase();
     if (/^[A-Z]{3}$/.test(up)) return up;
     const m = up.match(/\b([A-Z]{3})\b/);
-    if (m) return m[1];
-    return up;
+    return m ? m[1] : up;
   }
   return null;
 }
 
 function pickCarrierCode(n) {
-  if (!isObject(n)) return null;
-  const cand =
-    n.marketingCarrier || n.operatingCarrier || n.carrier || n.airline || n.company || {};
+  if (!isObj(n)) return null;
+  const cand = n.marketingCarrier || n.operatingCarrier || n.carrier || n.airline || n.company || {};
   if (typeof cand === "string") return cand.toUpperCase();
-  if (isObject(cand)) {
+  if (isObj(cand)) {
     if (typeof cand.code === "string") return cand.code.toUpperCase();
     if (typeof cand.name === "string") return cand.name.toUpperCase();
   }
@@ -427,34 +260,70 @@ function pickCarrierCode(n) {
 }
 
 function pickFlightNumber(n) {
-  if (!isObject(n)) return null;
-  const v = n.flightNumber ?? n.number ?? n.flightNo ?? n.no ?? n.marketingFlightNumber;
+  if (!isObj(n)) return null;
+  const v = n.marketingFlightNumber ?? n.flightNumber ?? n.number ?? n.flightNo ?? n.no;
   return v != null ? String(v).toUpperCase() : null;
 }
 
 function pickPriceINR(it) {
-  // preferred direct paths
-  const p1 = it?.pricing?.grandTotal ?? it?.pricing?.total ?? it?.price?.grandTotal ?? it?.price?.total ??
+  const asNum = (x) => (typeof x === "string" ? parseFloat(x.replace(/[, ₹$€]/g, "")) : Number(x));
+  const p1 = it?.pricing?.grandTotal ?? it?.pricing?.total ??
+             it?.price?.grandTotal ?? it?.price?.total ??
              it?.fare?.total ?? it?.total ?? it?.amount ?? it?.grandTotal;
-  const asNum = (x) => (typeof x === "string" ? parseFloat(x.replace(/[, ₹$€]/g,"")) : Number(x));
   if (p1 != null && Number.isFinite(asNum(p1))) return asNum(p1);
 
-  // deep scan
   let found = null;
   (function walk(n) {
     if (found !== null || !n) return;
     if (Array.isArray(n)) { for (const x of n) { walk(x); if (found !== null) break; } return; }
-    if (!isObject(n)) return;
-    for (const [k,v] of Object.entries(n)) {
+    if (!isObj(n)) return;
+    for (const [k, v] of Object.entries(n)) {
       if (found !== null) break;
       if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
       if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-        const n2 = parseFloat(v.replace(/[, ₹$€]/g,"")); if (Number.isFinite(n2)) { found = n2; break; }
+        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (Number.isFinite(n2)) { found = n2; break; }
       }
-      if (isObject(v) || Array.isArray(v)) walk(v);
+      if (isObj(v) || Array.isArray(v)) walk(v);
     }
   })(it);
   return found;
+}
+
+// Find the “segments” array wherever it lives (segments/legs/slices/bounds…)
+function collectSegmentsFrom(it) {
+  // Common direct shapes
+  if (Array.isArray(it?.segments) && it.segments.length) return it.segments;
+  if (Array.isArray(it?.legs) && it.legs.length) return it.legs;
+
+  // Kiwi-like nested shapes
+  if (Array.isArray(it?.bounds)) {
+    for (const b of it.bounds) {
+      if (Array.isArray(b?.segments) && b.segments.length) return b.segments;
+      if (Array.isArray(b?.legs) && b.legs.length) return b.legs;
+    }
+  }
+  if (Array.isArray(it?.slices)) {
+    for (const s of it.slices) {
+      if (Array.isArray(s?.segments) && s.segments.length) return s.segments;
+      if (Array.isArray(s?.legs) && s.legs.length) return s.legs;
+    }
+  }
+  if (Array.isArray(it?.outbound?.segments) && it.outbound.segments.length) return it.outbound.segments;
+
+  // Deep probe: any array of objects with departure/arrival-like nodes
+  const candidates = [];
+  (function scan(node) {
+    if (!isObj(node)) return;
+    for (const [, v] of Object.entries(node)) {
+      if (Array.isArray(v) && v.length && isObj(v[0])) {
+        const looksSegmenty = v.some(s =>
+          isObj(s) && (s.departure || s.arrival || s.depart || s.arrive)
+        );
+        if (looksSegmenty) candidates.push(v);
+      } else if (isObj(v)) scan(v);
+    }
+  })(it);
+  return candidates[0] || null;
 }
 
 /**
@@ -470,19 +339,26 @@ export function normalizeKiwiItineraries(json, maxRows = 50) {
     if (!Array.isArray(segs) || segs.length === 0) continue;
 
     const first = segs[0];
-    const last  = segs[segs.length-1];
+    const last  = segs[segs.length - 1];
 
+    // times
     const depTime = pickTimeNode(first?.departure || first?.depart || first);
     const arrTime = pickTimeNode(last?.arrival  || last?.arrive  || last);
 
-    const depIATA = pickAirportCode((first?.departure || first)?.airport || first?.origin || first?.from || first);
-    const arrIATA = pickAirportCode((last?.arrival  || last)?.airport  || last?.destination || last?.to  || last);
+    // airports
+    const depIATA = pickAirportCode(
+      (first?.departure || first)?.airport || first?.origin || first?.from || first
+    );
+    const arrIATA = pickAirportCode(
+      (last?.arrival || last)?.airport || last?.destination || last?.to || last
+    );
 
-    // prefer segment-level carrier/number
+    // carrier + flight
     const carrier = (pickCarrierCode(first) || pickCarrierCode(it) || "").toUpperCase();
     const number  = pickFlightNumber(first) || pickFlightNumber(it);
     const flightNo = number ? `${carrier ? carrier : ""}${carrier && number ? "-" : ""}${number}` : null;
 
+    // price
     const priceINR = pickPriceINR(it);
 
     if (depTime || arrTime || priceINR) {
@@ -494,7 +370,7 @@ export function normalizeKiwiItineraries(json, maxRows = 50) {
         depIATA: depIATA || null,
         arrIATA: arrIATA || null,
         priceINR: priceINR ?? null,
-        source: "kiwi-rapidapi"
+        source: "kiwi-rapidapi",
       });
     }
     if (out.length >= maxRows) break;
