@@ -600,33 +600,65 @@ app.post("/search", async (req, res) => {
 
 // POST /kiwi/probe
 // Body: { from, to, departureDate, returnDate?, adults?, travelClass? }
+// Add ?debug=1 to include a rawSnippet of the Kiwi response
 app.post("/kiwi/probe", async (req, res) => {
-  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
+  const debug = "debug" in req.query; // enable via /kiwi/probe?debug=1
+
+  const {
+    from,
+    to,
+    departureDate,
+    returnDate = "",
+    adults = 1,
+    travelClass = "economy",
+  } = req.body || {};
+
   if (!from || !to || !departureDate) {
-    return res.status(400).json({ error: "from, to, departureDate are required (IATA + YYYY-MM-DD)" });
+    return res
+      .status(400)
+      .json({ error: "from, to, departureDate are required (IATA + YYYY-MM-DD)" });
   }
 
   try {
     const json = await kiwiRoundTrip({
-      from, to, departureDate, returnDate, adults, travelClass, currency: "INR"
+      from,
+      to,
+      departureDate,
+      returnDate,
+      adults,
+      travelClass,
+      currency: "INR",
     });
 
     const presence = lccPresence(json);
     const priceSample = findAnyPrice(json);
 
-    res.json({
+    const payload = {
       query: { from, to, departureDate, returnDate, adults, travelClass },
-      lccFound: { indigo: presence.indigo, akasa: presence.akasa, spicejet: presence.spicejet },
+      lccFound: {
+        indigo: presence.indigo,
+        akasa: presence.akasa,
+        spicejet: presence.spicejet,
+      },
       carriersSample: presence.carriersSample,
       priceSampleINR: priceSample ?? null,
       source: "kiwi-rapidapi",
-      fetchedAt: new Date().toISOString()
-    });
+      fetchedAt: new Date().toISOString(),
+    };
+
+    if (debug) {
+      const rawStr = JSON.stringify(json);
+      payload.rawSnippet =
+        rawStr.length > 4000 ? rawStr.slice(0, 4000) + "...[truncated]" : rawStr;
+    }
+
+    return res.json(payload);
   } catch (err) {
     console.error("Kiwi probe error:", err);
-    res.status(500).json({ error: err.message || "Kiwi probe failed" });
+    return res.status(500).json({ error: err.message || "Kiwi probe failed" });
   }
 });
+
 
 
 // -------------------- START ------------------------
