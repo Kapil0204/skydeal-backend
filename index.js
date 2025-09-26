@@ -630,51 +630,69 @@ app.post("/kiwi/probe", async (req, res) => {
         ? json.metadata.itinerariesCount
         : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
 
-    function summarizeFirstItinerary(j) {
-      const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
-      if (!itins.length) return null;
-      const it0 = itins[0];
+  function summarizeFirstItinerary(j) {
+  const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
+  if (!itins.length) return null;
+  const it0 = itins[0];
 
-      // collect any carrier codes/names on the first itinerary
-      const carriers = new Set();
-      (function walk(n) {
-        if (!n) return;
-        if (Array.isArray(n)) { n.forEach(walk); return; }
-        if (typeof n !== "object") return;
-        for (const [k, v] of Object.entries(n)) {
-          const lk = k.toLowerCase();
-          if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
-            carriers.add(v.toUpperCase());
-          } else if (typeof v === "object") {
-            walk(v);
-          }
+  const carriers = new Set();
+
+  (function walk(n, parentKey = "") {
+    if (!n) return;
+    if (Array.isArray(n)) { n.forEach(x => walk(x, parentKey)); return; }
+    if (typeof n !== "object") return;
+
+    for (const [k, v] of Object.entries(n)) {
+      const lk = k.toLowerCase();
+
+      // strings like "airline": "IndiGo"
+      if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
+        carriers.add(v.toUpperCase());
+        continue;
+      }
+
+      // objects like "marketingCarrier": { code: "6E", name: "IndiGo" }
+      if (v && typeof v === "object") {
+        if (
+          (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
+          typeof v.code === "string"
+        ) {
+          carriers.add(v.code.toUpperCase());
         }
-      })(it0);
-
-      // try to find a clear price field on the first itinerary
-      let price = null;
-      (function walkForPrice(n) {
-        if (price !== null || !n) return;
-        if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
-        if (typeof n !== "object") return;
-        for (const [k, v] of Object.entries(n)) {
-          if (price !== null) break;
-          if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) {
-            price = v; break;
-          }
-          if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-            const n2 = parseFloat(v.replace(/[, ₹$€]/g, ""));
-            if (!Number.isNaN(n2)) { price = n2; break; }
-          }
-          if (typeof v === "object") walkForPrice(v);
+        if (
+          (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
+          typeof v.name === "string"
+        ) {
+          carriers.add(v.name.toUpperCase());
         }
-      })(it0);
-
-      return {
-        carriers: Array.from(carriers).slice(0, 8),
-        priceINR_guess: price
-      };
+        walk(v, lk);
+      }
     }
+  })(it0);
+
+  // try to find a clear price field on the first itinerary
+  let price = null;
+  (function walkForPrice(n) {
+    if (price !== null || !n) return;
+    if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
+    if (typeof n !== "object") return;
+
+    for (const [k, v] of Object.entries(n)) {
+      if (price !== null) break;
+      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { price = v; break; }
+      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
+        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n2)) { price = n2; break; }
+      }
+      if (typeof v === "object") walkForPrice(v);
+    }
+  })(it0);
+
+  return {
+    carriers: Array.from(carriers).slice(0, 8),
+    priceINR_guess: price
+  };
+}
+
 
     const presence = lccPresence(json);
     const priceSample = findAnyPrice(json);
