@@ -1,9 +1,16 @@
 // services/kiwiAdapter.js — ESM
 // RapidAPI: kiwi-com-cheap-flights (Round trip)
 // Requires: process.env.RAPIDAPI_KEY
-// Note: This is NOT Kiwi's Tequila; param names differ.
+// Note: This is a RapidAPI wrapper, not Kiwi Tequila. Param names differ.
 
 /* ---------------- Date helpers ---------------- */
+
+function ddmmyyyy(d) {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
 
 function toDDMMYYYY(input) {
   if (!input) return "";
@@ -21,21 +28,13 @@ function toDDMMYYYY(input) {
   return ddmmyyyy(new Date(input));
 }
 
-function ddmmyyyy(d) {
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
-}
-
 /* ----------- Provider location mapping ---------- */
 /**
  * Some RapidAPI travel wrappers expect "City:slug_cc" for source/destination.
  * These are best-effort slugs for common Indian cities + a few globals.
- * If a slug is missing or incorrect, we fall back to "Country:XX".
  */
 const IATA_TO_CITY_SLUG = {
-  // India (best-guess slugs; adjust if vendor expects variants)
+  // India
   BLR: "City:bangalore_in",
   DEL: "City:delhi_in",
   BOM: "City:mumbai_in",
@@ -94,39 +93,32 @@ export async function kiwiRoundTrip({
 
   const url = new URL("https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip");
 
-  // Dates (wrapper prefers DD/MM/YYYY)
+  // --- Dates (DD/MM/YYYY) ---
   const dep = toDDMMYYYY(departureDate);
   url.searchParams.set("dateFrom", dep);
-  url.searchParams.set("dateTo",   dep);
-
+  url.searchParams.set("dateTo", dep);
   if (returnDate) {
     const ret = toDDMMYYYY(returnDate);
     url.searchParams.set("returnFrom", ret);
-    url.searchParams.set("returnTo",   ret);
+    url.searchParams.set("returnTo", ret);
   } else {
     url.searchParams.set("returnFrom", "");
-    url.searchParams.set("returnTo",   "");
+    url.searchParams.set("returnTo", "");
   }
 
-  // Basic IATA params — some wrappers accept these
-  url.searchParams.set("from", String(from).toUpperCase()); // e.g., BLR
-  url.searchParams.set("to",   String(to).toUpperCase());   // e.g., DEL
+  // --- IATA hints (some wrappers accept) ---
+  url.searchParams.set("from", String(from).toUpperCase());
+  url.searchParams.set("to", String(to).toUpperCase());
 
-  // Wrapper-specific params seen in the RapidAPI UI
+  // --- Wrapper-specific params (CRITICAL) ---
   const srcSlug = iataToCitySlug(from);
   const dstSlug = iataToCitySlug(to);
   const srcCountry = iataToCountry(from);
   const dstCountry = iataToCountry(to);
 
-  // You can pass multiple values (comma-separated). We include City + Country.
-  url.searchParams.set(
-    "source",
-    [srcSlug, `Country:${srcCountry}`].filter(Boolean).join(",")
-  );
-  url.searchParams.set(
-    "destination",
-    [dstSlug, `Country:${dstCountry}`].filter(Boolean).join(",")
-  );
+  // Allow both City and Country (comma-separated)
+  url.searchParams.set("source", [srcSlug, `Country:${srcCountry}`].filter(Boolean).join(","));
+  url.searchParams.set("destination", [dstSlug, `Country:${dstCountry}`].filter(Boolean).join(","));
 
   url.searchParams.set("currency", currency || "INR");
   url.searchParams.set("locale", "en-IN");
@@ -140,7 +132,7 @@ export async function kiwiRoundTrip({
   url.searchParams.set("infants", "0");
   url.searchParams.set("selectedCabins", String(travelClass || "economy").toLowerCase());
 
-  // Search behaviour
+  // Search behaviour (these matter for this wrapper)
   url.searchParams.set("transportTypes", "FLIGHT");
   url.searchParams.set("sort", "QUALITY");
   url.searchParams.set("sortOrder", "ASCENDING");
@@ -160,7 +152,7 @@ export async function kiwiRoundTrip({
 
   const json = await res.json();
 
-  // Echo the exact request URL for debugging via your /kiwi/probe?debug=1
+  // Echo the exact request URL for debugging via /kiwi/probe?debug=1
   if (json && typeof json === "object") {
     json._meta = { requestUrl: url.toString() };
   }
