@@ -360,3 +360,145 @@ export function normalizeKiwiItineraries(json, maxRows = 30) {
 
   return out;
 }
+// ---------------- Normalization for SkyDeal (date/time/cost only) ---------------
+function isObject(x){ return x && typeof x === "object"; }
+
+function collectSegmentsFrom(it) {
+  // Priority paths
+  if (Array.isArray(it?.segments) && it.segments.length) return it.segments;
+  if (Array.isArray(it?.legs) && it.legs.length) return it.legs;
+  if (Array.isArray(it?.bounds?.[0]?.segments) && it.bounds[0].segments.length) return it.bounds[0].segments;
+  if (Array.isArray(it?.outbound?.segments) && it.outbound.segments.length) return it.outbound.segments;
+  if (Array.isArray(it?.slices?.[0]?.segments) && it.slices[0].segments.length) return it.slices[0].segments;
+
+  // Exhaustive search: find any array of objects that seems like segments (has departure+arrival)
+  const candidates = [];
+  (function scan(node) {
+    if (!isObject(node)) return;
+    for (const [k,v] of Object.entries(node)) {
+      if (Array.isArray(v) && v.length && isObject(v[0])) {
+        const hasDepArr = v.some(s => isObject(s) && (s.departure || s.arrival));
+        if (hasDepArr) candidates.push(v);
+      } else if (isObject(v)) scan(v);
+    }
+  })(it);
+  return candidates[0] || null;
+}
+
+function pickTimeNode(n) {
+  if (!isObject(n)) return null;
+  const s =
+    n.timeUtc || n.utc || n.dateUtc || n.at || n.time || n.datetime || n.dateTime || n.localDateTime || n.local;
+  if (typeof s === "string") return s;
+  if (typeof s === "number" && Number.isFinite(s)) {
+    const d = new Date(s > 1e12 ? s : s*1000);
+    if (!Number.isNaN(d)) return d.toISOString();
+  }
+  // sometimes nested { iso: "..." }
+  if (isObject(n.iso) && typeof n.iso === "string") return n.iso;
+  if (typeof n.iso === "string") return n.iso;
+  return null;
+}
+
+function pickAirportCode(n) {
+  if (!isObject(n)) return null;
+  const a = n.airport || n.airportInfo || n;
+  const c = a?.code || a?.iata || a?.IATA || a?.id;
+  if (typeof c === "string") {
+    const up = c.toUpperCase();
+    if (/^[A-Z]{3}$/.test(up)) return up;
+    const m = up.match(/\b([A-Z]{3})\b/);
+    if (m) return m[1];
+    return up;
+  }
+  return null;
+}
+
+function pickCarrierCode(n) {
+  if (!isObject(n)) return null;
+  const cand =
+    n.marketingCarrier || n.operatingCarrier || n.carrier || n.airline || n.company || {};
+  if (typeof cand === "string") return cand.toUpperCase();
+  if (isObject(cand)) {
+    if (typeof cand.code === "string") return cand.code.toUpperCase();
+    if (typeof cand.name === "string") return cand.name.toUpperCase();
+  }
+  return null;
+}
+
+function pickFlightNumber(n) {
+  if (!isObject(n)) return null;
+  const v = n.flightNumber ?? n.number ?? n.flightNo ?? n.no ?? n.marketingFlightNumber;
+  return v != null ? String(v).toUpperCase() : null;
+}
+
+function pickPriceINR(it) {
+  // preferred direct paths
+  const p1 = it?.pricing?.grandTotal ?? it?.pricing?.total ?? it?.price?.grandTotal ?? it?.price?.total ??
+             it?.fare?.total ?? it?.total ?? it?.amount ?? it?.grandTotal;
+  const asNum = (x) => (typeof x === "string" ? parseFloat(x.replace(/[, ₹$€]/g,"")) : Number(x));
+  if (p1 != null && Number.isFinite(asNum(p1))) return asNum(p1);
+
+  // deep scan
+  let found = null;
+  (function walk(n) {
+    if (found !== null || !n) return;
+    if (Array.isArray(n)) { for (const x of n) { walk(x); if (found !== null) break; } return; }
+    if (!isObject(n)) return;
+    for (const [k,v] of Object.entries(n)) {
+      if (found !== null) break;
+      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { found = v; break; }
+      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
+        const n2 = parseFloat(v.replace(/[, ₹$€]/g,"")); if (Number.isFinite(n2)) { found = n2; break; }
+      }
+      if (isObject(v) || Array.isArray(v)) walk(v);
+    }
+  })(it);
+  return found;
+}
+
+/**
+ * Normalize Kiwi wrapper payload into rows:
+ * { carrier, flightNo, depTime, arrTime, depIATA, arrIATA, priceINR, source }
+ */
+export function normalizeKiwiItineraries(json, maxRows = 50) {
+  const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
+  const out = [];
+
+  for (const it of itins) {
+    const segs = collectSegmentsFrom(it);
+    if (!Array.isArray(segs) || segs.length === 0) continue;
+
+    const first = segs[0];
+    const last  = segs[segs.length-1];
+
+    const depTime = pickTimeNode(first?.departure || first?.depart || first);
+    const arrTime = pickTimeNode(last?.arrival  || last?.arrive  || last);
+
+    const depIATA = pickAirportCode((first?.departure || first)?.airport || first?.origin || first?.from || first);
+    const arrIATA = pickAirportCode((last?.arrival  || last)?.airport  || last?.destination || last?.to  || last);
+
+    // prefer segment-level carrier/number
+    const carrier = (pickCarrierCode(first) || pickCarrierCode(it) || "").toUpperCase();
+    const number  = pickFlightNumber(first) || pickFlightNumber(it);
+    const flightNo = number ? `${carrier ? carrier : ""}${carrier && number ? "-" : ""}${number}` : null;
+
+    const priceINR = pickPriceINR(it);
+
+    if (depTime || arrTime || priceINR) {
+      out.push({
+        carrier: carrier || null,
+        flightNo: flightNo || null,
+        depTime: depTime || null,
+        arrTime: arrTime || null,
+        depIATA: depIATA || null,
+        arrIATA: arrIATA || null,
+        priceINR: priceINR ?? null,
+        source: "kiwi-rapidapi"
+      });
+    }
+    if (out.length >= maxRows) break;
+  }
+
+  return out;
+}

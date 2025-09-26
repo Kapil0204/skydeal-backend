@@ -3,7 +3,9 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
-import { kiwiRoundTrip, lccPresence, findAnyPrice } from "./services/kiwiAdapter.js";
+import { kiwiRoundTrip, lccPresence, findAnyPrice, normalizeKiwiItineraries } from "./services/kiwiAdapter.js";
+
+
 
 const app = express();
 
@@ -743,6 +745,32 @@ app.post("/kiwi/search", async (req, res) => {
       fetchedAt: new Date().toISOString(),
       requestUrl: json?._meta?.requestUrl || null
     });
+  } catch (err) {
+    console.error("Kiwi search error:", err);
+    return res.status(500).json({ error: err.message || "Kiwi search failed" });
+  }
+});
+
+app.post("/kiwi/search", async (req, res) => {
+  const debug = "debug" in req.query;
+  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
+  if (!from || !to || !departureDate) {
+    return res.status(400).json({ error: "from, to, departureDate are required" });
+  }
+  try {
+    const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
+    const rows = normalizeKiwiItineraries(json, 50);
+    const payload = {
+      count: rows.length,
+      items: rows,
+      fetchedAt: new Date().toISOString(),
+      requestUrl: json?._meta?.requestUrl || null
+    };
+    if (debug && Array.isArray(json?.itineraries) && json.itineraries.length) {
+      const first = JSON.stringify(json.itineraries[0]);
+      payload.firstItineraryRaw = first.length > 3000 ? first.slice(0, 3000) + "...[truncated]" : first;
+    }
+    return res.json(payload);
   } catch (err) {
     console.error("Kiwi search error:", err);
     return res.status(500).json({ error: err.message || "Kiwi search failed" });
