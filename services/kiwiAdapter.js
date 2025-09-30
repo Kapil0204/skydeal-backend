@@ -406,8 +406,12 @@ export function normalizeKiwiItineraries(json, maxRows = 50, filter = {}) {
         number: pickFlightNumber(seg) || null,
       }));
 
-      const slice = sliceOutboundLegs(mapped, ORG, DST) || mapped;
-      const first = slice[0], last = slice[slice.length - 1];
+      const slice = sliceOutboundLegs(mapped, ORG, DST);
+if (ORG && DST && (!slice || !slice.length)) continue; // skip non-matching itineraries
+
+      const slice = sliceOutboundLegs(segsEnc, ORG, DST);
+if (ORG && DST && (!slice || !slice.length)) continue; // skip non-matching itineraries
+
 
       // prefer segment-level carrier/number
       const carrierCode = (first.carrier || pickCarrierCode(it) || "").toUpperCase();
