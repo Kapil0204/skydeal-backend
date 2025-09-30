@@ -4,6 +4,7 @@
 // Note: This is a RapidAPI wrapper, not Kiwi Tequila. Param names differ.
 
 /* ---------------- Date helpers ---------------- */
+import { Buffer } from "buffer";
 
 function ddmmyyyy(d) {
   const dd = String(d.getDate()).padStart(2, "0");
@@ -227,19 +228,30 @@ export function lccPresence(json) {
 /* ---------------- Helpers for the encoded Kiwi itinerary ---------------- */
 
 /** Try to decode the Base64 payload embedded in it.id or it.shareId. */
+// ⬇️ replace your current decodeEmbedded(...) with this version
 function decodeEmbedded(it) {
-  const take = (s) => {
-    if (typeof s !== "string") return null;
-    const idx = s.indexOf(":");
-    const b64 = idx >= 0 ? s.slice(idx + 1) : s; // after "ItineraryReturn:"
-    try {
-      const txt = Buffer.from(b64, "base64").toString("utf8");
-      const obj = JSON.parse(txt);
-      return obj && typeof obj === "object" ? obj : null;
-    } catch { return null; }
-  };
-  return take(it?.id) || take(it?.shareId) || null;
+  const pickStr = (s) => (typeof s === "string" ? s : null);
+  const val = pickStr(it?.id) || pickStr(it?.shareId) || null;
+  if (!val) return null;
+
+  // val looks like "ItineraryReturn:eyJwcm92aWRlcnMiOiJ..."
+  const idx = val.indexOf(":");
+  const b64raw = idx >= 0 ? val.slice(idx + 1) : val;
+
+  // make base64url safe for Buffer
+  const b64 = b64raw.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
+  const padded = b64.length % 4 === 0 ? b64 : b64 + "=".repeat(4 - (b64.length % 4));
+
+  try {
+    const txt = Buffer.from(padded, "base64").toString("utf8");
+    // the payload should be JSON like: { "route_data": "...", "price": "4418", ... }
+    const obj = JSON.parse(txt);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
 }
+
 
 /**
  * Parse the route_data string into array of segments.

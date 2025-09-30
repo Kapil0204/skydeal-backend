@@ -746,21 +746,50 @@ app.post("/kiwi/search", async (req, res) => {
 
     if (debug) {
       const hasItins = Array.isArray(json?.itineraries) && json.itineraries.length > 0;
-      const carriersFromMeta = Array.isArray(json?.metadata?.carriers)
-        ? json.metadata.carriers.slice(0, 10).map(c => c.code || c.name || "").filter(Boolean)
-        : [];
       payload.hasItineraries = hasItins;
-      payload.carriersFromMeta = carriersFromMeta;
+      payload.carriersFromMeta = Array.isArray(json?.metadata?.carriers)
+        ? json.metadata.carriers.slice(0, 12).map(c => c.code || c.name || "").filter(Boolean)
+        : [];
       payload.statusPerProvider = json?.metadata?.statusPerProvider || null;
       payload.priceSampleINR = findAnyPrice(json) ?? null;
 
-      const rawStr = JSON.stringify(json);
-      payload.rawSnippet = rawStr.length > 5000 ? rawStr.slice(0, 5000) + "...[truncated]" : rawStr;
-
       if (hasItins) {
-        const first = JSON.stringify(json.itineraries[0]);
-        payload.firstItineraryRaw = first.length > 3000 ? first.slice(0, 3000) + "...[truncated]" : first;
+        const first = json.itineraries[0];
+        const firstStr = JSON.stringify(first);
+        payload.firstItineraryRaw = firstStr.length > 4000 ? firstStr.slice(0, 4000) + "...[truncated]" : firstStr;
+
+        // Inline decoder (mirrors services/kiwiAdapter.js)
+        const pickStr = (s) => (typeof s === "string" ? s : null);
+        const idVal = pickStr(first?.id) || pickStr(first?.shareId) || null;
+        if (idVal) {
+          const idx = idVal.indexOf(":");
+          const b64raw = idx >= 0 ? idVal.slice(idx + 1) : idVal;
+          const b64 = b64raw.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
+          const padded = b64.length % 4 === 0 ? b64 : b64 + "=".repeat(4 - (b64.length % 4));
+          try {
+            const txt = Buffer.from(padded, "base64").toString("utf8");
+            payload.firstDecodedJson = txt.length > 2000 ? txt.slice(0, 2000) + "...[truncated]" : txt;
+
+            // try to expose route_data and a quick parse preview
+            let decodedObj = null;
+            try { decodedObj = JSON.parse(txt); } catch {}
+            const rd = decodedObj && typeof decodedObj === "object" ? decodedObj.route_data : null;
+            payload.firstRouteDataSample = typeof rd === "string" ? rd.slice(0, 400) + (rd.length > 400 ? "...[truncated]" : "") : null;
+
+            if (typeof rd === "string") {
+              const oneTok = rd.split("|").filter(Boolean)[0] || "";
+              payload.firstRouteTokenFields = oneTok.split(":").slice(0, 10);
+            }
+          } catch (e) {
+            payload.decodeError = String(e?.message || e);
+          }
+        } else {
+          payload.firstIdMissing = true;
+        }
       }
+
+      const raw = JSON.stringify(json);
+      payload.rawSnippet = raw.length > 5000 ? raw.slice(0, 5000) + "...[truncated]" : raw;
     }
 
     return res.json(payload);
@@ -769,6 +798,7 @@ app.post("/kiwi/search", async (req, res) => {
     return res.status(500).json({ error: err.message || "Kiwi search failed" });
   }
 });
+
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
