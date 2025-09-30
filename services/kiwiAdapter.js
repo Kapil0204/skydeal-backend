@@ -139,6 +139,17 @@ export async function kiwiRoundTrip({
   url.searchParams.set("sortOrder", "ASCENDING");
   url.searchParams.set("limit", "20");
 
+  // ---- tighten route fidelity on RapidAPI wrapper ----
+url.searchParams.set("contentProviders", "KIWI");            // only Kiwi content
+url.searchParams.set("allowReturnFromDifferentCity", "false");
+url.searchParams.set("allowChangeInboundDestination", "false");
+url.searchParams.set("allowChangeInboundSource", "false");
+url.searchParams.set("applyMixedClasses", "false");
+url.searchParams.set("enableTrueHiddenCity", "false");
+url.searchParams.set("enableThrowAwayTicketing", "false");
+url.searchParams.set("allowOvernightStopover", "false");
+
+
   const res = await fetch(url, {
     headers: {
       "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
