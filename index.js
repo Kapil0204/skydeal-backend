@@ -5,8 +5,6 @@ import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
 import { kiwiRoundTrip, lccPresence, findAnyPrice, normalizeKiwiItineraries } from "./services/kiwiAdapter.js";
 
-
-
 const app = express();
 
 /* ===== CORS FIX (only change) =====
@@ -200,7 +198,7 @@ async function getAmadeusToken() {
 
   if (!AMADEUS_ID || !AMADEUS_SECRET) {
     throw new Error("Amadeus env missing: set AMADEUS_CLIENT_ID & AMADEUS_CLIENT_SECRET");
-    }
+  }
 
   const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
     method: "POST",
@@ -600,9 +598,7 @@ app.post("/search", async (req, res) => {
   }
 });
 
-// POST /kiwi/probe
-// Body: { from, to, departureDate, returnDate?, adults?, travelClass? }
-// Add ?debug=1 to include a rawSnippet of the Kiwi response
+// -------------------- /kiwi/probe (diagnostics) --------------------
 app.post("/kiwi/probe", async (req, res) => {
   const debug = "debug" in req.query;
 
@@ -626,75 +622,71 @@ app.post("/kiwi/probe", async (req, res) => {
       from, to, departureDate, returnDate, adults, travelClass, currency: "INR",
     });
 
-    // --- helpers to pull concrete evidence from the payload ---
     const itinerariesCount =
       (json && json.metadata && typeof json.metadata.itinerariesCount === "number")
         ? json.metadata.itinerariesCount
         : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
 
-  function summarizeFirstItinerary(j) {
-  const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
-  if (!itins.length) return null;
-  const it0 = itins[0];
+    function summarizeFirstItinerary(j) {
+      const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
+      if (!itins.length) return null;
+      const it0 = itins[0];
 
-  const carriers = new Set();
+      const carriers = new Set();
 
-  (function walk(n, parentKey = "") {
-    if (!n) return;
-    if (Array.isArray(n)) { n.forEach(x => walk(x, parentKey)); return; }
-    if (typeof n !== "object") return;
+      (function walk(n, parentKey = "") {
+        if (!n) return;
+        if (Array.isArray(n)) { n.forEach(x => walk(x, parentKey)); return; }
+        if (typeof n !== "object") return;
 
-    for (const [k, v] of Object.entries(n)) {
-      const lk = k.toLowerCase();
+        for (const [k, v] of Object.entries(n)) {
+          const lk = k.toLowerCase();
 
-      // strings like "airline": "IndiGo"
-      if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
-        carriers.add(v.toUpperCase());
-        continue;
-      }
+          if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
+            carriers.add(v.toUpperCase());
+            continue;
+          }
 
-      // objects like "marketingCarrier": { code: "6E", name: "IndiGo" }
-      if (v && typeof v === "object") {
-        if (
-          (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
-          typeof v.code === "string"
-        ) {
-          carriers.add(v.code.toUpperCase());
+          if (v && typeof v === "object") {
+            if (
+              (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
+              typeof v.code === "string"
+            ) {
+              carriers.add(v.code.toUpperCase());
+            }
+            if (
+              (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
+              typeof v.name === "string"
+            ) {
+              carriers.add(v.name.toUpperCase());
+            }
+            walk(v, lk);
+          }
         }
-        if (
-          (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
-          typeof v.name === "string"
-        ) {
-          carriers.add(v.name.toUpperCase());
+      })(it0);
+
+      // try to find a clear price field on the first itinerary
+      let price = null;
+      (function walkForPrice(n) {
+        if (price !== null || !n) return;
+        if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
+        if (typeof n !== "object") return;
+
+        for (const [k, v] of Object.entries(n)) {
+          if (price !== null) break;
+          if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { price = v; break; }
+          if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
+            const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n2)) { price = n2; break; }
+          }
+          if (typeof v === "object") walkForPrice(v);
         }
-        walk(v, lk);
-      }
+      })(it0);
+
+      return {
+        carriers: Array.from(carriers).slice(0, 8),
+        priceINR_guess: price
+      };
     }
-  })(it0);
-
-  // try to find a clear price field on the first itinerary
-  let price = null;
-  (function walkForPrice(n) {
-    if (price !== null || !n) return;
-    if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
-    if (typeof n !== "object") return;
-
-    for (const [k, v] of Object.entries(n)) {
-      if (price !== null) break;
-      if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { price = v; break; }
-      if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-        const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n2)) { price = n2; break; }
-      }
-      if (typeof v === "object") walkForPrice(v);
-    }
-  })(it0);
-
-  return {
-    carriers: Array.from(carriers).slice(0, 8),
-    priceINR_guess: price
-  };
-}
-
 
     const presence = lccPresence(json);
     const priceSample = findAnyPrice(json);
@@ -729,28 +721,7 @@ app.post("/kiwi/probe", async (req, res) => {
   }
 });
 
-import { normalizeKiwiItineraries } from "./services/kiwiAdapter.js";
-
-app.post("/kiwi/search", async (req, res) => {
-  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
-  if (!from || !to || !departureDate) {
-    return res.status(400).json({ error: "from, to, departureDate are required" });
-  }
-  try {
-    const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
-    const rows = normalizeKiwiItineraries(json, 50);
-    return res.json({
-      count: rows.length,
-      items: rows,
-      fetchedAt: new Date().toISOString(),
-      requestUrl: json?._meta?.requestUrl || null
-    });
-  } catch (err) {
-    console.error("Kiwi search error:", err);
-    return res.status(500).json({ error: err.message || "Kiwi search failed" });
-  }
-});
-
+// -------------------- /kiwi/search (normalized rows) --------------------
 app.post("/kiwi/search", async (req, res) => {
   const debug = "debug" in req.query;
   const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
@@ -760,26 +731,30 @@ app.post("/kiwi/search", async (req, res) => {
   try {
     const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
     const rows = normalizeKiwiItineraries(json, 50);
+    const itinerariesCount =
+      (typeof json?.metadata?.itinerariesCount === "number")
+        ? json.metadata.itinerariesCount
+        : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
+
     const payload = {
       count: rows.length,
       items: rows,
+      itinerariesCount,
       fetchedAt: new Date().toISOString(),
       requestUrl: json?._meta?.requestUrl || null
     };
+
     if (debug && Array.isArray(json?.itineraries) && json.itineraries.length) {
       const first = JSON.stringify(json.itineraries[0]);
       payload.firstItineraryRaw = first.length > 3000 ? first.slice(0, 3000) + "...[truncated]" : first;
     }
+
     return res.json(payload);
   } catch (err) {
     console.error("Kiwi search error:", err);
     return res.status(500).json({ error: err.message || "Kiwi search failed" });
   }
 });
-
-
-
-
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
