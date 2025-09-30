@@ -729,7 +729,8 @@ app.post("/kiwi/search", async (req, res) => {
   }
   try {
     const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
-    const rows = normalizeKiwiItineraries(json, 50);
+    const rows = normalizeKiwiItineraries(json, 50, { from, to });
+
 
     const itinerariesCount =
       (typeof json?.metadata?.itinerariesCount === "number")

@@ -361,6 +361,21 @@ function pickFlightNumber(n) {
   const v = n.flightNumber ?? n.number ?? n.flightNo ?? n.no ?? n.marketingFlightNumber;
   return v != null ? String(v).toUpperCase() : null;
 }
+function sliceOutboundLegs(segs, ORG, DST) {
+  if (!Array.isArray(segs) || !segs.length || !ORG || !DST) return null;
+  // find first leg that departs ORG
+  let start = segs.findIndex(s => (s.from || s.depIATA || "").toUpperCase() === ORG);
+  if (start < 0) return null;
+  // walk forward until we reach DST
+  let end = start;
+  while (end < segs.length) {
+    const to = (segs[end].to || segs[end].arrIATA || "").toUpperCase();
+    if (to === DST) break;
+    end += 1;
+  }
+  if (end >= segs.length) return null; // never reached DST
+  return segs.slice(start, end + 1);
+}
 
 /**
  * Normalize Kiwi wrapper payload into rows:
@@ -369,53 +384,62 @@ function pickFlightNumber(n) {
  *  - native segment arrays (if ever present)
  *  - encoded Base64 `id`/`shareId` with `route_data`
  */
-export function normalizeKiwiItineraries(json, maxRows = 50) {
+export function normalizeKiwiItineraries(json, maxRows = 50, filter = {}) {
   const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
   const out = [];
+  const ORG = (filter.from || "").toUpperCase();
+  const DST = (filter.to || "").toUpperCase();
 
   for (const it of itins) {
     let row = null;
 
-    // 1) Try native segment arrays
-    const segsNative = collectSegmentsFrom(it);
+    // Try native segments first
+    let segsNative = collectSegmentsFrom(it);
     if (Array.isArray(segsNative) && segsNative.length) {
-      const first = segsNative[0];
-      const last  = segsNative[segsNative.length-1];
+      // map to a uniform shape for slicing
+      const mapped = segsNative.map(seg => ({
+        from: pickAirportCode((seg?.departure || seg)?.airport || seg?.origin || seg?.from || seg) || null,
+        to:   pickAirportCode((seg?.arrival   || seg)?.airport || seg?.destination || seg?.to   || seg) || null,
+        depIso: pickTimeNode(seg?.departure || seg?.depart || seg) || null,
+        arrIso: pickTimeNode(seg?.arrival  || seg?.arrive  || seg) || null,
+        carrier: (pickCarrierCode(seg) || "").toUpperCase(),
+        number: pickFlightNumber(seg) || null,
+      }));
 
-      const depTime = pickTimeNode(first?.departure || first?.depart || first);
-      const arrTime = pickTimeNode(last?.arrival  || last?.arrive  || last);
+      const slice = sliceOutboundLegs(mapped, ORG, DST) || mapped;
+      const first = slice[0], last = slice[slice.length - 1];
 
-      const depIATA = pickAirportCode((first?.departure || first)?.airport || first?.origin || first?.from || first);
-      const arrIATA = pickAirportCode((last?.arrival  || last)?.airport  || last?.destination || last?.to  || last);
-
-      const carrier = (pickCarrierCode(first) || pickCarrierCode(it) || "").toUpperCase();
-      const number  = pickFlightNumber(first) || pickFlightNumber(it);
-      const flightNo = number ? `${carrier ? carrier : ""}${carrier && number ? "-" : ""}${number}` : null;
-
+      // prefer segment-level carrier/number
+      const carrierCode = (first.carrier || pickCarrierCode(it) || "").toUpperCase();
+      const flightNo = first.number ? `${carrierCode ? carrierCode + "-" : ""}${String(first.number).toUpperCase()}` : null;
       const priceINR = pickPriceFromItinerary(it, null);
 
       row = {
-        carrier: carrier || null,
+        carrier: carrierCode || null,
         flightNo: flightNo || null,
-        depTime: depTime || null,
-        arrTime: arrTime || null,
-        depIATA: depIATA || null,
-        arrIATA: arrIATA || null,
+        depTime: first.depIso || null,
+        arrTime: last.arrIso || null,
+        depIATA: first.from || null,
+        arrIATA: last.to || null,
         priceINR: priceINR ?? null,
         source: "kiwi-rapidapi"
       };
+
+      // If filter provided, enforce it; discard if it doesn't match
+      if (ORG && row.depIATA !== ORG) row = null;
+      if (DST && row?.arrIATA !== DST) row = null;
+
     } else {
-      // 2) Fallback: decode Base64 id/shareId -> parse route_data
+      // Fallback: decode Base64 id/shareId -> parse route_data
       const decoded = decodeEmbedded(it);
       const segsEnc = parseRouteData(decoded?.route_data);
       if (segsEnc && segsEnc.length) {
-        const first = segsEnc[0];
-        const last  = segsEnc[segsEnc.length - 1];
+        const slice = sliceOutboundLegs(segsEnc, ORG, DST) || segsEnc;
+        const first = slice[0];
+        const last  = slice[slice.length - 1];
 
-        // Carrier preference: marketingCarrier > carrier
         const carrierCode = (first.marketingCarrier || first.carrier || "").toUpperCase();
         const flightNo = first.number ? `${carrierCode ? carrierCode + "-" : ""}${String(first.number).toUpperCase()}` : null;
-
         const priceINR = pickPriceFromItinerary(it, decoded);
 
         row = {
@@ -428,6 +452,9 @@ export function normalizeKiwiItineraries(json, maxRows = 50) {
           priceINR: priceINR ?? null,
           source: "kiwi-rapidapi"
         };
+
+        if (ORG && row.depIATA !== ORG) row = null;
+        if (DST && row?.arrIATA !== DST) row = null;
       }
     }
 
@@ -439,3 +466,4 @@ export function normalizeKiwiItineraries(json, maxRows = 50) {
 
   return out;
 }
+
