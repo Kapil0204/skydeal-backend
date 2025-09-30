@@ -241,7 +241,6 @@ function mapAmadeusToUI(itin, dictionaries) {
     airlineName = "Air India Express";
   }
 
-  // collect stop IATA codes (intermediate connections)
   const stopCodes =
     segments.length > 1
       ? segments.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.iata || "").filter(Boolean)
@@ -478,7 +477,7 @@ function offerMatchesPayment(offer, selected) {
   });
 }
 
-// -------------------- SEARCH -----------------------
+// -------------------- SEARCH (Amadeus + offers) -----------------------
 function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
   let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
   for (const offer of offers) {
@@ -731,6 +730,7 @@ app.post("/kiwi/search", async (req, res) => {
   try {
     const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
     const rows = normalizeKiwiItineraries(json, 50);
+
     const itinerariesCount =
       (typeof json?.metadata?.itinerariesCount === "number")
         ? json.metadata.itinerariesCount
@@ -744,9 +744,23 @@ app.post("/kiwi/search", async (req, res) => {
       requestUrl: json?._meta?.requestUrl || null
     };
 
-    if (debug && Array.isArray(json?.itineraries) && json.itineraries.length) {
-      const first = JSON.stringify(json.itineraries[0]);
-      payload.firstItineraryRaw = first.length > 3000 ? first.slice(0, 3000) + "...[truncated]" : first;
+    if (debug) {
+      const hasItins = Array.isArray(json?.itineraries) && json.itineraries.length > 0;
+      const carriersFromMeta = Array.isArray(json?.metadata?.carriers)
+        ? json.metadata.carriers.slice(0, 10).map(c => c.code || c.name || "").filter(Boolean)
+        : [];
+      payload.hasItineraries = hasItins;
+      payload.carriersFromMeta = carriersFromMeta;
+      payload.statusPerProvider = json?.metadata?.statusPerProvider || null;
+      payload.priceSampleINR = findAnyPrice(json) ?? null;
+
+      const rawStr = JSON.stringify(json);
+      payload.rawSnippet = rawStr.length > 5000 ? rawStr.slice(0, 5000) + "...[truncated]" : rawStr;
+
+      if (hasItins) {
+        const first = JSON.stringify(json.itineraries[0]);
+        payload.firstItineraryRaw = first.length > 3000 ? first.slice(0, 3000) + "...[truncated]" : first;
+      }
     }
 
     return res.json(payload);
