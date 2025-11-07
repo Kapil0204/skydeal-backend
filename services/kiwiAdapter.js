@@ -449,7 +449,7 @@ if (ORG && DST && (!slice || !slice.length)) continue; // skip non-matching itin
       const decoded = decodeEmbedded(it);
       const segsEnc = parseRouteData(decoded?.route_data);
       if (segsEnc && segsEnc.length) {
-        const slice = sliceOutboundLegs(segsEnc, ORG, DST) || segsEnc;
+        const legslice = sliceOutboundLegs(segsEnc, ORG, DST) || segsEnc;
         const first = slice[0];
         const last  = slice[slice.length - 1];
 
