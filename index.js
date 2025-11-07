@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -22,7 +22,7 @@ app.use((req, res, next) => {
 const corsConfig = {
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-api-key"],
   credentials: false,
   maxAge: 86400
 };
@@ -800,6 +800,156 @@ app.post("/kiwi/search", async (req, res) => {
   }
 });
 
+/* ================== NEW: INDIGO NDC AIRSHOPPING ================== */
+// ENV: INDIGO_BASE_URL, INDIGO_API_KEY
+const INDIGO_BASE_URL = (process.env.INDIGO_BASE_URL || "").replace(/\/$/, "");
+const INDIGO_API_KEY = process.env.INDIGO_API_KEY || "";
+
+function safeJoinUrl(base, path) {
+  const b = String(base || "").replace(/\/$/, "");
+  const p = String(path || "").replace(/^\//, "");
+  return `${b}/${p}`;
+}
+
+// Best-effort normalizer (keeps frontend shape similar to Amadeus)
+function normalizeIndigoAirShopping(raw) {
+  // IndiGo NDC formats can vary; try to pick the usual fields
+  const out = [];
+  try {
+    const offers = raw?.offers || raw?.data || raw?.PricedOffer || raw?.Offer || raw?.flightOffers || [];
+    const list = Array.isArray(offers) ? offers : [offers].filter(Boolean);
+
+    for (const it of list) {
+      // Try common nests
+      const seg = it?.segments?.[0] || it?.itineraries?.[0]?.segments?.[0] || it?.flight?.segments?.[0] || null;
+      const segs = it?.segments || it?.itineraries?.[0]?.segments || it?.flight?.segments || (seg ? [seg] : []);
+
+      const carrier = seg?.carrierCode || seg?.marketingCarrier || seg?.marketingCarrierCode || "6E";
+      const num = seg?.number || seg?.flightNumber || "";
+      const depAt = seg?.departure?.at || seg?.departure?.time || seg?.departureTime || null;
+      const arrAt = (segs[segs.length - 1]?.arrival?.at) || seg?.arrival?.time || seg?.arrivalTime || null;
+
+      const priceNode = it?.price || it?.totalPrice || it?.fare || {};
+      const total =
+        Number(priceNode?.grandTotal || priceNode?.total || priceNode?.amount || priceNode?.value || 0) || 0;
+
+      const stopCodes =
+        (segs.length > 1 ? segs.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.airportCode || "").filter(Boolean) : []);
+
+      const toTime = (x) => {
+        if (!x) return "--:--";
+        const d = new Date(x);
+        if (!isFinite(d)) return String(x).slice(11, 16) || "--:--"; // fallback if already "YYYY-MM-DDTHH:MM"
+        return d.toTimeString().slice(0, 5);
+      };
+
+      out.push({
+        flightNumber: `${carrier} ${num}`.trim(),
+        airlineName: "IndiGo",
+        departure: toTime(depAt),
+        arrival: toTime(arrAt),
+        price: total ? total.toFixed(2) : "0.00",
+        stops: (segs?.length || 1) - 1,
+        stopCodes,
+        carrierCode: "6E"
+      });
+    }
+  } catch (e) {
+    // if parsing fails, just return empty; caller also gets raw
+  }
+  return out;
+}
+
+async function indigoAirShoppingCall(body) {
+  if (!INDIGO_BASE_URL || !INDIGO_API_KEY) {
+    const missing = [];
+    if (!INDIGO_BASE_URL) missing.push("INDIGO_BASE_URL");
+    if (!INDIGO_API_KEY) missing.push("INDIGO_API_KEY");
+    const err = new Error(`IndiGo env missing: ${missing.join(", ")}`);
+    err.status = 400;
+    throw err;
+  }
+
+  const endpoint = safeJoinUrl(INDIGO_BASE_URL, "v1/airshopping");
+  const payload = JSON.stringify(body);
+
+  // Try Bearer
+  let r = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${INDIGO_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: payload
+  });
+
+  if (r.status === 401 || r.status === 403) {
+    // Retry with x-api-key
+    r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "x-api-key": INDIGO_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: payload
+    });
+  }
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    const err = new Error(`IndiGo NDC error ${r.status}: ${t || r.statusText}`);
+    err.status = r.status;
+    throw err;
+  }
+
+  const json = await r.json().catch(async () => {
+    // If server returned XML or text, surface it
+    const txt = await r.text();
+    return { _rawText: txt };
+  });
+  return json;
+}
+
+app.post("/ndc/indigo/airshopping", async (req, res) => {
+  try {
+    const {
+      from = "DEL",
+      to = "BLR",
+      date = "2025-11-10",
+      adults = 1,
+      cabin = "ECONOMY",
+      currency = "INR"
+    } = req.body || {};
+
+    const body = {
+      originDestinations: [
+        { departure: { airportCode: String(from).toUpperCase(), date }, arrival: { airportCode: String(to).toUpperCase() } }
+      ],
+      travelers: [{ id: "1", type: "ADT", count: Number(adults) || 1 }],
+      cabinPreference: String(cabin).toUpperCase(),
+      currency
+    };
+
+    const raw = await indigoAirShoppingCall(body);
+    const items = normalizeIndigoAirShopping(raw);
+
+    return res.json({
+      ok: true,
+      query: { from, to, date, adults, cabin, currency },
+      count: items.length,
+      items,
+      raw
+    });
+  } catch (err) {
+    const code = err?.status || err?.response?.status || 500;
+    return res.status(code).json({
+      ok: false,
+      status: code,
+      message: err?.message || "IndiGo call failed"
+    });
+  }
+});
+/* ================== /NEW: INDIGO NDC AIRSHOPPING ================== */
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
