@@ -1,6 +1,6 @@
-// =======================
-//  SKYDEAL BACKEND INDEX.JS (FINAL)
-// =======================
+// SKYDEAL BACKEND — FINAL CONSOLIDATED
+// Matches “Fix Mongo Connectivity” rules: FlightAPI first, Mongo read-only for payment methods,
+// no ScraperAPI, single Mongo connect, stable env names, resilient fallbacks.
 
 import express from "express";
 import cors from "cors";
@@ -9,45 +9,46 @@ import mongoose from "mongoose";
 import dotenv from "dotenv";
 dotenv.config();
 
-// -----------------------
-//  APP INIT
-// -----------------------
 const app = express();
 app.use(express.json());
-app.use(cors({
-  origin: "*",
-  methods: "GET,POST",
-}));
+app.use(
+  cors({
+    origin: "*", // if you want to lock later, add your Vercel domain here
+    methods: ["GET", "POST"],
+  })
+);
 
+// ---------- ENV (single source of truth) ----------
 const PORT = process.env.PORT || 10000;
 
-// -----------------------
-//  MONGO CONNECT
-// -----------------------
-if (!process.env.MONGODB_URI) {
-  console.warn("⚠️  MONGODB_URI not set");
-} else {
-  mongoose.set("strictQuery", false);
+// Provider toggle: "flightapi" (default) or "amadeus"
+const PROVIDER = (process.env.FLIGHT_PROVIDER || "flightapi").toLowerCase();
 
+// Mongo URI — accept either MONGODB_URI or MONGO_URI (back-compat), prefer MONGODB_URI
+const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI || "";
+
+// ---------- Mongo (read-only for payment methods) ----------
+let Offer;
+if (MONGO_URI) {
+  mongoose.set("strictQuery", false);
   mongoose
-    .connect(process.env.MONGODB_URI, {
+    .connect(MONGO_URI, {
       serverSelectionTimeoutMS: 8000,
       socketTimeoutMS: 20000,
     })
-    .then(() => console.log("MongoDB connected ✔️"))
-    .catch((err) => console.error("MongoDB connection error ❌:", err.message));
+    .then(() => console.log("MongoDB connected"))
+    .catch((err) => console.error("MongoDB connection error:", err.message));
+
+  const OfferSchema = new mongoose.Schema({}, { strict: false, collection: "offers" });
+  Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
+} else {
+  console.warn("MONGO URI not set (MONGODB_URI or MONGO_URI). Payment methods will be empty.");
 }
 
-// Minimal offer schema
-const OfferSchema = new mongoose.Schema({}, { strict: false, collection: "offers" });
-const Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
-
-// -----------------------
-//  PAYMENT METHODS API
-// -----------------------
-app.get("/api/payment-methods", async (req, res) => {
+// Payment methods grouped from Mongo
+app.get("/api/payment-methods", async (_req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
+    if (!Offer || mongoose.connection.readyState !== 1) {
       return res.json({
         creditCard: [],
         debitCard: [],
@@ -58,130 +59,85 @@ app.get("/api/payment-methods", async (req, res) => {
       });
     }
 
-    const pipeline = [
+    const pipe = [
       { $unwind: "$paymentMethods" },
-      {
-        $project: {
-          type: "$paymentMethods.type",
-          name: "$paymentMethods.name",
-        },
-      },
+      { $project: { type: "$paymentMethods.type", name: "$paymentMethods.name" } },
       { $group: { _id: { type: "$type", name: "$name" } } },
     ];
+    const rows = await Offer.aggregate(pipe);
 
-    const rows = await Offer.aggregate(pipeline);
-
-    const grouped = {
-      creditCard: [],
-      debitCard: [],
-      wallet: [],
-      upi: [],
-      netBanking: [],
-      emi: [],
-    };
-
-    rows.forEach((r) => {
-      const type = r._id?.type?.trim() || "";
-      const name = r._id?.name?.trim() || "";
-      if (!type || !name) return;
-
-      const key = type.replace(/\s+/g, "");
-      if (grouped[key] && !grouped[key].includes(name)) {
-        grouped[key].push(name);
-      }
-    });
-
-    Object.keys(grouped).forEach((k) => grouped[k].sort());
-
-    res.json(grouped);
-  } catch (err) {
-    console.error("payment-methods error:", err);
-    res.json({
-      creditCard: [],
-      debitCard: [],
-      wallet: [],
-      upi: [],
-      netBanking: [],
-      emi: [],
-    });
+    const out = { creditCard: [], debitCard: [], wallet: [], upi: [], netBanking: [], emi: [] };
+    for (const r of rows) {
+      const t = (r._id?.type || "").trim();
+      const n = (r._id?.name || "").trim();
+      if (!t || !n) continue;
+      const key = t.replace(/\s+/g, "");
+      if (out[key] && !out[key].includes(n)) out[key].push(n);
+    }
+    Object.keys(out).forEach((k) => out[k].sort((a, b) => a.localeCompare(b)));
+    res.json(out);
+  } catch (e) {
+    console.error("payment-methods error:", e.message || e);
+    res.json({ creditCard: [], debitCard: [], wallet: [], upi: [], netBanking: [], emi: [] });
   }
 });
 
-// -----------------------
-//  SIMULATED FLIGHTS (kept for testing)
-// -----------------------
-app.post("/simulated-flights", (req, res) => {
-  const { paymentMethods } = req.body;
-
-  const bestDeals = {
-    "ICICI Bank Credit Card": { portal: "MakeMyTrip", offer: "10% off", code: "SKYICICI10", price: 4900 },
-    "HDFC Bank Credit Card": { portal: "Goibibo", offer: "12% off", code: "SKYHDFC12", price: 4700 },
-    "Axis Bank Credit Card": { portal: "EaseMyTrip", offer: "15% off", code: "SKYAXIS15", price: 4500 },
-  };
-
-  const outboundFlights = [
-    {
-      flightName: "IndiGo 6E123",
-      departure: "08:00",
-      arrival: "10:00",
-      bestDeal: bestDeals[paymentMethods?.[0]] || null,
-      price: 5200,
-      stops: 0,
-    },
-    {
-      flightName: "Air India AI456",
-      departure: "12:30",
-      arrival: "14:45",
-      bestDeal: bestDeals[paymentMethods?.[0]] || null,
-      price: 5600,
-      stops: 1,
-    },
-  ];
-
-  const returnFlights = [
-    {
-      flightName: "SpiceJet SG789",
-      departure: "18:00",
-      arrival: "20:00",
-      bestDeal: bestDeals[paymentMethods?.[0]] || null,
-      price: 5400,
-      stops: 0,
-    },
-    {
-      flightName: "Vistara UK321",
-      departure: "21:30",
-      arrival: "23:50",
-      bestDeal: bestDeals[paymentMethods?.[0]] || null,
-      price: 5900,
-      stops: 1,
-    },
-  ];
-
-  res.json({ outboundFlights, returnFlights });
-});
-
-// -----------------------
-//  REAL FLIGHT SEARCH (Amadeus)
-// -----------------------
+// ---------- Flight search (provider-normalized) ----------
 app.post("/search", async (req, res) => {
   try {
     const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
 
-    const tokenRes = await axios.post(
-      "https://test.api.amadeus.com/v1/security/oauth2/token",
-      new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: process.env.AMADEUS_API_KEY,
-        client_secret: process.env.AMADEUS_API_SECRET,
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
+    if (PROVIDER === "flightapi") {
+      // FlightAPI.io proxy — we forward and normalize.
+      // Because FlightAPI endpoints vary by plan, we use a generic proxy URL & headers from env.
+      // REQUIRED ENVS:
+      //   FLIGHTAPI_URL   -> full base URL for search on your plan (e.g., https://api.flightapi.io/search)
+      //   FLIGHTAPI_KEY   -> your API key or token (sent as header X-API-Key by default)
+      const baseUrl = process.env.FLIGHTAPI_URL;
+      const key = process.env.FLIGHTAPI_KEY;
 
-    const accessToken = tokenRes.data.access_token;
+      if (!baseUrl || !key) throw new Error("FlightAPI envs missing (FLIGHTAPI_URL / FLIGHTAPI_KEY)");
 
-    const response = await axios.get(
-      "https://test.api.amadeus.com/v2/shopping/flight-offers",
-      {
+      // We forward a standard payload so your backend remains consistent.
+      const params = {
+        from,
+        to,
+        departureDate,
+        returnDate: tripType === "round-trip" ? returnDate : "",
+        passengers,
+        travelClass,
+        tripType,
+        currency: "INR",
+      };
+
+      const faRes = await axios.post(baseUrl, params, {
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": key, // adjust to your provider’s header if different
+        },
+        timeout: 20000,
+      });
+
+      // Expect any shape; normalize to { outbound[], inbound[] }
+      const normalized = normalizeFlightAPI(faRes.data);
+      return res.json(normalized);
+    }
+
+    // Fallback: Amadeus (only if explicitly selected)
+    if (PROVIDER === "amadeus") {
+      const tokenRes = await axios.post(
+        "https://test.api.amadeus.com/v1/security/oauth2/token",
+        new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: process.env.AMADEUS_API_KEY,
+          client_secret: process.env.AMADEUS_API_SECRET,
+        }),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 20000 }
+      );
+
+      const accessToken = tokenRes.data.access_token;
+
+      const response = await axios.get("https://test.api.amadeus.com/v2/shopping/flight-offers", {
         headers: { Authorization: `Bearer ${accessToken}` },
         params: {
           originLocationCode: from,
@@ -193,52 +149,92 @@ app.post("/search", async (req, res) => {
           currencyCode: "INR",
           max: 40,
         },
-      }
-    );
-
-    const data = response.data;
-
-    const carriers = {};
-    data.dictionaries?.carriers &&
-      Object.keys(data.dictionaries.carriers).forEach((code) => {
-        carriers[code] = data.dictionaries.carriers[code];
+        timeout: 20000,
       });
 
-    const outbound = [];
-    const inbound = [];
+      const out = normalizeAmadeus(response.data);
+      return res.json(out);
+    }
 
-    (data.data || []).forEach((offer) => {
-      const firstItin = offer.itineraries[0];
-      const secondItin = offer.itineraries[1];
-
-      const processItinerary = (itin) => {
-        const seg = itin.segments[0];
-        const carrierName = carriers[seg.carrierCode] || seg.carrierCode;
-
-        return {
-          airline: carrierName,
-          flightNumber: seg.carrierCode + " " + seg.number,
-          departureTime: seg.departure.at.substring(11, 16),
-          arrivalTime: seg.arrival.at.substring(11, 16),
-          price: offer.price.total,
-          stops: itin.segments.length - 1,
-        };
-      };
-
-      outbound.push(processItinerary(firstItin));
-      if (secondItin) inbound.push(processItinerary(secondItin));
-    });
-
-    res.json({ outbound, inbound });
+    throw new Error(`Unknown FLIGHT_PROVIDER: ${PROVIDER}`);
   } catch (err) {
-    console.error("Amadeus search error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch real flights" });
+    console.error("search error:", err.response?.data || err.message || err);
+    res.status(500).json({ error: "Failed to fetch flights" });
   }
 });
 
-// -----------------------
-app.get("/", (req, res) => {
-  res.send("SkyDeal backend running.");
-});
+// ---------- Normalizers ----------
+function normalizeFlightAPI(raw) {
+  // We accept various shapes, but return:
+  // { outbound: [{airline, flightNumber, departureTime, arrivalTime, price, stops}], inbound: [...] }
+  const out = { outbound: [], inbound: [] };
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  // Example tolerant parsing (adjust if your FlightAPI shape differs)
+  const results = raw?.results || raw?.data || [];
+  for (const r of results) {
+    const conv = (segBlock) => {
+      if (!segBlock) return null;
+      const seg = Array.isArray(segBlock.segments) ? segBlock.segments[0] : segBlock;
+      const airline = seg?.airlineName || seg?.airline || r?.airline || "Flight";
+      const flightNo = seg?.flightNumber || seg?.number || "";
+      const dep = (seg?.departureTime || seg?.departure || seg?.departure_at || "").slice(11, 16) || seg?.departureTime;
+      const arr = (seg?.arrivalTime || seg?.arrival || seg?.arrival_at || "").slice(11, 16) || seg?.arrivalTime;
+      const price = Number(r?.price?.total ?? r?.price ?? r?.total ?? 0);
+      const stops = (segBlock?.segments?.length ?? r?.stops ?? 1) - 1;
+      return {
+        airline,
+        flightNumber: flightNo ? `${flightNo}` : "",
+        departureTime: dep || "",
+        arrivalTime: arr || "",
+        price,
+        stops: Math.max(0, stops || 0),
+      };
+    };
+
+    const o = conv(r.outbound || r.out || r.itineraries?.[0]);
+    if (o) out.outbound.push(o);
+    const i = conv(r.inbound || r.in || r.itineraries?.[1]);
+    if (i) out.inbound.push(i);
+  }
+
+  return out;
+}
+
+function normalizeAmadeus(data) {
+  const carriers = data?.dictionaries?.carriers || {};
+  const outbound = [];
+  const inbound = [];
+
+  (data?.data || []).forEach((offer) => {
+    const it0 = offer.itineraries?.[0];
+    const it1 = offer.itineraries?.[1];
+
+    const toCard = (itin) => {
+      if (!itin) return null;
+      const seg = itin.segments?.[0];
+      const airline = carriers[seg?.carrierCode] || seg?.carrierCode || "Flight";
+      const dep = seg?.departure?.at?.substring(11, 16) || "";
+      const arr = seg?.arrival?.at?.substring(11, 16) || "";
+      return {
+        airline,
+        flightNumber: `${seg?.carrierCode || ""} ${seg?.number || ""}`.trim(),
+        departureTime: dep,
+        arrivalTime: arr,
+        price: Number(offer?.price?.total || 0),
+        stops: Math.max(0, (itin?.segments?.length || 1) - 1),
+      };
+    };
+
+    const o = toCard(it0);
+    if (o) outbound.push(o);
+    const i = toCard(it1);
+    if (i) inbound.push(i);
+  });
+
+  return { outbound, inbound };
+}
+
+// ---------- Health ----------
+app.get("/", (_req, res) => res.send("SkyDeal backend running (FlightAPI-first)."));
+
+app.listen(PORT, () => console.log(`Server on ${PORT} | Provider=${PROVIDER}`));
