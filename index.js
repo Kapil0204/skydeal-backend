@@ -177,85 +177,120 @@ function applyBestOfferForPortal({ basePrice, portal, offers, travelISO }) {
 
 /* ===== FlightAPI client ===== */
 // Maps the provider’s object into our UI item
-function normalizeFlightApiItems(json) {
-  const data = Array.isArray(json?.itineraries) ? json.itineraries : [];
+// Map some common numeric carrier ids from FlightAPI (negative codes)
+const NUMERIC_CARRIER_MAP = {
+  "-32672": "Air India",
+  "-32671": "Air India Express",
+  "-32213": "IndiGo",
+  "-31826": "SpiceJet",
+  "-32059": "Vistara",
+  "-32535": "Akasa Air",
+  "-32057": "Go First"
+  // add more as you encounter them
+};
+
+function hhmmToClock(hhmm) {
+  if (!hhmm || hhmm.length !== 4) return "--:--";
+  return `${hhmm.slice(0,2)}:${hhmm.slice(2)}`;
+}
+
+/**
+ * FlightAPI → our UI items
+ * Works with /onewaytrip body that has .itineraries[], .cheapest_price, leg_ids and pricing_options.
+ */
+function normalizeFlightApiItems(json, limit = 80) {
+  const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
   const out = [];
 
-  for (const it of data) {
-    const legs =
-      (Array.isArray(it?.legs) && it.legs) ||
-      (Array.isArray(it?.segments) && it.segments) ||
-      (Array.isArray(it?.routes) && it.routes) ||
-      (Array.isArray(it?.route) && it.route) ||
-      [];
-
-    const first = legs[0] || it;
-    const last = legs[legs.length - 1] || first;
-
-    const airlineName =
-      first?.carrier?.name ??
-      first?.marketingCarrier?.name ??
-      first?.airlineName ??
-      it?.carrierName ??
-      "Airline";
-
-    const carrierCode =
-      first?.carrier?.code ??
-      first?.marketingCarrier?.code ??
-      first?.carrierCode ??
-      it?.carrierCode ??
-      "";
-
-    const number =
-      first?.number ??
-      first?.flightNumber ??
-      it?.flightNumber ??
-      "";
-
-    const depISO =
-      first?.departureTime ??
-      first?.departure_at ??
-      first?.local_departure ??
-      first?.departure ??
-      null;
-
-    const arrISO =
-      last?.arrivalTime ??
-      last?.arrival_at ??
-      last?.local_arrival ??
-      last?.arrival ??
-      null;
-
-    const hhmm = (v) =>
-      v ? (/\d{2}:\d{2}/.test(v) ? v.slice(0, 5) : new Date(v).toTimeString().slice(0, 5)) : "--:--";
-
-    const rawPrice =
-      it?.price?.grandTotal ??
-      it?.price?.total ??
-      it?.price?.amount ??
-      it?.pricing_options?.price ??
-      it?.totalFare ??
-      it?.fare ??
-      it?.total ??
+  for (const it of itins.slice(0, limit)) {
+    // --- price ---
+    const price =
+      it?.pricing_options?.[0]?.price?.amount ??
+      it?.cheapest_price?.amount ??
       0;
 
-    const priceNum = Number(String(rawPrice).replace(/[^\d.]/g, "")) || 0;
-    const stops = Math.max(0, legs.length - 1);
+    // --- stops (from segment_ids if present) ---
+    const segIds = it?.pricing_options?.[0]?.items?.[0]?.segment_ids || [];
+    const stops = Math.max(0, segIds.length - 1);
 
+    // --- parse leg id for times & carrier ---
+    const legId = (it?.leg_ids && it.leg_ids[0]) || "";
+    // Shape: ORG- ddMMyyHHmm -- CARRIER - n - DST - ddMMyyHHmm
+    // e.g. 10002-2512151100--32672-1-10075-2512160535
+    let depClock = "--:--";
+    let arrClock = "--:--";
+    let carrierCode = "";
+
+    const m = legId.match(
+      /^\d+-(\d{6})(\d{4})--(-?\d+)-\d+-\d+-(\d{6})(\d{4})$/
+    );
+    if (m) {
+      const depHHMM = m[2]; // 1100
+      const arrHHMM = m[4]; // 0535
+      carrierCode = String(m[3]); // -32672
+      depClock = hhmmToClock(depHHMM);
+      arrClock = hhmmToClock(arrHHMM);
+    } else {
+      // very defensive fallbacks
+      // try to pull local_departure/local_arrival if provider ever adds them
+      const firstSeg = it?.segments?.[0] || {};
+      const lastSeg =
+        (Array.isArray(it?.segments) && it.segments[it.segments.length - 1]) ||
+        firstSeg;
+      const depISO =
+        firstSeg?.local_departure ||
+        firstSeg?.departure_at ||
+        firstSeg?.departure ||
+        null;
+      const arrISO =
+        lastSeg?.local_arrival ||
+        lastSeg?.arrival_at ||
+        lastSeg?.arrival ||
+        null;
+      depClock = depISO
+        ? (/\d{2}:\d{2}/.test(depISO)
+            ? depISO.slice(0, 5)
+            : new Date(depISO).toTimeString().slice(0, 5))
+        : "--:--";
+      arrClock = arrISO
+        ? (/\d{2}:\d{2}/.test(arrISO)
+            ? arrISO.slice(0, 5)
+            : new Date(arrISO).toTimeString().slice(0, 5))
+        : "--:--";
+
+      // carrier from pricing item if exposed
+      const mc =
+        it?.pricing_options?.[0]?.items?.[0]?.marketing_carrier_ids?.[0];
+      if (mc != null) carrierCode = String(mc);
+    }
+
+    // --- airline name ---
+    const airlineName =
+      NUMERIC_CARRIER_MAP[carrierCode] ||
+      it?.carrierName ||
+      it?.airlineName ||
+      "Airline";
+
+    // Flight number: provider doesn’t supply an obvious one here; keep empty for now
+    const flightNumber = "";
+
+    // finalize
+    const priceNum = Number(price) || 0;
     out.push({
-      airlineName: String(airlineName),
-      flightNumber: `${carrierCode || ""} ${number || ""}`.trim(),
-      departure: hhmm(depISO),
-      arrival: hhmm(arrISO),
+      airlineName,
+      flightNumber,
+      departure: depClock,
+      arrival: arrClock,
       price: priceNum.toFixed(2),
       stops,
-      carrierCode: String(carrierCode || ""),
-      stopCodes: [], // placeholder if you later decide to show via codes
+      carrierCode,
+      stopCodes: []
     });
   }
 
   return out;
 }
+
 
 async function fetchFlightApiOffers({ from, to, date, adults = 1, cabin = "economy", currency = "INR" }) {
   if (!FLIGHTAPI_KEY) throw new Error("FLIGHTAPI_KEY not set");
