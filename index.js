@@ -1,28 +1,33 @@
 // index.js — SkyDeal backend (ESM)
+// SWITCHED to FlightAPI.io only; Amadeus + Kiwi disabled.
+//
+// Env needed on Render:
+// - PORT                (optional; defaults 3000)
+// - FLIGHTAPI_KEY       (REQUIRED)
+// - MONGODB_URI         (for offers)
+// - MONGODB_DB          (default "skydeal")
+
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
-import { kiwiRoundTrip, lccPresence, findAnyPrice, normalizeKiwiItineraries } from "./services/kiwiAdapter.js";
 
 const app = express();
 
-/* ===== CORS FIX (only change) =====
-   Always set CORS headers (even on errors/preflight) */
+/* ===== CORS (unchanged) ===== */
 app.use((req, res, next) => {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
-/* keep cors() too — this just guarantees headers regardless */
 const corsConfig = {
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-api-key"],
+  allowedHeaders: ["Content-Type", "Authorization"],
   credentials: false,
   maxAge: 86400
 };
@@ -31,14 +36,19 @@ app.options("*", cors(corsConfig));
 
 app.use(express.json());
 
-/* Health check (helps verify CORS quickly) */
-app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+/* Health check */
+app.get("/health", (req, res) =>
+  res.json({ ok: true, source: "flightapi", time: new Date().toISOString() })
+);
 
 // -------------------- CONFIG -----------------------
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const MONGODB_DB  = process.env.MONGODB_DB || "skydeal";
+const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
+const CURRENCY = "INR"; // we stick to INR for now
 
+// Portals for comparison
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 const PAYMENT_TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
 
@@ -182,130 +192,146 @@ function normalizeUserPaymentChoices(arr) {
   return out.length ? out : null;
 }
 
-// -------------------- AMADEUS ----------------------
-let cachedToken = null;
-let tokenExpiry = 0;
+// -------------------- FLIGHTAPI (NEW) ----------------------
+// Minimal mapper from FlightAPI.io result to our UI fields.
+// We will display price and basic timing when available; if
+// timing/airline are missing, we fill placeholders (frontend-safe).
 
-// Support both env naming styles
-const AMADEUS_ID =
-  process.env.AMADEUS_CLIENT_ID || process.env.AMADEUS_API_KEY;
-const AMADEUS_SECRET =
-  process.env.AMADEUS_CLIENT_SECRET || process.env.AMADEUS_API_SECRET;
+function safeTimeStr(isoLike) {
+  try {
+    if (!isoLike) return "--:--";
+    const d = new Date(isoLike);
+    if (isNaN(d.getTime())) return "--:--";
+    return d.toTimeString().slice(0,5);
+  } catch { return "--:--"; }
+}
 
-async function getAmadeusToken() {
-  const now = Date.now();
-  if (cachedToken && now < tokenExpiry - 30_000) return cachedToken;
+function mapFlightApiToUI(json) {
+  // FlightAPI returns Skyscanner-like structures; we’ll take each itinerary’s
+  // cheapest pricing option as the base price.
+  // Some responses include legs/segments; if missing, we use fallbacks.
+  const itins = Array.isArray(json?.itineraries) ? json.itineraries : [];
+  const legs = Array.isArray(json?.legs) ? json.legs : [];
+  const segments = Array.isArray(json?.segments) ? json.segments : [];
+  const carriers = json?.carriers || {}; // sometimes a map of id->name
 
-  if (!AMADEUS_ID || !AMADEUS_SECRET) {
-    throw new Error("Amadeus env missing: set AMADEUS_CLIENT_ID & AMADEUS_CLIENT_SECRET");
-  }
+  const legsById = new Map(legs.map(l => [String(l?.id ?? ""), l]));
+  const segById = new Map(segments.map(s => [String(s?.id ?? ""), s]));
 
-  const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: AMADEUS_ID,
-      client_secret: AMADEUS_SECRET,
-    }),
+  return itins.map(it => {
+    // price
+    const po = Array.isArray(it.pricing_options) && it.pricing_options.length
+      ? it.pricing_options[0]
+      : null;
+    const baseAmount = asMoney(po?.price?.amount) ?? 0;
+
+    // times/airline (best effort)
+    let departure = "--:--";
+    let arrival = "--:--";
+    let airlineName = "—";
+    let flightNumber = "";
+    let stops = 0;
+
+    // Try legs -> first & last segment
+    const firstLegId = Array.isArray(it.leg_ids) ? it.leg_ids[0] : null;
+    const lastLegId  = Array.isArray(it.leg_ids) ? it.leg_ids[it.leg_ids.length - 1] : null;
+    const firstLeg = firstLegId ? legsById.get(String(firstLegId)) : null;
+    const lastLeg  = lastLegId ? legsById.get(String(lastLegId)) : null;
+
+    if (firstLeg?.departure?.time) departure = safeTimeStr(firstLeg.departure.time);
+    if (lastLeg?.arrival?.time) arrival = safeTimeStr(lastLeg.arrival.time);
+    if (Array.isArray(firstLeg?.segment_ids) && firstLeg.segment_ids.length) {
+      const seg0 = segById.get(String(firstLeg.segment_ids[0]));
+      const cc = seg0?.marketing_carrier_id || seg0?.operating_carrier_id;
+      const num = seg0?.flight_number || "";
+      const name = cc != null ? (carriers[String(cc)] || String(cc)) : null;
+      if (name) airlineName = name;
+      if (cc) flightNumber = `${cc} ${num}`.trim();
+    }
+    // stops
+    if (Array.isArray(firstLeg?.segment_ids)) {
+      stops = Math.max(0, firstLeg.segment_ids.length - 1);
+    }
+
+    return {
+      flightNumber: flightNumber || "—",
+      airlineName: airlineName || "—",
+      departure,
+      arrival,
+      price: baseAmount.toFixed(2),
+      stops,
+      stopCodes: [], // can be filled if segments carry via iata codes
+      carrierCode: "", // optional, not always present in this API
+    };
   });
-
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`Amadeus token error: ${res.status} ${t}`);
-  }
-  const data = await res.json();
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in || 1800) * 1000;
-  return cachedToken;
 }
 
-// --- Brand overrides to separate AI vs IX (and fallback on AI+9xxx) ---
-const BRAND_OVERRIDES = {
-  IX: "Air India Express",
-  I5: "AIX Connect",
-  AI: (numStr) => (String(numStr || "").startsWith("9") ? "Air India Express" : "Air India"),
-};
-
-function mapAmadeusToUI(itin, dictionaries) {
-  const seg0 = itin?.itineraries?.[0]?.segments?.[0];
-  const segments = itin?.itineraries?.[0]?.segments || [];
-  const carrierCode = seg0?.carrierCode || itin?.validatingAirlineCodes?.[0] || "NA";
-  const numStr = String(seg0?.number || "");
-  let airlineName = dictionaries?.carriers?.[carrierCode] || carrierCode;
-
-  if (BRAND_OVERRIDES[carrierCode]) {
-    const ov = BRAND_OVERRIDES[carrierCode];
-    airlineName = typeof ov === "function" ? ov(numStr) : ov;
-  } else if (carrierCode === "AI" && numStr.startsWith("9")) {
-    airlineName = "Air India Express";
-  }
-
-  const stopCodes =
-    segments.length > 1
-      ? segments.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.iata || "").filter(Boolean)
-      : [];
-
-  const departure = seg0?.departure?.at ? new Date(seg0.departure.at).toTimeString().slice(0,5) : "--:--";
-  const lastSeg   = segments[segments.length - 1] || seg0;
-  const arrival   = lastSeg?.arrival?.at ? new Date(lastSeg.arrival.at).toTimeString().slice(0,5) : "--:--";
-  const flightNum = `${carrierCode} ${seg0?.number || ""}`.trim();
-  const stops = (segments.length || 1) - 1;
-  const price = Number(itin?.price?.grandTotal || itin?.price?.total || 0) || 0;
-
-  return { flightNumber: flightNum, airlineName, departure, arrival, price: price.toFixed(2), stops, stopCodes, carrierCode };
+// Build URLs per FlightAPI schema (path params)
+// Round trip
+function flightApiRoundTripURL({ apiKey, from, to, depISO, retISO, adults, children, infants, cabin, currency }) {
+  return [
+    "https://api.flightapi.io/roundtrip",
+    encodeURIComponent(apiKey),
+    encodeURIComponent(from),
+    encodeURIComponent(to),
+    encodeURIComponent(depISO),
+    encodeURIComponent(retISO),
+    String(adults),
+    String(children),
+    String(infants),
+    encodeURIComponent(cabin),
+    encodeURIComponent(currency),
+  ].join("/");
+}
+// Oneway
+function flightApiOnewayURL({ apiKey, from, to, depISO, adults, children, infants, cabin, currency }) {
+  return [
+    "https://api.flightapi.io/onewaytrip",
+    encodeURIComponent(apiKey),
+    encodeURIComponent(from),
+    encodeURIComponent(to),
+    encodeURIComponent(depISO),
+    String(adults),
+    String(children),
+    String(infants),
+    encodeURIComponent(cabin),
+    encodeURIComponent(currency),
+  ].join("/");
 }
 
-// Fetch ALL flight offers available from Amadeus (paginate if needed)
-async function fetchAmadeusOffers({ from, to, date, adults, travelClass, includedAirlineCodes }) {
-  const token = await getAmadeusToken();
+async function fetchFlightApiOffers({ from, to, date, adults, travelClass, roundTripReturnDate }) {
+  if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY");
   const ORG = String(from || "").trim().toUpperCase();
   const DST = String(to || "").trim().toUpperCase();
-  const CLASS = String(travelClass || "ECONOMY").toUpperCase();
+  const CLASS = (String(travelClass || "ECONOMY").toUpperCase() === "PREMIUM_ECONOMY")
+    ? "Premium_Economy"
+    : (String(travelClass || "ECONOMY").toUpperCase()); // per docs
 
-  const params = new URLSearchParams({
-    originLocationCode: ORG,
-    destinationLocationCode: DST,
-    departureDate: date,
-    adults: String(adults || 1),
-    travelClass: CLASS,
-    currencyCode: "INR",
-    max: "250",
-  });
+  // Children/Infants default 0 for now; can be extended later.
+  const adultsN = Number(adults || 1);
+  const childrenN = 0;
+  const infantsN = 0;
 
-  if (Array.isArray(includedAirlineCodes) && includedAirlineCodes.length) {
-    params.set("includedAirlineCodes", includedAirlineCodes.join(","));
+  const depISO = date;
+  const url = roundTripReturnDate
+    ? flightApiRoundTripURL({
+        apiKey: FLIGHTAPI_KEY, from: ORG, to: DST, depISO,
+        retISO: roundTripReturnDate, adults: adultsN, children: childrenN, infants: infantsN,
+        cabin: CLASS[0].toUpperCase() + CLASS.slice(1).toLowerCase(), currency: CURRENCY
+      })
+    : flightApiOnewayURL({
+        apiKey: FLIGHTAPI_KEY, from: ORG, to: DST, depISO,
+        adults: adultsN, children: childrenN, infants: infantsN,
+        cabin: CLASS[0].toUpperCase() + CLASS.slice(1).toLowerCase(), currency: CURRENCY
+      });
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`FlightAPI search error: ${res.status} ${t}`);
   }
-
-  const base = new URL("https://api.amadeus.com/v2/shopping/flight-offers");
-  base.search = params;
-
-  const all = [];
-  let carriersDict = {};
-  let nextUrl = base.toString();
-  let pageGuard = 0;
-
-  while (nextUrl && pageGuard < 10) {
-    const res = await fetch(nextUrl, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(`Amadeus search error: ${res.status} ${t}`);
-    }
-    const json = await res.json();
-
-    if (json?.dictionaries?.carriers) {
-      carriersDict = { ...carriersDict, ...json.dictionaries.carriers };
-    }
-    if (Array.isArray(json?.data)) {
-      all.push(...json.data);
-    }
-
-    nextUrl = json?.meta?.links?.next || json?.links?.next || null;
-    pageGuard += 1;
-  }
-
-  const dict = { carriers: carriersDict };
-  return all.map((d) => mapAmadeusToUI(d, dict));
+  const json = await res.json();
+  return mapFlightApiToUI(json);
 }
 
 // -------------------- DB LOOKUP --------------------
@@ -348,7 +374,7 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
   return byPortal;
 }
 
-// -------------------- PAYMENT OPTIONS -----------------------
+// -------------------- PAYMENT OPTIONS (unchanged) -----------------------
 app.get("/payment-options", async (_req, res) => {
   try {
     const database = await initMongo();
@@ -436,17 +462,15 @@ app.get("/payment-options", async (_req, res) => {
   }
 });
 
-// -------------------- MATCHING (type-aware) -----------------------
+// -------------------- MATCHING (unchanged) -----------------------
 function offerHasPaymentRestriction(offer) {
   const arr = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
   return arr.length > 0;
 }
-
 function offerMatchesPayment(offer, selected) {
   if (!selected || selected.length === 0) {
-    return !offerHasPaymentRestriction(offer); // only generic offers if nothing selected
+    return !offerHasPaymentRestriction(offer);
   }
-
   const pairs = [];
   const list = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
   for (const pm of list) {
@@ -462,7 +486,6 @@ function offerMatchesPayment(offer, selected) {
       if (bank) pairs.push({ bank, type: typeKey });
     }
   }
-
   return selected.some(sel => {
     const wantBank = (sel.bank || "").toLowerCase();
     const wantType = sel.type || null;
@@ -477,26 +500,34 @@ function offerMatchesPayment(offer, selected) {
   });
 }
 
-// -------------------- SEARCH (Amadeus + offers) -----------------------
-function applyBestOfferForPortal({ basePrice, portal, offers, travelISO, selectedPayments }) {
-  let best = { finalPrice: basePrice, discountApplied: 0, appliedOffer: null };
+// -------------------- SEARCH (FLIGHTAPI) -----------------------
+const OTA_MARKUP_INR = 250;
+
+function applyBestOfferForPortal({ basePortalPrice, portal, offers, travelISO, selectedPayments }) {
+  let best = { finalPrice: basePortalPrice, discountApplied: 0, appliedOffer: null };
   for (const offer of offers) {
     if (!offer.couponCode) continue;
     if (!isOfferActiveForDate(offer, travelISO)) continue;
     if (!offerMatchesPayment(offer, selectedPayments)) continue;
 
     const minTxn = asMoney(offer.minTransactionValue) ?? 0;
-    if (basePrice < minTxn) continue;
+    if (basePortalPrice < minTxn) continue;
 
+    // Handle % and flat discounts (both supported)
     const pct = offer.discountPercent != null ? Number(offer.discountPercent) : null;
     const cap = asMoney(offer.maxDiscountAmount);
-    if (pct == null || !Number.isFinite(pct) || pct <= 0) continue;
+    const flat = asMoney(offer.flatDiscountAmount); // in case we stored flat offers
 
-    let discount = Math.floor((basePrice * pct) / 100);
-    if (cap != null && cap > 0) discount = Math.min(discount, cap);
+    let discount = 0;
+    if (flat && flat > 0) discount = flat;
+    else if (pct && pct > 0) {
+      discount = Math.floor((basePortalPrice * pct) / 100);
+      if (cap != null && cap > 0) discount = Math.min(discount, cap);
+    }
+
     if (discount <= 0) continue;
 
-    const finalPrice = basePrice - discount;
+    const finalPrice = Math.max(0, basePortalPrice - discount);
     if (finalPrice < best.finalPrice) {
       best = {
         finalPrice,
@@ -527,8 +558,7 @@ app.post("/search", async (req, res) => {
       passengers = 1,
       travelClass = "ECONOMY",
       tripType = "round-trip",
-      paymentMethods = [],
-      includedAirlineCodes, // optional probe
+      paymentMethods = []
     } = req.body || {};
 
     const depISO = toISODateStr(departureDate);
@@ -548,25 +578,33 @@ app.post("/search", async (req, res) => {
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    const outbound = await fetchAmadeusOffers({
-      from: ORG, to: DST, date: depISO, adults: passengers, travelClass, includedAirlineCodes
+    // Outbound
+    const outbound = await fetchFlightApiOffers({
+      from: ORG, to: DST, date: depISO, adults: passengers, travelClass,
+      roundTripReturnDate: (tripType === "round-trip" && retISO) ? retISO : null
     });
 
-    let retFlights = [];
-    if (tripType === "round-trip" && retISO) {
-      retFlights = await fetchAmadeusOffers({
-        from: DST, to: ORG, date: retISO, adults: passengers, travelClass, includedAirlineCodes
-      });
-    }
+    // Return (if needed & not already included as round-trip items)
+    const retFlights = (tripType === "round-trip" && retISO)
+      ? await fetchFlightApiOffers({
+          from: DST, to: ORG, date: retISO, adults: passengers, travelClass,
+          roundTripReturnDate: null // we already did a round-trip above; fetch return separately
+        })
+      : [];
 
     function decorateWithPortalPrices(flight, travelISO) {
       const base = asMoney(flight.price) || 0;
       const prices = PORTALS.map((portal) => {
         const portalOffers = offersByPortal.get(portal) || [];
-        const best = applyBestOfferForPortal({ basePrice: base, portal, offers: portalOffers, travelISO, selectedPayments });
+        const portalBase = base + OTA_MARKUP_INR; // ₹250 markup
+        const best = applyBestOfferForPortal({
+          basePortalPrice: portalBase, portal, offers: portalOffers,
+          travelISO, selectedPayments
+        });
         return {
           portal,
-          basePrice: base,
+          basePrice: base,            // raw flight price
+          markedUpPrice: portalBase,  // price after +₹250 portal markup
           finalPrice: best.finalPrice,
           ...(best.discountApplied > 0 ? { discountApplied: best.discountApplied } : {}),
           appliedOffer: best.appliedOffer,
@@ -578,381 +616,26 @@ app.post("/search", async (req, res) => {
     const outboundDecorated = outbound.map((f) => decorateWithPortalPrices(f, depISO));
     const returnDecorated = retFlights.map((f) => decorateWithPortalPrices(f, retISO || depISO));
 
-    const carrierSet = new Set([
-      ...outbound.map(f => f.carrierCode || ""),
-      ...retFlights.map(f => f.carrierCode || "")
-    ].filter(Boolean));
-
     res.json({
       outboundFlights: outboundDecorated,
       returnFlights: returnDecorated,
       meta: {
-        fallback: "live",
-        returnedCarriers: Array.from(carrierSet).sort()
+        source: "flightapi",
+        portals: PORTALS,
       }
     });
   } catch (err) {
-    console.error("X /search error:", err.message);
-    res.status(502).json({ error: "amadeus_failed", message: err.message });
+    console.error("X /search error:", err);
+    res.status(502).json({ error: "flightapi_failed", message: err.message });
   }
 });
 
-// -------------------- /kiwi/probe (diagnostics) --------------------
-app.post("/kiwi/probe", async (req, res) => {
-  const debug = "debug" in req.query;
-
-  const {
-    from,
-    to,
-    departureDate,
-    returnDate = "",
-    adults = 1,
-    travelClass = "economy",
-  } = req.body || {};
-
-  if (!from || !to || !departureDate) {
-    return res
-      .status(400)
-      .json({ error: "from, to, departureDate are required (IATA + YYYY-MM-DD)" });
-  }
-
-  try {
-    const json = await kiwiRoundTrip({
-      from, to, departureDate, returnDate, adults, travelClass, currency: "INR",
-    });
-
-    const itinerariesCount =
-      (json && json.metadata && typeof json.metadata.itinerariesCount === "number")
-        ? json.metadata.itinerariesCount
-        : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
-
-    function summarizeFirstItinerary(j) {
-      const itins = Array.isArray(j?.itineraries) ? j.itineraries : [];
-      if (!itins.length) return null;
-      const it0 = itins[0];
-
-      const carriers = new Set();
-
-      (function walk(n, parentKey = "") {
-        if (!n) return;
-        if (Array.isArray(n)) { n.forEach(x => walk(x, parentKey)); return; }
-        if (typeof n !== "object") return;
-
-        for (const [k, v] of Object.entries(n)) {
-          const lk = k.toLowerCase();
-
-          if (typeof v === "string" && (lk.includes("airline") || lk.includes("carrier"))) {
-            carriers.add(v.toUpperCase());
-            continue;
-          }
-
-          if (v && typeof v === "object") {
-            if (
-              (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
-              typeof v.code === "string"
-            ) {
-              carriers.add(v.code.toUpperCase());
-            }
-            if (
-              (lk.includes("carrier") || lk.includes("marketing") || lk.includes("operating")) &&
-              typeof v.name === "string"
-            ) {
-              carriers.add(v.name.toUpperCase());
-            }
-            walk(v, lk);
-          }
-        }
-      })(it0);
-
-      // try to find a clear price field on the first itinerary
-      let price = null;
-      (function walkForPrice(n) {
-        if (price !== null || !n) return;
-        if (Array.isArray(n)) { for (const x of n) { walkForPrice(x); if (price !== null) break; } return; }
-        if (typeof n !== "object") return;
-
-        for (const [k, v] of Object.entries(n)) {
-          if (price !== null) break;
-          if (typeof v === "number" && /price|total|amount|fare|value|grand/i.test(k)) { price = v; break; }
-          if (typeof v === "string" && /price|total|amount|fare|value|grand/i.test(k)) {
-            const n2 = parseFloat(v.replace(/[, ₹$€]/g, "")); if (!Number.isNaN(n2)) { price = n2; break; }
-          }
-          if (typeof v === "object") walkForPrice(v);
-        }
-      })(it0);
-
-      return {
-        carriers: Array.from(carriers).slice(0, 8),
-        priceINR_guess: price
-      };
-    }
-
-    const presence = lccPresence(json);
-    const priceSample = findAnyPrice(json);
-    const firstItin = summarizeFirstItinerary(json);
-
-    const payload = {
-      query: { from, to, departureDate, returnDate, adults, travelClass },
-      lccFound: {
-        indigo: presence.indigo,
-        akasa: presence.akasa,
-        spicejet: presence.spicejet,
-      },
-      carriersSample: presence.carriersSample,
-      itinerariesCount,
-      firstItinerary: firstItin,
-      priceSampleINR: priceSample ?? null,
-      requestUrl: json?._meta?.requestUrl || null,
-      source: "kiwi-rapidapi",
-      fetchedAt: new Date().toISOString(),
-    };
-
-    if (debug) {
-      const rawStr = JSON.stringify(json);
-      payload.rawSnippet =
-        rawStr.length > 4000 ? rawStr.slice(0, 4000) + "...[truncated]" : rawStr;
-    }
-
-    return res.json(payload);
-  } catch (err) {
-    console.error("Kiwi probe error:", err);
-    return res.status(500).json({ error: err.message || "Kiwi probe failed" });
-  }
-});
-
-// -------------------- /kiwi/search (normalized rows) --------------------
-app.post("/kiwi/search", async (req, res) => {
-  const debug = "debug" in req.query;
-  const { from, to, departureDate, returnDate = "", adults = 1, travelClass = "economy" } = req.body || {};
-  if (!from || !to || !departureDate) {
-    return res.status(400).json({ error: "from, to, departureDate are required" });
-  }
-  try {
-    const json = await kiwiRoundTrip({ from, to, departureDate, returnDate, adults, travelClass, currency: "INR" });
-    const rows = normalizeKiwiItineraries(json, 50, { from, to });
-
-
-    const itinerariesCount =
-      (typeof json?.metadata?.itinerariesCount === "number")
-        ? json.metadata.itinerariesCount
-        : (Array.isArray(json?.itineraries) ? json.itineraries.length : null);
-
-    const payload = {
-      count: rows.length,
-      items: rows,
-      itinerariesCount,
-      fetchedAt: new Date().toISOString(),
-      requestUrl: json?._meta?.requestUrl || null
-    };
-
-    if (debug) {
-      const hasItins = Array.isArray(json?.itineraries) && json.itineraries.length > 0;
-      payload.hasItineraries = hasItins;
-      payload.carriersFromMeta = Array.isArray(json?.metadata?.carriers)
-        ? json.metadata.carriers.slice(0, 12).map(c => c.code || c.name || "").filter(Boolean)
-        : [];
-      payload.statusPerProvider = json?.metadata?.statusPerProvider || null;
-      payload.priceSampleINR = findAnyPrice(json) ?? null;
-
-      if (hasItins) {
-        const first = json.itineraries[0];
-        const firstStr = JSON.stringify(first);
-        payload.firstItineraryRaw = firstStr.length > 4000 ? firstStr.slice(0, 4000) + "...[truncated]" : firstStr;
-
-        // Inline decoder (mirrors services/kiwiAdapter.js)
-        const pickStr = (s) => (typeof s === "string" ? s : null);
-        const idVal = pickStr(first?.id) || pickStr(first?.shareId) || null;
-        if (idVal) {
-          const idx = idVal.indexOf(":");
-          const b64raw = idx >= 0 ? idVal.slice(idx + 1) : idVal;
-          const b64 = b64raw.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
-          const padded = b64.length % 4 === 0 ? b64 : b64 + "=".repeat(4 - (b64.length % 4));
-          try {
-            const txt = Buffer.from(padded, "base64").toString("utf8");
-            payload.firstDecodedJson = txt.length > 2000 ? txt.slice(0, 2000) + "...[truncated]" : txt;
-
-            // try to expose route_data and a quick parse preview
-            let decodedObj = null;
-            try { decodedObj = JSON.parse(txt); } catch {}
-            const rd = decodedObj && typeof decodedObj === "object" ? decodedObj.route_data : null;
-            payload.firstRouteDataSample = typeof rd === "string" ? rd.slice(0, 400) + (rd.length > 400 ? "...[truncated]" : "") : null;
-
-            if (typeof rd === "string") {
-              const oneTok = rd.split("|").filter(Boolean)[0] || "";
-              payload.firstRouteTokenFields = oneTok.split(":").slice(0, 10);
-            }
-          } catch (e) {
-            payload.decodeError = String(e?.message || e);
-          }
-        } else {
-          payload.firstIdMissing = true;
-        }
-      }
-
-      const raw = JSON.stringify(json);
-      payload.rawSnippet = raw.length > 5000 ? raw.slice(0, 5000) + "...[truncated]" : raw;
-    }
-
-    return res.json(payload);
-  } catch (err) {
-    console.error("Kiwi search error:", err);
-    return res.status(500).json({ error: err.message || "Kiwi search failed" });
-  }
-});
-
-/* ================== NEW: INDIGO NDC AIRSHOPPING ================== */
-// ENV: INDIGO_BASE_URL, INDIGO_API_KEY
-const INDIGO_BASE_URL = (process.env.INDIGO_BASE_URL || "").replace(/\/$/, "");
-const INDIGO_API_KEY = process.env.INDIGO_API_KEY || "";
-
-function safeJoinUrl(base, path) {
-  const b = String(base || "").replace(/\/$/, "");
-  const p = String(path || "").replace(/^\//, "");
-  return `${b}/${p}`;
-}
-
-// Best-effort normalizer (keeps frontend shape similar to Amadeus)
-function normalizeIndigoAirShopping(raw) {
-  // IndiGo NDC formats can vary; try to pick the usual fields
-  const out = [];
-  try {
-    const offers = raw?.offers || raw?.data || raw?.PricedOffer || raw?.Offer || raw?.flightOffers || [];
-    const list = Array.isArray(offers) ? offers : [offers].filter(Boolean);
-
-    for (const it of list) {
-      // Try common nests
-      const seg = it?.segments?.[0] || it?.itineraries?.[0]?.segments?.[0] || it?.flight?.segments?.[0] || null;
-      const segs = it?.segments || it?.itineraries?.[0]?.segments || it?.flight?.segments || (seg ? [seg] : []);
-
-      const carrier = seg?.carrierCode || seg?.marketingCarrier || seg?.marketingCarrierCode || "6E";
-      const num = seg?.number || seg?.flightNumber || "";
-      const depAt = seg?.departure?.at || seg?.departure?.time || seg?.departureTime || null;
-      const arrAt = (segs[segs.length - 1]?.arrival?.at) || seg?.arrival?.time || seg?.arrivalTime || null;
-
-      const priceNode = it?.price || it?.totalPrice || it?.fare || {};
-      const total =
-        Number(priceNode?.grandTotal || priceNode?.total || priceNode?.amount || priceNode?.value || 0) || 0;
-
-      const stopCodes =
-        (segs.length > 1 ? segs.slice(0, -1).map(s => s?.arrival?.iataCode || s?.arrival?.airportCode || "").filter(Boolean) : []);
-
-      const toTime = (x) => {
-        if (!x) return "--:--";
-        const d = new Date(x);
-        if (!isFinite(d)) return String(x).slice(11, 16) || "--:--"; // fallback if already "YYYY-MM-DDTHH:MM"
-        return d.toTimeString().slice(0, 5);
-      };
-
-      out.push({
-        flightNumber: `${carrier} ${num}`.trim(),
-        airlineName: "IndiGo",
-        departure: toTime(depAt),
-        arrival: toTime(arrAt),
-        price: total ? total.toFixed(2) : "0.00",
-        stops: (segs?.length || 1) - 1,
-        stopCodes,
-        carrierCode: "6E"
-      });
-    }
-  } catch (e) {
-    // if parsing fails, just return empty; caller also gets raw
-  }
-  return out;
-}
-
-async function indigoAirShoppingCall(body) {
-  if (!INDIGO_BASE_URL || !INDIGO_API_KEY) {
-    const missing = [];
-    if (!INDIGO_BASE_URL) missing.push("INDIGO_BASE_URL");
-    if (!INDIGO_API_KEY) missing.push("INDIGO_API_KEY");
-    const err = new Error(`IndiGo env missing: ${missing.join(", ")}`);
-    err.status = 400;
-    throw err;
-  }
-
-  const endpoint = safeJoinUrl(INDIGO_BASE_URL, "v1/airshopping");
-  const payload = JSON.stringify(body);
-
-  // Try Bearer
-  let r = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${INDIGO_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: payload
-  });
-
-  if (r.status === 401 || r.status === 403) {
-    // Retry with x-api-key
-    r = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "x-api-key": INDIGO_API_KEY,
-        "Content-Type": "application/json"
-      },
-      body: payload
-    });
-  }
-
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    const err = new Error(`IndiGo NDC error ${r.status}: ${t || r.statusText}`);
-    err.status = r.status;
-    throw err;
-  }
-
-  const json = await r.json().catch(async () => {
-    // If server returned XML or text, surface it
-    const txt = await r.text();
-    return { _rawText: txt };
-  });
-  return json;
-}
-
-app.post("/ndc/indigo/airshopping", async (req, res) => {
-  try {
-    const {
-      from = "DEL",
-      to = "BLR",
-      date = "2025-11-10",
-      adults = 1,
-      cabin = "ECONOMY",
-      currency = "INR"
-    } = req.body || {};
-
-    const body = {
-      originDestinations: [
-        { departure: { airportCode: String(from).toUpperCase(), date }, arrival: { airportCode: String(to).toUpperCase() } }
-      ],
-      travelers: [{ id: "1", type: "ADT", count: Number(adults) || 1 }],
-      cabinPreference: String(cabin).toUpperCase(),
-      currency
-    };
-
-    const raw = await indigoAirShoppingCall(body);
-    const items = normalizeIndigoAirShopping(raw);
-
-    return res.json({
-      ok: true,
-      query: { from, to, date, adults, cabin, currency },
-      count: items.length,
-      items,
-      raw
-    });
-  } catch (err) {
-    const code = err?.status || err?.response?.status || 500;
-    return res.status(code).json({
-      ok: false,
-      status: code,
-      message: err?.message || "IndiGo call failed"
-    });
-  }
-});
-/* ================== /NEW: INDIGO NDC AIRSHOPPING ================== */
+// -------------------- DISABLED LEGACY PATHS -----------------------
+// app.post("/kiwi/probe", ...)   // 🔕 Removed
+// Amadeus token + fetch logic    // 🔕 Removed
 
 // -------------------- START ------------------------
 app.listen(PORT, async () => {
   try { await initMongo(); } catch (e) { console.error("Mongo init failed:", e.message); }
-  console.log(`🚀 SkyDeal backend listening on :${PORT}`);
+  console.log(`🚀 SkyDeal backend (FlightAPI) listening on :${PORT}`);
 });
