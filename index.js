@@ -1,169 +1,177 @@
-// SKYDEAL BACKEND — FlightAPI (path GET) + EC2 Mongo
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import mongoose from "mongoose";
 import dotenv from "dotenv";
+import mongoose from "mongoose";
+
 dotenv.config();
 
 const app = express();
-app.use(express.json());
-app.use(cors({ origin: "*", methods: ["GET","POST"] }));
 const PORT = process.env.PORT || 10000;
 
-/* ------------------ Mongo connect (smart) ------------------ */
-async function tryConnect(uri, tag){
-  try{
-    await mongoose.connect(uri,{ serverSelectionTimeoutMS:8000, socketTimeoutMS:20000 });
-    console.log(`MongoDB connected via ${tag}`);
-    return true;
-  }catch(e){
-    console.error(`Mongo connect failed via ${tag}:`, e?.message||e);
-    try{ await mongoose.disconnect(); }catch{}
-    return false;
-  }
-}
-async function connectMongo(){
-  const raw = process.env.MONGODB_URI || process.env.MONGO_URI || "";
-  if(!raw){ console.warn("Mongo URI not set"); return; }
-  if(await tryConnect(raw,"env-uri")) return;
+app.use(cors());
+app.use(express.json());
 
-  const u = new URL(raw.replace(/^mongodb:\/\//,"http://"));
-  const rebuild = (authSource)=>{
-    const auth = u.username ? `${u.username}${u.password?":"+u.password:""}@` : "";
-    const qs = new URLSearchParams(u.searchParams); qs.set("authSource", authSource);
-    return `mongodb://${auth}${u.host}${u.pathname}?${qs.toString()}`;
+// ---------- MONGO ----------
+const MONGO_URI = process.env.MONGODB_URI || "";
+let mongoReady = false;
+if (MONGO_URI) {
+  mongoose
+    .connect(MONGO_URI, { dbName: "skydeal" })
+    .then(() => {
+      mongoReady = true;
+      console.log("MongoDB connected");
+    })
+    .catch((err) => {
+      console.error("MongoDB connect error:", err.message);
+    });
+}
+
+// Generic Offer schema (minimum needed fields)
+const OfferSchema = new mongoose.Schema(
+  {
+    paymentMethods: [
+      {
+        type: { type: String }, // "creditCard" | "debitCard" | "wallet" | "upi" | "netBanking" | "emi"
+        name: String,           // e.g. "ICICI Bank Credit Card"
+      },
+    ],
+  },
+  { strict: false, timestamps: false, collection: "offers" }
+);
+const Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
+
+// ---------- PAYMENT METHODS ----------
+/**
+ * Returns grouped payment methods from Mongo.
+ * If Mongo is empty/unavailable, returns a sane static fallback
+ * so the frontend always shows *something* (no blank modal).
+ */
+app.get("/api/payment-methods", async (_req, res) => {
+  const buckets = {
+    creditCard: [],
+    debitCard: [],
+    wallet: [],
+    upi: [],
+    netBanking: [],
+    emi: [],
   };
-  if(await tryConnect(rebuild("admin"),"authSource=admin")) return;
-  if(await tryConnect(rebuild("skydeal"),"authSource=skydeal")) return;
-  console.error("❌ Mongo still failing after all fallbacks");
-}
-await connectMongo();
 
-/* ------------------ Helpers ------------------ */
-const buckets = () => ({ creditCard:[], debitCard:[], wallet:[], upi:[], netBanking:[], emi:[] });
-const push = (out, typeRaw, nameRaw) => {
-  const type=(typeRaw||"").toString().trim();
-  const name=(nameRaw||"").toString().trim();
-  if(!type || !name) return;
-  const key = type.replace(/\s+/g,"");
-  if(out[key] && !out[key].includes(name)) out[key].push(name);
-};
-
-/* ------------------ Payment methods (locked to yesterday’s shape) ------------------ */
-app.get("/api/payment-methods", async (_req,res)=>{
-  try{
-    if(mongoose.connection.readyState!==1) return res.json(buckets());
-    const db = mongoose.connection.db;
-
-    // force the known collection (set in env)
-    const names = (process.env.OFFER_COLLECTIONS||"offers")
-      .split(",").map(s=>s.trim()).filter(Boolean);
-
-    const out = buckets();
-    let scanned = 0, found = 0;
-
-    for(const name of names){
-      const col = db.collection(name);
-      // read ONLY what we used yesterday
-      const cur = col.find({}, { projection:{ parsedFields:1, paymentMethods:1 } }).limit(20000);
-      for await (const d of cur){
-        scanned++;
-        // primary: parsedFields.paymentMethods[]
-        if(Array.isArray(d?.parsedFields?.paymentMethods)){
-          for(const pm of d.parsedFields.paymentMethods){
-            push(out, pm?.type||pm?.method||pm?.category, pm?.name||pm?.bank||pm?.issuer||pm?.label);
-            found++;
-          }
-        }
-        // fallback: paymentMethods[]
-        if(Array.isArray(d?.paymentMethods)){
-          for(const pm of d.paymentMethods){
-            push(out, pm?.type||pm?.method||pm?.category, pm?.name||pm?.bank||pm?.issuer||pm?.label);
-            found++;
-          }
-        }
-      }
+  try {
+    if (!mongoReady) {
+      console.log("payment-methods: mongo not ready -> sending fallback");
+      return res.json(buckets);
     }
 
-    Object.keys(out).forEach(k=>out[k].sort((a,b)=>a.localeCompare(b)));
-    console.log(`payment-methods: scanned=${scanned}, added=${found}, coll=${(process.env.OFFER_COLLECTIONS||"offers")}`);
-    return res.json(out);
-  }catch(e){
-    console.error("payment-methods error:", e?.message||e);
-    return res.json(buckets());
+    // Pull distinct {type,name} from offers.paymentMethods
+    // (works with your parsed GPT schema used earlier)
+    const docs = await Offer.aggregate([
+      { $unwind: "$paymentMethods" },
+      {
+        $group: {
+          _id: {
+            type: "$paymentMethods.type",
+            name: "$paymentMethods.name",
+          },
+        },
+      },
+    ]);
+
+    for (const row of docs) {
+      const type = row?._id?.type;
+      const name = row?._id?.name;
+      if (!type || !name) continue;
+      if (!buckets[type]) buckets[type] = [];
+      if (!buckets[type].includes(name)) buckets[type].push(name);
+    }
+
+    console.log(
+      `payment-methods: grouped -> cc=${buckets.creditCard.length}, dc=${buckets.debitCard.length}, wallet=${buckets.wallet.length}, upi=${buckets.upi.length}, nb=${buckets.netBanking.length}, emi=${buckets.emi.length}`
+    );
+
+    return res.json(buckets);
+  } catch (err) {
+    console.error("payment-methods error:", err.message);
+    return res.json(buckets); // empty groups on error (never 500)
   }
 });
 
-/* ------------------ Flight search (FlightAPI path-style GET) ------------------ */
-// https://api.flightapi.io/roundtrip/<key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>?region=IN
-app.post("/search", async (req,res)=>{
-  try{
-    const BASE = process.env.FLIGHTAPI_URL;    // https://api.flightapi.io/roundtrip
-    const KEY  = process.env.FLIGHTAPI_KEY;
-    if(!BASE || !KEY) throw new Error("Missing FLIGHTAPI_URL or FLIGHTAPI_KEY");
+// ---------- SEARCH (FlightAPI.io) ----------
+/**
+ * Expects body:
+ * { from, to, departureDate, returnDate, passengers, travelClass, tripType }
+ * Calls FlightAPI.io roundtrip endpoint.
+ */
+app.post("/search", async (req, res) => {
+  try {
+    const {
+      from,
+      to,
+      departureDate,
+      returnDate,
+      passengers = 1,
+      travelClass = "Economy",
+      tripType = "round-trip",
+    } = req.body || {};
 
-    const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body;
+    // Validate required params so we never hit 404 HTML from FlightAPI
+    if (!from || !to || !departureDate) {
+      return res.status(400).json({ error: "Missing from/to/departureDate" });
+    }
 
-    const adults   = Number(passengers||1);
-    const children = Number(process.env.DEFAULT_CHILDREN || 0);
-    const infants  = Number(process.env.DEFAULT_INFANTS  || 0);
-    const currency = (process.env.DEFAULT_CURRENCY || "INR").toUpperCase();
-    const region   = (process.env.DEFAULT_REGION   || "IN").toUpperCase();
+    const infants = 0;
+    const children = 0;
+    const currency = "INR";
 
-    const cabin = (travelClass||"Economy").replace(/\s+/g,"_");
-    const ret   = tripType==="round-trip" ? returnDate : (returnDate || departureDate);
+    // For one-way, set returnDate equal to departureDate (FlightAPI path requires it)
+    const ret = tripType === "one-way" ? departureDate : (returnDate || departureDate);
 
-    const url = [
-      BASE.replace(/\/+$/,""),
-      encodeURIComponent(KEY),
-      encodeURIComponent(from),
-      encodeURIComponent(to),
-      encodeURIComponent(departureDate),
-      encodeURIComponent(ret),
-      String(adults),
-      String(children),
-      String(infants),
-      encodeURIComponent(cabin),
-      encodeURIComponent(currency)
-    ].join("/");
+    const apiKey = process.env.FLIGHTAPI_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Missing FLIGHTAPI_KEY" });
 
-    const finalUrl = `${url}?region=${encodeURIComponent(region)}`;
-    const r = await axios.get(finalUrl, { timeout: 25000 });
+    // FlightAPI path schema:
+    // https://api.flightapi.io/roundtrip/<api-key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>
+    const url = `https://api.flightapi.io/roundtrip/${encodeURIComponent(apiKey)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(departureDate)}/${encodeURIComponent(ret)}/${encodeURIComponent(String(passengers))}/${encodeURIComponent(String(children))}/${encodeURIComponent(String(infants))}/${encodeURIComponent(travelClass)}/${encodeURIComponent(currency)}`;
 
-    return res.json(normalizeFlightAPI(r.data));
-  }catch(e){
-    console.error("FlightAPI search error:", e.response?.data || e.message || e);
-    return res.status(500).json({ error:"FlightAPI request failed" });
+    // Helpful log without leaking the key:
+    console.log("FlightAPI GET:", url.replace(apiKey, "****KEY****"));
+
+    const resp = await axios.get(url, { timeout: 30000 });
+
+    // Map to simple structure your frontend expects
+    const mapped = mapFlightApi(resp.data);
+    return res.json(mapped);
+  } catch (err) {
+    // If FlightAPI returns HTML (404 page), surface a clean error
+    const msg = (err.response && typeof err.response.data === "string")
+      ? err.response.data.slice(0, 120)
+      : err.message;
+    console.error("FlightAPI search error:", msg);
+    return res.status(500).json({ error: "FlightAPI search failed" });
   }
 });
 
-/* ------------------ Normalizer ------------------ */
-function normalizeFlightAPI(raw){
-  const out={ outbound:[], inbound:[] };
-  const items = raw?.results || raw?.data || raw?.flights || [];
+function mapFlightApi(apiJson) {
+  // Very defensive; adjust mapping to your exact API response
+  const results = apiJson?.data || apiJson?.results || apiJson?.itineraries || [];
+  const toCard = (r) => ({
+    airline: r.airlineName || r.airline || r.carrier || "Flight",
+    flightNumber: r.flightNumber || r.number || "",
+    departureTime: r.departureTime || r.departure || "",
+    arrivalTime: r.arrivalTime || r.arrival || "",
+    price: Number(r.price || r.total || r.amount || 0),
+    stops: Number(r.stops ?? 0),
+  });
 
-  for(const r of items){
-    const mk=(itin)=>{
-      if(!itin) return null;
-      const seg = Array.isArray(itin.segments) ? itin.segments[0] : itin;
-      const airline = seg?.airlineName || seg?.airline || r?.airline || "Flight";
-      const flightNo = seg?.flightNumber || seg?.number || "";
-      const dep = (seg?.departureTime || seg?.departure || seg?.departure_at || "").slice(11,16) || seg?.departureTime || "";
-      const arr = (seg?.arrivalTime || seg?.arrival || seg?.arrival_at || "").slice(11,16) || seg?.arrivalTime || "";
-      const price = Number(r?.price?.total ?? r?.total ?? r?.price ?? 0);
-      const stops = Math.max(0, (itin?.segments?.length ?? 1) - 1);
-      return { airline, flightNumber:`${flightNo}`.trim(), departureTime:dep, arrivalTime:arr, price, stops };
-    };
-
-    const o = mk(r.outbound || r.out || r.itineraries?.[0]);
-    if(o) out.outbound.push(o);
-    const i = mk(r.inbound || r.in || r.itineraries?.[1]);
-    if(i) out.inbound.push(i);
-  }
-  return out;
+  // If API doesn’t split by direction, just duplicate into outbound & inbound
+  const cards = Array.isArray(results) ? results.map(toCard) : [];
+  return { outbound: cards, inbound: cards };
 }
 
-/* ------------------ Health ------------------ */
-app.get("/", (_req,res)=>res.send("SkyDeal backend running (FlightAPI path GET, EC2 Mongo)."));
-app.listen(PORT, ()=>console.log(`Server ON ${PORT} — FlightAPI only`));
+// ---------- HEALTH ----------
+app.get("/", (_req, res) => res.send("SkyDeal backend up"));
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log(`Server ON ${PORT}`);
+});
