@@ -27,26 +27,21 @@ if (MONGO_URI) {
     });
 }
 
-// Generic Offer schema (minimum needed fields)
+// Minimal offer schema (works with your GPT-parsed docs)
 const OfferSchema = new mongoose.Schema(
   {
     paymentMethods: [
       {
         type: { type: String }, // "creditCard" | "debitCard" | "wallet" | "upi" | "netBanking" | "emi"
-        name: String,           // e.g. "ICICI Bank Credit Card"
-      },
-    ],
+        name: String
+      }
+    ]
   },
   { strict: false, timestamps: false, collection: "offers" }
 );
 const Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
 
 // ---------- PAYMENT METHODS ----------
-/**
- * Returns grouped payment methods from Mongo.
- * If Mongo is empty/unavailable, returns a sane static fallback
- * so the frontend always shows *something* (no blank modal).
- */
 app.get("/api/payment-methods", async (_req, res) => {
   const buckets = {
     creditCard: [],
@@ -54,27 +49,26 @@ app.get("/api/payment-methods", async (_req, res) => {
     wallet: [],
     upi: [],
     netBanking: [],
-    emi: [],
+    emi: []
   };
 
   try {
     if (!mongoReady) {
-      console.log("payment-methods: mongo not ready -> sending fallback");
+      console.log("payment-methods: mongo not ready -> sending empty buckets");
       return res.json(buckets);
     }
 
-    // Pull distinct {type,name} from offers.paymentMethods
-    // (works with your parsed GPT schema used earlier)
+    // Group distinct paymentMethods by {type, name}
     const docs = await Offer.aggregate([
       { $unwind: "$paymentMethods" },
       {
         $group: {
           _id: {
             type: "$paymentMethods.type",
-            name: "$paymentMethods.name",
-          },
-        },
-      },
+            name: "$paymentMethods.name"
+          }
+        }
+      }
     ]);
 
     for (const row of docs) {
@@ -86,22 +80,17 @@ app.get("/api/payment-methods", async (_req, res) => {
     }
 
     console.log(
-      `payment-methods: grouped -> cc=${buckets.creditCard.length}, dc=${buckets.debitCard.length}, wallet=${buckets.wallet.length}, upi=${buckets.upi.length}, nb=${buckets.netBanking.length}, emi=${buckets.emi.length}`
+      `payment-methods: cc=${buckets.creditCard.length}, dc=${buckets.debitCard.length}, wallet=${buckets.wallet.length}, upi=${buckets.upi.length}, nb=${buckets.netBanking.length}, emi=${buckets.emi.length}`
     );
 
     return res.json(buckets);
   } catch (err) {
     console.error("payment-methods error:", err.message);
-    return res.json(buckets); // empty groups on error (never 500)
+    return res.json(buckets); // never 500 for this; return empty groups
   }
 });
 
 // ---------- SEARCH (FlightAPI.io) ----------
-/**
- * Expects body:
- * { from, to, departureDate, returnDate, passengers, travelClass, tripType }
- * Calls FlightAPI.io roundtrip endpoint.
- */
 app.post("/search", async (req, res) => {
   try {
     const {
@@ -111,10 +100,9 @@ app.post("/search", async (req, res) => {
       returnDate,
       passengers = 1,
       travelClass = "Economy",
-      tripType = "round-trip",
+      tripType = "round-trip"
     } = req.body || {};
 
-    // Validate required params so we never hit 404 HTML from FlightAPI
     if (!from || !to || !departureDate) {
       return res.status(400).json({ error: "Missing from/to/departureDate" });
     }
@@ -123,36 +111,33 @@ app.post("/search", async (req, res) => {
     const children = 0;
     const currency = "INR";
 
-    // For one-way, set returnDate equal to departureDate (FlightAPI path requires it)
+    // FlightAPI path requires a return date even for one-way. Reuse dep date.
     const ret = tripType === "one-way" ? departureDate : (returnDate || departureDate);
 
     const apiKey = process.env.FLIGHTAPI_KEY;
     if (!apiKey) return res.status(500).json({ error: "Missing FLIGHTAPI_KEY" });
 
-    // FlightAPI path schema:
-    // https://api.flightapi.io/roundtrip/<api-key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>
+    // https://api.flightapi.io/roundtrip/<key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>
     const url = `https://api.flightapi.io/roundtrip/${encodeURIComponent(apiKey)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(departureDate)}/${encodeURIComponent(ret)}/${encodeURIComponent(String(passengers))}/${encodeURIComponent(String(children))}/${encodeURIComponent(String(infants))}/${encodeURIComponent(travelClass)}/${encodeURIComponent(currency)}`;
 
-    // Helpful log without leaking the key:
     console.log("FlightAPI GET:", url.replace(apiKey, "****KEY****"));
 
     const resp = await axios.get(url, { timeout: 30000 });
 
-    // Map to simple structure your frontend expects
     const mapped = mapFlightApi(resp.data);
     return res.json(mapped);
   } catch (err) {
-    // If FlightAPI returns HTML (404 page), surface a clean error
-    const msg = (err.response && typeof err.response.data === "string")
-      ? err.response.data.slice(0, 120)
-      : err.message;
+    const msg =
+      err.response && typeof err.response.data === "string"
+        ? err.response.data.slice(0, 150)
+        : err.message;
     console.error("FlightAPI search error:", msg);
     return res.status(500).json({ error: "FlightAPI search failed" });
   }
 });
 
 function mapFlightApi(apiJson) {
-  // Very defensive; adjust mapping to your exact API response
+  // Defensive mapping – adjust when you lock the schema
   const results = apiJson?.data || apiJson?.results || apiJson?.itineraries || [];
   const toCard = (r) => ({
     airline: r.airlineName || r.airline || r.carrier || "Flight",
@@ -160,10 +145,8 @@ function mapFlightApi(apiJson) {
     departureTime: r.departureTime || r.departure || "",
     arrivalTime: r.arrivalTime || r.arrival || "",
     price: Number(r.price || r.total || r.amount || 0),
-    stops: Number(r.stops ?? 0),
+    stops: Number(r.stops ?? 0)
   });
-
-  // If API doesn’t split by direction, just duplicate into outbound & inbound
   const cards = Array.isArray(results) ? results.map(toCard) : [];
   return { outbound: cards, inbound: cards };
 }
