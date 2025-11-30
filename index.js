@@ -13,12 +13,10 @@ const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || "";
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
 const OFFER_COLLECTIONS = process.env.OFFER_COLLECTIONS || "offers";
 
-// Portals shown in UI (we’ll add ₹250 to carrier price for each)
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 const PORTAL_MARKUP_INR = 250;
 
-// ---------------------------------------------------
-// CORS (always set headers, even preflight)
+// -------------------- MIDDLEWARE -------------------
 app.use((req, res, next) => {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -28,7 +26,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
-app.use(cors({ origin: true, credentials: false }));
+app.use(cors({ origin: true }));
 app.use(express.json());
 
 // Health
@@ -42,13 +40,11 @@ let db;
 
 async function initMongo() {
   if (!MONGO_URI) {
-    console.warn("⚠️  MONGO_URI not set — /payment-options will return minimal data.");
+    console.warn("⚠️  MONGO_URI not set — /payment-options will be minimal.");
     return null;
   }
   if (db) return db;
-  mongoClient = new MongoClient(MONGO_URI, {
-    serverApi: ServerApiVersion.v1,
-  });
+  mongoClient = new MongoClient(MONGO_URI, { serverApi: ServerApiVersion.v1 });
   await mongoClient.connect();
   db = mongoClient.db(MONGODB_DB);
   console.log("✅ Mongo connected:", MONGODB_DB);
@@ -56,13 +52,13 @@ async function initMongo() {
 }
 
 // -------------------- HELPERS ----------------------
-function titleCase(s) {
-  return String(s || "")
+const tcase = (s) =>
+  String(s || "")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase()
     .replace(/\b[a-z]/g, (c) => c.toUpperCase());
-}
+
 function normalizeBankName(raw) {
   if (!raw) return "";
   let s = String(raw).trim().replace(/\s+/g, " ").toLowerCase();
@@ -82,7 +78,7 @@ function normalizeBankName(raw) {
   const cleaned = String(s).replace(/\b(bank|card|cards)\b/gi, "").trim();
   return cleaned ? cleaned.replace(/\b[a-z]/g, c => c.toUpperCase()) : String(raw).trim();
 }
-function normTypeKey(t) {
+const normTypeKey = (t) => {
   const x = String(t || "").toLowerCase();
   if (!x) return null;
   if (/\bemi\b/.test(x)) return "emi";
@@ -92,8 +88,7 @@ function normTypeKey(t) {
   if (/wallet/.test(x)) return "wallet";
   if (/\bupi\b/.test(x)) return "upi";
   return null;
-}
-
+};
 function toISODateStr(d) {
   try {
     if (!d) return null;
@@ -112,10 +107,16 @@ function toISODateStr(d) {
 function buildFlightApiUrl({ key, from, to, depISO, retISO, adults = 1, cabin = "economy", currency = "INR" }) {
   const c = String(cabin || "economy").toLowerCase();
   const base = "https://api.flightapi.io";
-  // region=IN is REQUIRED for India routes, else you often get empty data
+  // region=IN is important for India routes
   return `${base}/roundtrip/${key}/${from}/${to}/${depISO}/${retISO}/${adults}/0/0/${c}/${currency}?region=IN`;
 }
 
+/**
+ * Robust extractor:
+ * - tolerates missing segment numbers
+ * - falls back to operating_carrier_id when marketing_carrier_id missing
+ * - skips only entries that truly lack leg references
+ */
 function extractFlights(fa) {
   const itins = Array.isArray(fa?.itineraries) ? fa.itineraries : [];
   const legs  = Array.isArray(fa?.legs) ? fa.legs : [];
@@ -127,75 +128,63 @@ function extractFlights(fa) {
   const segById = new Map(segs.map(s => [String(s?.id ?? ""), s]));
 
   const out = [];
-  itins.forEach(it => {
+  for (const it of itins) {
     const legId = (Array.isArray(it?.leg_ids) && it.leg_ids[0]) ? String(it.leg_ids[0]) : null;
     const leg = legId ? legById.get(legId) : null;
-    if (!leg || !Array.isArray(leg.segment_ids) || leg.segment_ids.length === 0) return;
+    if (!leg || !Array.isArray(leg.segment_ids) || !leg.segment_ids.length) continue;
 
-    const seg0 = segById.get(String(leg.segment_ids[0]));
-    if (!seg0) return;
-
-    const carrierId = String(seg0?.marketing_carrier_id ?? "");
+    const firstSeg = segById.get(String(leg.segment_ids[0]));
+    const carrierId =
+      String(firstSeg?.marketing_carrier_id ?? firstSeg?.operating_carrier_id ?? "");
     const airlineName = carrierById.get(carrierId) || carrierId || "—";
 
-    const price = Number(it?.pricing_options?.[0]?.price?.amount ?? 0);
+    const number = firstSeg?.number ?? "";
     const dep = leg?.departure || "";
     const arr = leg?.arrival || "";
     const depT = dep ? new Date(dep).toTimeString().slice(0,5) : "--:--";
     const arrT = arr ? new Date(arr).toTimeString().slice(0,5) : "--:--";
 
+    const priceAmt = Number(it?.pricing_options?.[0]?.price?.amount ?? 0);
     out.push({
-      flightNumber: `${carrierId}${seg0?.number ? " " + seg0.number : ""}`.trim(),
+      flightNumber: `${carrierId}${number ? " " + number : ""}`.trim(),
       airlineName,
       departure: depT,
       arrival: arrT,
-      price: price ? price.toFixed(2) : "0.00",
-      stops: Math.max(0, Array.isArray(leg?.segment_ids) ? leg.segment_ids.length - 1 : 0),
+      price: priceAmt ? priceAmt.toFixed(2) : "0.00",
+      stops: Math.max(0, leg.segment_ids.length - 1),
       carrierCode: carrierId
     });
-  });
+  }
   return out;
 }
 
-// -------------------- PAYMENT OPTIONS (Mongo) -----------------------
+// -------------------- PAYMENT OPTIONS -----------------------
 app.get("/payment-options", async (_req, res) => {
   try {
     const database = await initMongo();
     if (!database) {
-      // minimal fallback – nothing in Mongo
       return res.json({ options: { CreditCard: [], DebitCard: [], EMI: [], NetBanking: [], Wallet: [], UPI: [] } });
     }
 
     const col = database.collection(OFFER_COLLECTIONS);
     const today = new Date().toISOString().slice(0, 10);
     const activeValidityOr = [
-      { validityPeriod: { $exists: false } },
-      { $and: [
-        { "validityPeriod.end": { $exists: false } },
-        { "validityPeriod.to": { $exists: false } },
-        { "validityPeriod.endDate": { $exists: false } },
-        { "validityPeriod.till": { $exists: false } },
-        { "validityPeriod.until": { $exists: false } },
-      ]},
+      { isExpired: { $ne: true } },
       { "validityPeriod.end": { $gte: today } },
       { "validityPeriod.to": { $gte: today } },
+      { "validityPeriod.until": { $gte: today } },
       { "validityPeriod.endDate": { $gte: today } },
       { "validityPeriod.till": { $gte: today } },
-      { "validityPeriod.until": { $gte: today } },
+      { validityPeriod: { $exists: false } },
     ];
-
     const cur = col.find(
-      { isExpired: { $ne: true }, $or: activeValidityOr },
+      { $or: activeValidityOr },
       { projection: { paymentMethods: 1 }, limit: 5000 }
     );
 
     const setMap = {
-      "CreditCard": new Set(),
-      "DebitCard": new Set(),
-      "EMI": new Set(),
-      "NetBanking": new Set(),
-      "Wallet": new Set(),
-      "UPI": new Set(),
+      CreditCard: new Set(), DebitCard: new Set(), EMI: new Set(),
+      NetBanking: new Set(), Wallet: new Set(), UPI: new Set()
     };
 
     const pick = (o, keys) => keys.map(k => o?.[k]).find(v => v != null && v !== "");
@@ -213,17 +202,17 @@ app.get("/payment-options", async (_req, res) => {
           bankRaw = pick(pm, ["bank","cardBank","issuer","cardIssuer","provider","wallet","upi"]) || "";
         } else continue;
 
-        const bank = titleCase(normalizeBankName(bankRaw));
+        const bank = tcase(normalizeBankName(bankRaw));
         if (!typeKey || !bank) continue;
 
         if (typeKey === "emi") {
-          setMap["EMI"].add(`${bank} (Credit Card EMI)`);
-          setMap["CreditCard"].add(bank);
-        } else if (typeKey === "credit") setMap["CreditCard"].add(bank);
-        else if (typeKey === "debit") setMap["DebitCard"].add(bank);
-        else if (typeKey === "netbanking") setMap["NetBanking"].add(bank);
-        else if (typeKey === "wallet") setMap["Wallet"].add(bank);
-        else if (typeKey === "upi") setMap["UPI"].add(bank);
+          setMap.EMI.add(`${bank} (Credit Card EMI)`);
+          setMap.CreditCard.add(bank);
+        } else if (typeKey === "credit") setMap.CreditCard.add(bank);
+        else if (typeKey === "debit") setMap.DebitCard.add(bank);
+        else if (typeKey === "netbanking") setMap.NetBanking.add(bank);
+        else if (typeKey === "wallet") setMap.Wallet.add(bank);
+        else if (typeKey === "upi") setMap.UPI.add(bank);
       }
     }
 
@@ -232,6 +221,38 @@ app.get("/payment-options", async (_req, res) => {
   } catch (e) {
     console.error("X /payment-options error:", e);
     return res.status(200).json({ error: "Failed loading payment options" });
+  }
+});
+
+// -------------------- DEBUG (temporary) ---------------------
+app.post("/debug-flightapi", async (req, res) => {
+  try {
+    const { from, to, departureDate, returnDate, passengers = 1, travelClass = "economy", tripType = "round-trip" } = req.body || {};
+    const depISO = toISODateStr(departureDate);
+    const retISO0 = toISODateStr(returnDate);
+    const retISO = tripType === "round-trip" ? (retISO0 || depISO) : depISO;
+    const ORG = String(from || "").toUpperCase();
+    const DST = String(to || "").toUpperCase();
+
+    const url = buildFlightApiUrl({
+      key: FLIGHTAPI_KEY, from: ORG, to: DST,
+      depISO, retISO, adults: passengers, cabin: travelClass, currency: "INR"
+    });
+
+    const r = await fetch(url);
+    const status = r.status;
+    const text = await r.text();
+    let parsed = null, keys = [];
+    try { parsed = JSON.parse(text); keys = Object.keys(parsed || {}); } catch {}
+
+    res.json({
+      ok: r.ok, status, url,
+      keys,
+      sampleItinerary: parsed?.itineraries?.[0] || null,
+      note: "If ok=true and itineraries exist, extractor should fill results. If not, share this payload."
+    });
+  } catch (e) {
+    res.status(200).json({ ok: false, error: String(e) });
   }
 });
 
@@ -247,23 +268,22 @@ app.post("/search", async (req, res) => {
     } = req.body || {};
 
     const depISO = toISODateStr(departureDate);
-    const retISO = toISODateStr(returnDate);
+    const retISO0 = toISODateStr(returnDate);
+    const retISO = tripType === "round-trip" ? (retISO0 || depISO) : depISO;
+
     const missing = [];
     if (!from) missing.push("from");
     if (!to) missing.push("to");
     if (!depISO) missing.push("departureDate (invalid format)");
     if (!FLIGHTAPI_KEY) missing.push("FLIGHTAPI_KEY (env)");
-    if (missing.length) {
-      return res.status(400).json({ error: "Missing required fields", missing });
-    }
+    if (missing.length) return res.status(400).json({ error: "Missing required fields", missing });
 
     const ORG = String(from).trim().toUpperCase();
     const DST = String(to).trim().toUpperCase();
     const url = buildFlightApiUrl({
       key: FLIGHTAPI_KEY,
       from: ORG, to: DST,
-      depISO,
-      retISO: tripType === "round-trip" ? (retISO || depISO) : depISO,
+      depISO, retISO,
       adults: passengers,
       cabin: travelClass,
       currency: "INR"
@@ -283,10 +303,23 @@ app.post("/search", async (req, res) => {
 
     const flights = extractFlights(faJson);
     if (!flights.length) {
-      return res.status(200).json({ outboundFlights: [], returnFlights: [], meta: { source: "flightapi", reason: "no-itineraries" } });
+      return res.status(200).json({
+        outboundFlights: [],
+        returnFlights: [],
+        meta: {
+          source: "flightapi",
+          reason: "no-itineraries",
+          stats: {
+            itinCount: Array.isArray(faJson?.itineraries) ? faJson.itineraries.length : 0,
+            legCount: Array.isArray(faJson?.legs) ? faJson.legs.length : 0,
+            segCount: Array.isArray(faJson?.segments) ? faJson.segments.length : 0,
+            carrierCount: Array.isArray(faJson?.carriers) ? faJson.carriers.length : 0
+          }
+        }
+      });
     }
 
-    // Decorate with portal markup (use carrier website price as base)
+    // carrier-website price + ₹250 per portal
     const withPortals = flights.map(f => {
       const base = Number(f.price) || 0;
       const portalPrices = PORTALS.map(portal => ({
@@ -298,8 +331,6 @@ app.post("/search", async (req, res) => {
       return { ...f, portalPrices };
     });
 
-    // We do not split outbound/return here because FlightAPI combined response
-    // doesn’t separate them like Amadeus; return everything as outbound.
     return res.json({
       outboundFlights: withPortals,
       returnFlights: [],
@@ -316,6 +347,6 @@ app.post("/search", async (req, res) => {
 app.listen(PORT, async () => {
   try { await initMongo(); } catch (e) { console.error("Mongo init failed:", e.message); }
   if (!FLIGHTAPI_KEY) console.error("❌ Missing FLIGHTAPI_KEY");
-  if (!MONGO_URI) console.warn("⚠️  MONGO_URI not set (only /payment-options will be limited)");
+  if (!MONGO_URI) console.warn("⚠️  MONGO_URI not set (only /payment-options limited)");
   console.log(`🚀 SkyDeal backend running on ${PORT}`);
 });
