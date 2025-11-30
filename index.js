@@ -1,4 +1,4 @@
-// index.js — SkyDeal backend (FlightAPI + Mongo) — FULL FILE (ESM)
+// index.js — SkyDeal backend (FlightAPI + Mongo) — FULL FILE (ESM, with timeouts)
 
 import express from "express";
 import cors from "cors";
@@ -15,6 +15,9 @@ const OFFER_COLLECTIONS = process.env.OFFER_COLLECTIONS || "offers";
 
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 const PORTAL_MARKUP_INR = 250;
+
+// timeout for outbound FlightAPI requests
+const FLIGHTAPI_TIMEOUT_MS = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
 
 // -------------------- MIDDLEWARE -------------------
 app.use((req, res, next) => {
@@ -40,7 +43,7 @@ let db;
 
 async function initMongo() {
   if (!MONGO_URI) {
-    console.warn("⚠️  MONGO_URI not set — /payment-options will be minimal.");
+    console.warn("⚠️  MONGO_URI not set — /payment-options limited.");
     return null;
   }
   if (db) return db;
@@ -103,20 +106,29 @@ function toISODateStr(d) {
   } catch { return null; }
 }
 
+// fetch with timeout
+async function fetchWithTimeout(url, init = {}, ms = FLIGHTAPI_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(new Error("timeout")), ms);
+  try {
+    const r = await fetch(url, {
+      ...init,
+      headers: { "User-Agent": "SkyDeal/1.0 (+render)", ...(init.headers || {}) },
+      signal: ac.signal,
+    });
+    return r;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // -------------------- FlightAPI helpers ----------------------
 function buildFlightApiUrl({ key, from, to, depISO, retISO, adults = 1, cabin = "economy", currency = "INR" }) {
   const c = String(cabin || "economy").toLowerCase();
   const base = "https://api.flightapi.io";
-  // region=IN is important for India routes
   return `${base}/roundtrip/${key}/${from}/${to}/${depISO}/${retISO}/${adults}/0/0/${c}/${currency}?region=IN`;
 }
 
-/**
- * Robust extractor:
- * - tolerates missing segment numbers
- * - falls back to operating_carrier_id when marketing_carrier_id missing
- * - skips only entries that truly lack leg references
- */
 function extractFlights(fa) {
   const itins = Array.isArray(fa?.itineraries) ? fa.itineraries : [];
   const legs  = Array.isArray(fa?.legs) ? fa.legs : [];
@@ -224,7 +236,7 @@ app.get("/payment-options", async (_req, res) => {
   }
 });
 
-// -------------------- DEBUG (temporary) ---------------------
+// -------------------- DEBUG (timeout-safe) ------------------
 app.post("/debug-flightapi", async (req, res) => {
   try {
     const { from, to, departureDate, returnDate, passengers = 1, travelClass = "economy", tripType = "round-trip" } = req.body || {};
@@ -239,17 +251,21 @@ app.post("/debug-flightapi", async (req, res) => {
       depISO, retISO, adults: passengers, cabin: travelClass, currency: "INR"
     });
 
-    const r = await fetch(url);
-    const status = r.status;
-    const text = await r.text();
-    let parsed = null, keys = [];
-    try { parsed = JSON.parse(text); keys = Object.keys(parsed || {}); } catch {}
+    let status = 0, ok = false, parsed = null, keys = [], error = null;
+    try {
+      const r = await fetchWithTimeout(url);
+      status = r.status; ok = r.ok;
+      const text = await r.text();
+      if (text.trim().startsWith("<")) throw new Error("flightapi_html");
+      parsed = JSON.parse(text); keys = Object.keys(parsed || {});
+    } catch (e) {
+      error = e.message || String(e);
+    }
 
     res.json({
-      ok: r.ok, status, url,
-      keys,
-      sampleItinerary: parsed?.itineraries?.[0] || null,
-      note: "If ok=true and itineraries exist, extractor should fill results. If not, share this payload."
+      ok, status, url, keys,
+      hasItin: Boolean(parsed?.itineraries?.length),
+      error
     });
   } catch (e) {
     res.status(200).json({ ok: false, error: String(e) });
@@ -291,14 +307,14 @@ app.post("/search", async (req, res) => {
 
     let faJson;
     try {
-      const r = await fetch(url);
+      const r = await fetchWithTimeout(url);
       if (!r.ok) throw new Error(`flightapi_http_${r.status}`);
       const text = await r.text();
       if (text.trim().startsWith("<")) throw new Error("flightapi_html");
       faJson = JSON.parse(text);
     } catch (e) {
       console.error("X flightapi fetch failed:", e.message);
-      return res.status(200).json({ outboundFlights: [], returnFlights: [], meta: { source: "flightapi", reason: "fetch-failed" } });
+      return res.status(200).json({ outboundFlights: [], returnFlights: [], meta: { source: "flightapi", reason: e.message === "timeout" ? "fetch-timeout" : "fetch-failed" } });
     }
 
     const flights = extractFlights(faJson);
