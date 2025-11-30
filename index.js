@@ -1,5 +1,5 @@
-// index.js — SkyDeal backend (ESM, FlightAPI version)
-// NOTE: uses the global fetch available in Node 18+ (Render is Node 22)
+// index.js — SkyDeal backend (ESM, FlightAPI + Mongo offers)
+// Uses global fetch (Node 18+)
 
 import express from "express";
 import cors from "cors";
@@ -38,8 +38,8 @@ app.get("/health", (_req, res) =>
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
-const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY; // <-- set this on Render
-const FLIGHTAPI_BASE = "https://api.flightapi.io";
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY; // set on Render
+const FLIGHTAPI_BASE = "https://api.flightapi.io"; // <-- declared ONCE
 
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 const PAYMENT_TYPES = ["Credit Card", "Debit Card", "EMI", "NetBanking", "Wallet", "UPI"];
@@ -182,7 +182,6 @@ function normalizeUserPaymentChoices(arr) {
 }
 
 /* ===== FlightAPI.io fetchers ===== */
-const FLIGHTAPI_BASE = "https://api.flightapi.io";
 function buildRoundTripURL({ apiKey, from, to, depISO, retISO, adults, cabin, currency, region }) {
   return `${FLIGHTAPI_BASE}/roundtrip/${apiKey}/${from}/${to}/${depISO}/${retISO}/${adults}/0/0/${encodeURIComponent(
     cabin
@@ -270,7 +269,7 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
   return byPortal;
 }
 
-/* ===== Payment options ===== */
+/* ===== Payment options (types ➜ subtypes) ===== */
 app.get("/payment-options", async (_req, res) => {
   try {
     const database = await initMongo();
@@ -457,7 +456,7 @@ app.post("/search", async (req, res) => {
     const selectedPayments = normalizeUserPaymentChoices(paymentMethods);
     const offersByPortal = await loadActiveCouponOffersByPortal({ travelISO: depISO });
 
-    // fetch flights from FlightAPI
+    // fetch flights
     const outbound = await fetchFlightApi({
       from: ORG, to: DST, depISO, retISO, adults: passengers, travelClass
     });
