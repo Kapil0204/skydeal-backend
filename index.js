@@ -12,9 +12,10 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// ---------- MONGO ----------
+// ---------------- MONGO ----------------
 const MONGO_URI = process.env.MONGODB_URI || "";
 let mongoReady = false;
+
 if (MONGO_URI) {
   mongoose
     .connect(MONGO_URI, { dbName: "skydeal" })
@@ -27,21 +28,25 @@ if (MONGO_URI) {
     });
 }
 
-// Minimal offer schema (works with your GPT-parsed docs)
+// Minimal Offer schema; we only care about paymentMethods
 const OfferSchema = new mongoose.Schema(
   {
     paymentMethods: [
       {
-        type: { type: String }, // "creditCard" | "debitCard" | "wallet" | "upi" | "netBanking" | "emi"
-        name: String
+        type: { type: String },   // "creditCard" | "debitCard" | "wallet" | "upi" | "netBanking" | "emi"
+        name: String              // e.g. "ICICI Bank Credit Card"
       }
     ]
   },
-  { strict: false, timestamps: false, collection: "offers" }
+  { strict: false, collection: "offers" }
 );
+
 const Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
 
-// ---------- PAYMENT METHODS ----------
+// ---------------- PAYMENT METHODS ----------------
+/**
+ * Returns grouped payment methods from Mongo, with a static fallback so the UI never looks empty.
+ */
 app.get("/api/payment-methods", async (_req, res) => {
   const buckets = {
     creditCard: [],
@@ -52,14 +57,35 @@ app.get("/api/payment-methods", async (_req, res) => {
     emi: []
   };
 
+  // Static fallback (kept small but useful)
+  const fallback = {
+    creditCard: [
+      "ICICI Bank Credit Card",
+      "HDFC Bank Credit Card",
+      "Axis Bank Credit Card",
+      "SBI Credit Card"
+    ],
+    debitCard: [
+      "ICICI Bank Debit Card",
+      "HDFC Bank Debit Card",
+      "Axis Bank Debit Card",
+      "SBI Debit Card"
+    ],
+    wallet: ["Amazon Pay", "Paytm", "PhonePe"],
+    upi: ["UPI"],
+    netBanking: ["ICICI NetBanking", "HDFC NetBanking", "SBI NetBanking", "Axis NetBanking"],
+    emi: ["ICICI Credit Card EMI", "HDFC Credit Card EMI"]
+  };
+
   try {
     if (!mongoReady) {
-      console.log("payment-methods: mongo not ready -> sending empty buckets");
-      return res.json(buckets);
+      console.log("payment-methods: mongo not ready -> sending fallback");
+      return res.json(fallback);
     }
 
-    // Group distinct paymentMethods by {type, name}
+    // Group distinct {type, name} from paymentMethods
     const docs = await Offer.aggregate([
+      { $match: { paymentMethods: { $exists: true, $ne: [] } } },
       { $unwind: "$paymentMethods" },
       {
         $group: {
@@ -79,6 +105,19 @@ app.get("/api/payment-methods", async (_req, res) => {
       if (!buckets[type].includes(name)) buckets[type].push(name);
     }
 
+    const total =
+      buckets.creditCard.length +
+      buckets.debitCard.length +
+      buckets.wallet.length +
+      buckets.upi.length +
+      buckets.netBanking.length +
+      buckets.emi.length;
+
+    if (total === 0) {
+      console.log("payment-methods: no data in Mongo -> sending fallback");
+      return res.json(fallback);
+    }
+
     console.log(
       `payment-methods: cc=${buckets.creditCard.length}, dc=${buckets.debitCard.length}, wallet=${buckets.wallet.length}, upi=${buckets.upi.length}, nb=${buckets.netBanking.length}, emi=${buckets.emi.length}`
     );
@@ -86,11 +125,15 @@ app.get("/api/payment-methods", async (_req, res) => {
     return res.json(buckets);
   } catch (err) {
     console.error("payment-methods error:", err.message);
-    return res.json(buckets); // never 500 for this; return empty groups
+    return res.json(fallback);
   }
 });
 
-// ---------- SEARCH (FlightAPI.io) ----------
+// ---------------- SEARCH (FlightAPI.io) ----------------
+/**
+ * body: { from, to, departureDate, returnDate, passengers, travelClass, tripType }
+ * Build FlightAPI path + region query to avoid 400s.
+ */
 app.post("/search", async (req, res) => {
   try {
     const {
@@ -110,15 +153,27 @@ app.post("/search", async (req, res) => {
     const infants = 0;
     const children = 0;
     const currency = "INR";
+    const region = (process.env.FLIGHTAPI_REGION || "IN").toUpperCase();
 
-    // FlightAPI path requires a return date even for one-way. Reuse dep date.
+    // FlightAPI path requires a return date even for one-way – reuse dep date
     const ret = tripType === "one-way" ? departureDate : (returnDate || departureDate);
 
     const apiKey = process.env.FLIGHTAPI_KEY;
     if (!apiKey) return res.status(500).json({ error: "Missing FLIGHTAPI_KEY" });
 
-    // https://api.flightapi.io/roundtrip/<key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>
-    const url = `https://api.flightapi.io/roundtrip/${encodeURIComponent(apiKey)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(departureDate)}/${encodeURIComponent(ret)}/${encodeURIComponent(String(passengers))}/${encodeURIComponent(String(children))}/${encodeURIComponent(String(infants))}/${encodeURIComponent(travelClass)}/${encodeURIComponent(currency)}`;
+    const base = "https://api.flightapi.io/roundtrip";
+    // https://api.flightapi.io/roundtrip/<key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>?region=IN
+    const url =
+      `${base}/${encodeURIComponent(apiKey)}` +
+      `/${encodeURIComponent(from)}` +
+      `/${encodeURIComponent(to)}` +
+      `/${encodeURIComponent(departureDate)}` +
+      `/${encodeURIComponent(ret)}` +
+      `/${encodeURIComponent(String(passengers))}` +
+      `/${encodeURIComponent(String(children))}` +
+      `/${encodeURIComponent(String(infants))}` +
+      `/${encodeURIComponent(travelClass)}` +
+      `/${encodeURIComponent(currency)}?region=${encodeURIComponent(region)}`;
 
     console.log("FlightAPI GET:", url.replace(apiKey, "****KEY****"));
 
@@ -129,32 +184,40 @@ app.post("/search", async (req, res) => {
   } catch (err) {
     const msg =
       err.response && typeof err.response.data === "string"
-        ? err.response.data.slice(0, 150)
+        ? err.response.data.slice(0, 200)
         : err.message;
     console.error("FlightAPI search error:", msg);
     return res.status(500).json({ error: "FlightAPI search failed" });
   }
 });
 
+// Very defensive mapping; adjust when schema is finalized
 function mapFlightApi(apiJson) {
-  // Defensive mapping – adjust when you lock the schema
-  const results = apiJson?.data || apiJson?.results || apiJson?.itineraries || [];
+  const results =
+    apiJson?.data ||
+    apiJson?.results ||
+    apiJson?.itineraries ||
+    apiJson?.outboundFlights ||
+    [];
+
   const toCard = (r) => ({
     airline: r.airlineName || r.airline || r.carrier || "Flight",
     flightNumber: r.flightNumber || r.number || "",
-    departureTime: r.departureTime || r.departure || "",
-    arrivalTime: r.arrivalTime || r.arrival || "",
-    price: Number(r.price || r.total || r.amount || 0),
+    departureTime: r.departureTime || r.departure || r.departure_time || "",
+    arrivalTime: r.arrivalTime || r.arrival || r.arrival_time || "",
+    price: Number(r.price || r.total || r.amount || r.minPrice || 0),
     stops: Number(r.stops ?? 0)
   });
+
   const cards = Array.isArray(results) ? results.map(toCard) : [];
+  // If API doesn’t split by direction, mirror to inbound
   return { outbound: cards, inbound: cards };
 }
 
-// ---------- HEALTH ----------
+// ---------------- HEALTH ----------------
 app.get("/", (_req, res) => res.send("SkyDeal backend up"));
 
-// ---------- START ----------
+// ---------------- START ----------------
 app.listen(PORT, () => {
   console.log(`Server ON ${PORT}`);
 });
