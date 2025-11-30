@@ -1,7 +1,8 @@
 // index.js — SkyDeal backend (ESM, FlightAPI version)
+// NOTE: uses the global fetch available in Node 18+ (Render is Node 22)
+
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
@@ -37,7 +38,7 @@ app.get("/health", (_req, res) =>
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
-const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY; // <-- set this
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY; // <-- set this on Render
 const FLIGHTAPI_BASE = "https://api.flightapi.io";
 
 const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
@@ -161,8 +162,6 @@ function extractPaymentMethodLabel(offerDoc) {
   if (/credit|emi/i.test(text)) return "Credit Card";
   return "—";
 }
-
-/* Selected payment parsing */
 function normalizeUserPaymentChoices(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
   const out = [];
@@ -183,6 +182,7 @@ function normalizeUserPaymentChoices(arr) {
 }
 
 /* ===== FlightAPI.io fetchers ===== */
+const FLIGHTAPI_BASE = "https://api.flightapi.io";
 function buildRoundTripURL({ apiKey, from, to, depISO, retISO, adults, cabin, currency, region }) {
   return `${FLIGHTAPI_BASE}/roundtrip/${apiKey}/${from}/${to}/${depISO}/${retISO}/${adults}/0/0/${encodeURIComponent(
     cabin
@@ -193,9 +193,7 @@ function buildOneWayURL({ apiKey, from, to, depISO, adults, cabin, currency, reg
     cabin
   )}/${currency}?region=${encodeURIComponent(region)}`;
 }
-// Map FlightAPI’s result into the minimal UI shape you used earlier
 function mapFlightApiToUI(item) {
-  // FlightAPI responses differ; keep defensive parsing
   const flightNum = item?.flightNumber || item?.code || item?.flight_code || "--";
   const airlineName = item?.airlineName || item?.airline || item?.carrier || "Airline";
   const departure = item?.departureTime?.slice?.(0,5) || item?.departure || "--:--";
@@ -272,7 +270,7 @@ async function loadActiveCouponOffersByPortal({ travelISO }) {
   return byPortal;
 }
 
-/* ===== Payment options (types ➜ subtypes) ===== */
+/* ===== Payment options ===== */
 app.get("/payment-options", async (_req, res) => {
   try {
     const database = await initMongo();
