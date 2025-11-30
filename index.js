@@ -1,184 +1,206 @@
-<!-- script.js — SkyDeal frontend -->
-<script>
-const BACKEND_BASE = "https://skydeal-backend.onrender.com"; // your Render URL
+// index.js — SkyDeal backend (Render)
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import axios from "axios";
+import { MongoClient } from "mongodb";
 
-// Elements
-const btnOpenPM = document.getElementById("btnOpenPaymentModal");
-const btnSearch = document.getElementById("btnSearch");
+dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 10000;
 
-const modal = document.getElementById("paymentModal");
-const modalBackdrop = document.getElementById("paymentModalBackdrop");
-const modalClose = document.getElementById("pmClose");
-const pmTabs = document.getElementById("pmTabs");
-const pmBody = document.getElementById("pmBody");
-const pmCancel = document.getElementById("pmCancel");
-const pmApply = document.getElementById("pmApply");
-const pmCount = document.getElementById("pmCount");
+app.use(cors());
+app.use(express.json());
 
-// State
-let paymentData = {
-  creditCard: [],
-  debitCard: [],
-  wallet: [],
-  upi: [],
-  netBanking: [],
-  emi: [],
-};
-let selected = new Set(); // values are strings like "creditCard::ICICI Visa"
+let db = null;
+let offersColl = null;
 
-// ---------- Modal helpers ----------
-function openModal() {
-  modal.classList.remove("hidden");
-  modalBackdrop.classList.remove("hidden");
-}
-function closeModal() {
-  modal.classList.add("hidden");
-  modalBackdrop.classList.add("hidden");
-}
-
-// Build tabs -> when tab clicked, render a grid of checkboxes
-const TYPE_LABELS = {
-  creditCard: "Credit Cards",
-  debitCard: "Debit Cards",
-  wallet: "Wallets",
-  upi: "UPI",
-  netBanking: "NetBanking",
-  emi: "EMI",
-};
-
-function renderTabs(activeKey = "creditCard") {
-  pmTabs.innerHTML = "";
-  Object.keys(TYPE_LABELS).forEach((key) => {
-    const btn = document.createElement("button");
-    btn.className =
-      "px-3 py-1 rounded-md text-sm font-medium " +
-      (key === activeKey ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-200 hover:bg-gray-600");
-    btn.textContent = TYPE_LABELS[key];
-    btn.addEventListener("click", () => {
-      renderTabs(key);
-      renderOptions(key);
-    });
-    pmTabs.appendChild(btn);
-  });
-}
-
-function renderOptions(key) {
-  const list = paymentData[key] || [];
-  pmBody.innerHTML = "";
-  if (!list.length) {
-    pmBody.innerHTML = `<div class="text-gray-300 text-sm">No options</div>`;
+// ---------- Mongo connect ----------
+async function connectMongo() {
+  const uri = process.env.MONGO_URI;
+  if (!uri) {
+    console.log("Mongo: no MONGO_URI set — payment methods will use fallback.");
     return;
   }
-  const grid = document.createElement("div");
-  grid.className = "grid grid-cols-2 md:grid-cols-3 gap-3";
+  if (db) return; // already connected
+  const client = new MongoClient(uri, { maxPoolSize: 5 });
+  await client.connect();
+  db = client.db(); // database inferred from URI
+  offersColl = db.collection("offers"); // <-- collection name
+  console.log("Mongo connected.");
+}
+connectMongo().catch(e => {
+  console.error("Mongo connect error:", e.message);
+});
 
-  list.forEach((label) => {
-    const id = `${key}::${label}`;
-    const wrapper = document.createElement("label");
-    wrapper.className =
-      "flex items-center gap-2 px-3 py-2 rounded-md bg-gray-700 hover:bg-gray-600 cursor-pointer";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "form-checkbox h-4 w-4";
-    cb.checked = selected.has(id);
-    cb.addEventListener("change", () => {
-      if (cb.checked) selected.add(id);
-      else selected.delete(id);
-      updateSelectedCount();
+// ---------- Helpers ----------
+const TYPE_KEYS = {
+  "credit card": "creditCard",
+  "creditcard": "creditCard",
+  "credit": "creditCard",
+  "debit card": "debitCard",
+  "debitcard": "debitCard",
+  "debit": "debitCard",
+  "wallet": "wallet",
+  "upi": "upi",
+  "netbanking": "netBanking",
+  "net banking": "netBanking",
+  "emi": "emi",
+};
+
+function normalizeType(t) {
+  if (!t) return null;
+  const key = String(t).trim().toLowerCase();
+  return TYPE_KEYS[key] || null;
+}
+
+function buildLabel(pm) {
+  // Try common fields in your schema variants
+  const bank = pm.bank || pm.issuer || pm.provider || pm.gateway || "";
+  const network = pm.cardNetwork || pm.network || "";
+  const methodName = pm.method || pm.methodName || "";
+
+  // Prefer bank + network (e.g., "ICICI Credit (Visa)")
+  const parts = [bank, network].filter(Boolean);
+  if (parts.length) return parts.join(" ").trim();
+
+  // else show methodName (e.g., "Paytm Wallet")
+  if (methodName) return methodName.trim();
+
+  // else show whatever identifier exists
+  return (pm.name || pm.label || "").trim();
+}
+
+// ---------- API: payment methods ----------
+app.get("/api/payment-methods", async (_req, res) => {
+  try {
+    await connectMongo();
+
+    // If no Mongo, or not connected, return empty groups (frontend still works)
+    if (!offersColl) {
+      console.log("payment-methods: no Mongo -> fallback (empty)");
+      return res.json({
+        creditCard: [],
+        debitCard: [],
+        wallet: [],
+        upi: [],
+        netBanking: [],
+        emi: [],
+      });
+    }
+
+    // Pull only non-expired offers. Your schema stores both raw + parsed; we only need parsedFields/paymentMethods[]
+    // If your schema uses a different flag field for expiry, add it here.
+    const pipeline = [
+      { $match: { $or: [{ isExpired: { $exists: false } }, { isExpired: { $ne: true } }] } },
+      { $match: { paymentMethods: { $exists: true, $ne: [] } } },
+      { $unwind: "$paymentMethods" },
+      {
+        $project: {
+          pm: "$paymentMethods",
+        },
+      },
+    ];
+
+    const cursor = offersColl.aggregate(pipeline, { allowDiskUse: true });
+    const buckets = {
+      creditCard: new Set(),
+      debitCard: new Set(),
+      wallet: new Set(),
+      upi: new Set(),
+      netBanking: new Set(),
+      emi: new Set(),
+    };
+
+    for await (const doc of cursor) {
+      const pm = doc.pm || {};
+      // Normalize type
+      const type =
+        normalizeType(pm.type) ||
+        normalizeType(pm.category) ||
+        normalizeType(pm.channel) ||
+        normalizeType(pm.paymentType);
+
+      const mapped = type || null;
+      if (!mapped || !buckets[mapped]) continue;
+
+      const label = buildLabel(pm);
+      if (!label) continue;
+
+      buckets[mapped].add(label);
+    }
+
+    const out = {
+      creditCard: Array.from(buckets.creditCard).sort(),
+      debitCard: Array.from(buckets.debitCard).sort(),
+      wallet: Array.from(buckets.wallet).sort(),
+      upi: Array.from(buckets.upi).sort(),
+      netBanking: Array.from(buckets.netBanking).sort(),
+      emi: Array.from(buckets.emi).sort(),
+    };
+
+    console.log(
+      `payment-methods: scanned -> credit=${out.creditCard.length}, debit=${out.debitCard.length}, wallet=${out.wallet.length}, upi=${out.upi.length}, net=${out.netBanking.length}, emi=${out.emi.length}`
+    );
+
+    return res.json(out);
+  } catch (err) {
+    console.error("payment-methods error:", err);
+    return res.json({
+      creditCard: [],
+      debitCard: [],
+      wallet: [],
+      upi: [],
+      netBanking: [],
+      emi: [],
     });
-    const span = document.createElement("span");
-    span.className = "text-gray-100 text-sm";
-    span.textContent = label;
-    wrapper.appendChild(cb);
-    wrapper.appendChild(span);
-    grid.appendChild(wrapper);
-  });
-
-  pmBody.appendChild(grid);
-}
-
-function updateSelectedCount() {
-  const count = selected.size;
-  pmCount.textContent = count ? `${count} selected` : "Select Payment Methods";
-}
-
-// Expose selections for search
-function getSelectedPaymentFilters() {
-  // returns { creditCard: ["ICICI Visa", ...], debitCard: [...], ... }
-  const out = { creditCard: [], debitCard: [], wallet: [], upi: [], netBanking: [], emi: [] };
-  for (const key of selected) {
-    const [type, label] = key.split("::");
-    if (out[type]) out[type].push(label);
   }
-  return out;
-}
-window.getSelectedPaymentFilters = getSelectedPaymentFilters;
-
-// ---------- Fetch methods ----------
-async function fetchPaymentMethods() {
-  const url = `${BACKEND_BASE}/api/payment-methods`;
-  const r = await fetch(url);
-  const data = await r.json();
-  // data = { creditCard:[], debitCard:[], wallet:[], upi:[], netBanking:[], emi:[] }
-  paymentData = data || paymentData;
-}
-
-// ---------- Wire up ----------
-btnOpenPM?.addEventListener("click", async () => {
-  await fetchPaymentMethods();
-  renderTabs("creditCard");
-  renderOptions("creditCard");
-  openModal();
 });
 
-pmCancel?.addEventListener("click", () => {
-  closeModal();
-});
+// ---------- FlightAPI (unchanged, minimal demo) ----------
+const FLIGHTAPI_BASE = "https://api.flightapi.io";
 
-pmApply?.addEventListener("click", () => {
-  // update button label and close
-  updateSelectedCount();
-  closeModal();
-});
+app.post("/api/search", async (req, res) => {
+  const {
+    from,
+    to,
+    departureDate,
+    returnDate,
+    passengers = 1,
+    travelClass = "Economy",
+    currency = "INR",
+    region = "IN",
+  } = req.body || {};
 
-modalClose?.addEventListener("click", () => closeModal());
-modalBackdrop?.addEventListener("click", () => closeModal());
+  const apiKey = process.env.FLIGHTAPI_KEY;
+  if (!apiKey) return res.status(500).json({ error: "Missing FLIGHTAPI_KEY" });
 
-// ---------- Search (stub – calls backend; integrate your UI render) ----------
-btnSearch?.addEventListener("click", async () => {
-  const from = document.getElementById("fromInput")?.value?.trim()?.toUpperCase();
-  const to = document.getElementById("toInput")?.value?.trim()?.toUpperCase();
-  const dep = document.getElementById("departureDateInput")?.value;   // YYYY-MM-DD
-  const ret = document.getElementById("returnDateInput")?.value || dep;
-  const pax = parseInt(document.getElementById("passengersSelect")?.value || "1", 10);
-  const cabin = document.getElementById("classSelect")?.value || "Economy";
-
-  const filters = getSelectedPaymentFilters(); // you can send this later to price popup logic
+  // Build roundtrip URL (FlightAPI expects path params)
+  const roundUrl = `${FLIGHTAPI_BASE}/roundtrip/${apiKey}/${from}/${to}/${departureDate}/${returnDate || departureDate}/${passengers}/0/0/${encodeURIComponent(
+    travelClass
+  )}/${currency}?region=${encodeURIComponent(region)}`;
 
   try {
-    // optional: show loading state
-    const r = await fetch(`${BACKEND_BASE}/api/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from, to,
-        departureDate: dep,
-        returnDate: ret,
-        passengers: pax,
-        travelClass: cabin,
-        currency: "INR",
-        region: "IN",
-        paymentFilters: filters, // kept for next milestone
-      }),
-    });
-    const data = await r.json();
-    // TODO: render results into the two flight panels (outbound/return)
-    console.log("search results", data);
+    const r = await axios.get(roundUrl, { timeout: 20000 });
+    return res.json(r.data);
   } catch (e) {
-    console.error("search error", e);
+    console.error("FlightAPI roundtrip error:", e.response?.status, e.response?.data || e.message);
+    // Try oneway fallback so the UI shows *something*
+    const oneUrl = `${FLIGHTAPI_BASE}/onewaytrip/${apiKey}/${from}/${to}/${departureDate}/${passengers}/0/0/${encodeURIComponent(
+      travelClass
+    )}/${currency}?region=${encodeURIComponent(region)}`;
+    try {
+      const r2 = await axios.get(oneUrl, { timeout: 20000 });
+      return res.json(r2.data);
+    } catch (e2) {
+      console.error("FlightAPI oneway error:", e2.response?.status, e2.response?.data || e2.message);
+      return res.status(502).json({ error: "Failed to fetch flights" });
+    }
   }
 });
 
-// Initial label
-updateSelectedCount();
-</script>
+app.get("/", (_req, res) => res.send("SkyDeal backend OK"));
+
+app.listen(PORT, () => {
+  console.log(`Server ON ${PORT}`);
+});
