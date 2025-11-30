@@ -1,10 +1,9 @@
+// index.js — SkyDeal backend (FlightAPI + Mongo + payment methods hard fallback)
+
 import express from "express";
 import cors from "cors";
-import axios from "axios";
-import dotenv from "dotenv";
 import mongoose from "mongoose";
-
-dotenv.config();
+import axios from "axios";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -12,187 +11,264 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// ---------------- MONGO ----------------
+// ---------- Mongo Connect ----------
 const MONGO_URI = process.env.MONGODB_URI || "";
+if (!MONGO_URI) console.warn("MONGODB_URI not set – payment methods will rely on hard fallback.");
+
 let mongoReady = false;
-
-if (MONGO_URI) {
-  mongoose.connect(MONGO_URI, { dbName: "skydeal" })
-    .then(() => {
-      mongoReady = true;
-      console.log("MongoDB connected");
-    })
-    .catch((err) => console.error("MongoDB connect error:", err.message));
+async function connectMongo() {
+  if (!MONGO_URI) return;
+  try {
+    await mongoose.connect(MONGO_URI, { dbName: "skydeal" });
+    mongoReady = true;
+    console.log("MongoDB connected.");
+  } catch (err) {
+    console.error("Mongo connect error:", err.message);
+  }
 }
+connectMongo();
 
-// Offers schema (we only care about paymentMethods)
+// A very loose Offer schema (only fields we need for payment methods)
 const OfferSchema = new mongoose.Schema(
   {
-    paymentMethods: [{ type: { type: String }, name: String }]
+    paymentMethods: [
+      {
+        type: { type: String },   // creditCard | debitCard | wallet | upi | netBanking | emi
+        bank: String,             // e.g., HDFC, ICICI
+        network: String,          // e.g., Visa, RuPay (optional)
+        label: String             // display label
+      }
+    ]
   },
   { strict: false, collection: "offers" }
 );
 const Offer = mongoose.models.Offer || mongoose.model("Offer", OfferSchema);
 
-// ---------------- PAYMENT METHODS ----------------
-app.get("/api/payment-methods", async (_req, res) => {
-  // fallback so UI never empty
-  const fallback = {
-    creditCard: ["ICICI Bank Credit Card", "HDFC Bank Credit Card", "Axis Bank Credit Card", "SBI Credit Card"],
-    debitCard:  ["ICICI Bank Debit Card",  "HDFC Bank Debit Card",  "Axis Bank Debit Card",  "SBI Debit Card"],
-    wallet:     ["Amazon Pay", "Paytm", "PhonePe"],
-    upi:        ["UPI"],
-    netBanking: ["ICICI NetBanking", "HDFC NetBanking", "SBI NetBanking", "Axis NetBanking"],
-    emi:        ["ICICI Credit Card EMI", "HDFC Credit Card EMI"]
-  };
+// ---------- Payment Methods ----------
+const HARD_METHODS = {
+  creditCard: [
+    { key: "ICICI Bank Credit Card", label: "ICICI Bank Credit Card" },
+    { key: "HDFC Bank Credit Card", label: "HDFC Bank Credit Card" },
+    { key: "Axis Bank Credit Card", label: "Axis Bank Credit Card" },
+    { key: "SBI Credit Card", label: "SBI Credit Card" }
+  ],
+  debitCard: [
+    { key: "ICICI Bank Debit Card", label: "ICICI Bank Debit Card" },
+    { key: "HDFC Bank Debit Card", label: "HDFC Bank Debit Card" },
+    { key: "Axis Bank Debit Card", label: "Axis Bank Debit Card" }
+  ],
+  wallet: [
+    { key: "Paytm Wallet", label: "Paytm Wallet" },
+    { key: "PhonePe Wallet", label: "PhonePe Wallet" },
+    { key: "Amazon Pay Wallet", label: "Amazon Pay Wallet" }
+  ],
+  upi: [{ key: "UPI", label: "UPI" }],
+  netBanking: [
+    { key: "ICICI NetBanking", label: "ICICI NetBanking" },
+    { key: "HDFC NetBanking", label: "HDFC NetBanking" },
+    { key: "Axis NetBanking", label: "Axis NetBanking" }
+  ],
+  emi: [
+    { key: "HDFC EMI", label: "HDFC EMI" },
+    { key: "ICICI EMI", label: "ICICI EMI" }
+  ]
+};
 
+app.get("/api/payment-methods", async (_req, res) => {
   try {
     if (!mongoReady) {
-      console.log("payment-methods: mongo not ready -> fallback");
-      return res.json(fallback);
+      console.log("payment-methods: mongo not ready -> hard fallback");
+      return res.json(HARD_METHODS);
     }
 
-    const groups = { creditCard: [], debitCard: [], wallet: [], upi: [], netBanking: [], emi: [] };
+    // scan offers for structured payment methods
+    const cursor = Offer.find({}, { paymentMethods: 1 }).cursor();
+    const buckets = {
+      creditCard: new Map(),
+      debitCard: new Map(),
+      wallet: new Map(),
+      upi: new Map(),
+      netBanking: new Map(),
+      emi: new Map()
+    };
+    let scanned = 0;
 
-    const docs = await Offer.aggregate([
-      { $match: { paymentMethods: { $exists: true, $ne: [] } } },
-      { $unwind: "$paymentMethods" },
-      { $group: { _id: { type: "$paymentMethods.type", name: "$paymentMethods.name" } } }
-    ]);
-
-    for (const row of docs) {
-      const t = row?._id?.type, n = row?._id?.name;
-      if (!t || !n) continue;
-      if (!groups[t]) groups[t] = [];
-      if (!groups[t].includes(n)) groups[t].push(n);
+    for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
+      scanned++;
+      const arr = doc.paymentMethods || [];
+      for (const pm of arr) {
+        const t = (pm.type || "").trim();
+        if (!buckets[t]) continue;
+        const label =
+          pm.label ||
+          [pm.bank, pm.network, t].filter(Boolean).join(" ");
+        const key = label || `${t}:${pm.bank || ""}:${pm.network || ""}`;
+        if (!buckets[t].has(key)) buckets[t].set(key, { key, label: label || key });
+      }
     }
 
-    const total = Object.values(groups).reduce((a, arr) => a + arr.length, 0);
+    const toArray = (m) => Array.from(m.values());
+    const payload = {
+      creditCard: toArray(buckets.creditCard),
+      debitCard: toArray(buckets.debitCard),
+      wallet: toArray(buckets.wallet),
+      upi: toArray(buckets.upi),
+      netBanking: toArray(buckets.netBanking),
+      emi: toArray(buckets.emi)
+    };
+
+    const total =
+      payload.creditCard.length +
+      payload.debitCard.length +
+      payload.wallet.length +
+      payload.upi.length +
+      payload.netBanking.length +
+      payload.emi.length;
+
     if (total === 0) {
-      console.log("payment-methods: no data in Mongo -> fallback");
-      return res.json(fallback);
+      console.log(`payment-methods: scanned=${scanned}, found=0 -> hard fallback`);
+      return res.json(HARD_METHODS);
     }
-
-    console.log(`payment-methods: cc=${groups.creditCard.length}, dc=${groups.debitCard.length}, wallet=${groups.wallet.length}, upi=${groups.upi.length}, nb=${groups.netBanking.length}, emi=${groups.emi.length}`);
-    return res.json(groups);
+    console.log(`payment-methods: scanned=${scanned}, found=${total}`);
+    return res.json(payload);
   } catch (e) {
     console.error("payment-methods error:", e.message);
-    return res.json(fallback);
+    return res.json(HARD_METHODS);
   }
 });
 
-// ---------------- FLIGHT SEARCH (FlightAPI.io) ----------------
+// ---------- Flight Search (FlightAPI with graceful fallback) ----------
 const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY || "";
-const REGION = (process.env.FLIGHTAPI_REGION || "IN").toUpperCase();
-const BASE = "https://api.flightapi.io";
-
-function normalizeCabin(c) {
-  if (!c) return "Economy";
-  const x = String(c).toLowerCase();
-  if (x.includes("premium")) return "Premium_Economy";
-  if (x.startsWith("bus"))   return "Business";
-  if (x.startsWith("fir"))   return "First";
-  return "Economy";
+function buildRoundtripURL({ from, to, departureDate, returnDate, adults, children, infants, cabin, currency, region }) {
+  // Spec per docs: /roundtrip/<key>/<from>/<to>/<dep>/<ret>/<adults>/<children>/<infants>/<cabin>/<currency>?region=IN
+  const parts = [
+    "https://api.flightapi.io/roundtrip",
+    encodeURIComponent(FLIGHTAPI_KEY),
+    encodeURIComponent(from),
+    encodeURIComponent(to),
+    encodeURIComponent(departureDate),
+    encodeURIComponent(returnDate),
+    String(adults ?? 1),
+    String(children ?? 0),
+    String(infants ?? 0),
+    encodeURIComponent(cabin || "Economy"),
+    encodeURIComponent(currency || "INR")
+  ];
+  const base = parts.join("/");
+  const r = region ? `?region=${encodeURIComponent(region)}` : "";
+  return `${base}${r}`;
 }
 
-/** Attempt roundtrip, if 400 then attempt oneway automatically. */
-async function fetchFlights({from, to, dep, ret, adults, children, infants, cabin, currency}) {
-  const pathRound = `${BASE}/roundtrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${dep}/${ret}/${adults}/${children}/${infants}/${cabin}/${currency}?region=${REGION}`;
-  console.log("FlightAPI GET:", pathRound.replace(FLIGHTAPI_KEY, "****KEY****"));
+function mockFlights(from, to) {
+  return {
+    outbound: [
+      {
+        id: "MOCK-OUT-1",
+        airline: "IndiGo",
+        flightNumber: "6E 201",
+        departure: `${from} 08:30`,
+        arrival: `${to} 10:35`,
+        price: 5299,
+        stops: 0
+      },
+      {
+        id: "MOCK-OUT-2",
+        airline: "Air India",
+        flightNumber: "AI 657",
+        departure: `${from} 12:15`,
+        arrival: `${to} 14:30`,
+        price: 5699,
+        stops: 0
+      }
+    ],
+    return: [
+      {
+        id: "MOCK-RET-1",
+        airline: "Vistara",
+        flightNumber: "UK 944",
+        departure: `${to} 18:20`,
+        arrival: `${from} 20:35`,
+        price: 5899,
+        stops: 0
+      },
+      {
+        id: "MOCK-RET-2",
+        airline: "SpiceJet",
+        flightNumber: "SG 015",
+        departure: `${to} 21:05`,
+        arrival: `${from} 23:10`,
+        price: 5499,
+        stops: 0
+      }
+    ]
+  };
+}
 
+app.post("/api/search", async (req, res) => {
   try {
-    const r = await axios.get(pathRound, { timeout: 30000, headers: { Accept: "application/json" } });
-    return { kind: "roundtrip", data: r.data };
-  } catch (err) {
-    const status = err?.response?.status;
-    const data   = err?.response?.data;
-    console.error("FlightAPI roundtrip error:", status, typeof data === "string" ? data.slice(0, 400) : JSON.stringify(data || {}, null, 2).slice(0, 400));
-
-    // Retry with oneway if roundtrip fails (common with some accounts/regions)
-    const pathOne = `${BASE}/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${dep}/${adults}/${children}/${infants}/${cabin}/${currency}?region=${REGION}`;
-    console.log("FlightAPI RETRY (oneway):", pathOne.replace(FLIGHTAPI_KEY, "****KEY****"));
-    const r2 = await axios.get(pathOne, { timeout: 30000, headers: { Accept: "application/json" } });
-    return { kind: "oneway", data: r2.data };
-  }
-}
-
-function mapFlightApi(json) {
-  const arr =
-    json?.data ||
-    json?.results ||
-    json?.itineraries ||
-    json?.outboundFlights ||
-    [];
-
-  const toCard = (r) => ({
-    airline: r.airlineName || r.airline || r.carrier || "Flight",
-    flightNumber: r.flightNumber || r.number || "",
-    departureTime: r.departureTime || r.departure || r.departure_time || "",
-    arrivalTime: r.arrivalTime || r.arrival || r.arrival_time || "",
-    price: Number(r.price || r.total || r.amount || r.minPrice || 0),
-    stops: Number(r.stops ?? 0)
-  });
-
-  const cards = Array.isArray(arr) ? arr.map(toCard) : [];
-  return { outbound: cards, inbound: cards };
-}
-
-app.post("/search", async (req, res) => {
-  try {
-    if (!FLIGHTAPI_KEY) return res.status(500).json({ error: "Missing FLIGHTAPI_KEY" });
-
     const {
       from, to,
-      departureDate,
-      returnDate,
+      departureDate, returnDate,
       passengers = 1,
       travelClass = "Economy",
       tripType = "round-trip"
     } = req.body || {};
 
-    if (!from || !to || !departureDate) {
-      return res.status(400).json({ error: "Missing from/to/departureDate" });
+    if (!FLIGHTAPI_KEY) {
+      console.warn("FLIGHTAPI_KEY missing -> sending mock flights");
+      return res.json(mockFlights(from, to));
     }
 
-    const dep = departureDate;
-    const ret = tripType === "one-way" ? departureDate : (returnDate || departureDate);
-    const payload = {
-      from: encodeURIComponent(from),
-      to: encodeURIComponent(to),
-      dep: encodeURIComponent(dep),
-      ret: encodeURIComponent(ret),
-      adults: encodeURIComponent(String(passengers)),
-      children: "0",
-      infants: "0",
-      cabin: encodeURIComponent(normalizeCabin(travelClass)),
-      currency: "INR"
-    };
+    const adults = passengers || 1;
+    const children = 0;
+    const infants = 0;
+    const currency = "INR";
+    const region = "IN";
 
-    const { data } = await fetchFlights(payload);
-    const mapped = mapFlightApi(data);
-    return res.json(mapped);
+    if (tripType === "one-way") {
+      // FlightAPI recommends /onewaytrip when needed (fallback if roundtrip fails).
+      const onewayURL = `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(departureDate)}/${adults}/${children}/${infants}/${encodeURIComponent(travelClass)}/${currency}?region=${region}`;
+      console.log("FlightAPI GET (oneway):", onewayURL);
+      const r = await axios.get(onewayURL);
+      return res.json({ outbound: r.data?.data || [], return: [] });
+    }
+
+    const url = buildRoundtripURL({
+      from,
+      to,
+      departureDate,
+      returnDate,
+      adults,
+      children,
+      infants,
+      cabin: travelClass,
+      currency,
+      region
+    });
+
+    console.log("FlightAPI GET:", url);
+    const resp = await axios.get(url);
+    // Normalise quickly for frontend (use provider’s structure if you prefer)
+    const data = resp.data?.data || resp.data || {};
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      console.warn("FlightAPI empty -> mock");
+      return res.json(mockFlights(from, to));
+    }
+    return res.json(data);
   } catch (err) {
-    // log full detail so we see what FlightAPI actually returned
     const status = err?.response?.status;
-    const data   = err?.response?.data;
-    console.error("FlightAPI search error:", status, typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data || {}, null, 2).slice(0, 800));
-
-    // last-resort mock so UI keeps working
-    const mock = {
-      outbound: [
-        { airline: "IndiGo", flightNumber: "6E123", departureTime: "08:00", arrivalTime: "10:00", price: 4999, stops: 0 },
-        { airline: "Air India", flightNumber: "AI456", departureTime: "12:30", arrivalTime: "14:45", price: 5499, stops: 0 }
-      ],
-      inbound: [
-        { airline: "Vistara", flightNumber: "UK321", departureTime: "18:30", arrivalTime: "20:45", price: 5799, stops: 0 }
-      ]
-    };
-    return res.json(mock);
+    const body = err?.response?.data;
+    console.error("FlightAPI roundtrip error:", status, body || err.message);
+    // On any error -> graceful mock so UI still flows
+    return res.json(mockFlights(req.body?.from, req.body?.to));
   }
 });
 
-// ---------------- HEALTH ----------------
-app.get("/", (_req, res) => res.send("SkyDeal backend up"));
+// ---------- Root ----------
+app.get("/", (_req, res) => {
+  res.send("SkyDeal backend running.");
+});
 
-// ---------------- START ----------------
-app.listen(PORT, () => console.log(`Server ON ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server on ${PORT}`);
+});
