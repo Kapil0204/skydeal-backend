@@ -1,10 +1,9 @@
-// index.js — SkyDeal backend (FlightAPI + Mongo offers application)
-// Node ESM
-
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import { MongoClient } from "mongodb";
+// index.js — SkyDeal backend (drop-in)
+// Node >=18 (uses global fetch). ESM module.
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import { MongoClient } from 'mongodb';
 
 dotenv.config();
 
@@ -13,591 +12,429 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY || process.env.FLIGHT_API_KEY; // support both names
+const REGION = 'IN';
+const CURRENCY = 'INR';
+const MARKUP = 250;
 
-// -----------------------------
-// Env, DB, constants
-// -----------------------------
-const MONGO_URI = process.env.MONGO_URI || "";
-const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY || process.env.FLIGHT_API_KEY || process.env.FLIGHTAPI || "";
-const BASE_REGION = "IN"; // keep stable
-
-const PORTALS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
-const MARKUP_RS = 250; // fixed markup per portal
-
-let db = null;
-let mongoClient = null;
+// ---------- Mongo ----------
+const MONGO_URI = process.env.MONGO_URI;
+let mongo, db, offersCol;
 
 async function connectDB() {
-  if (!MONGO_URI || !/^mongodb(\+srv)?:\/\//i.test(MONGO_URI)) {
-    console.warn("❌ Missing or invalid MONGO_URI");
+  if (!MONGO_URI) {
+    console.error('❌ Missing MONGO_URI');
     return;
   }
-  mongoClient = new MongoClient(MONGO_URI, { ignoreUndefined: true });
-  await mongoClient.connect();
-  db = mongoClient.db(); // db name is part of URI
-  console.log("✅ Connected to MongoDB");
+  if (db) return;
+  mongo = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+  await mongo.connect();
+  db = mongo.db('skydeal');
+  offersCol = db.collection('offers');
+  console.log('✅ Connected to MongoDB (EC2)');
 }
-await connectDB().catch((e) => console.error("❌ MongoDB Connection Error:", e));
 
-// -----------------------------
-// Helpers: text normalization
-// -----------------------------
-const BANK_CANON = {
-  "hdfc": "HDFC Bank",
-  "hdfc bank": "HDFC Bank",
-  "icici": "ICICI Bank",
-  "icici bank": "ICICI Bank",
-  "axis": "Axis Bank",
-  "axis bank": "Axis Bank",
-  "au small": "AU Small Bank",
-  "au small bank": "AU Small Bank",
-  "idfc": "IDFC First Bank",
-  "idfc first": "IDFC First Bank",
-  "idfc first bank": "IDFC First Bank",
-  "yes bank": "Yes Bank",
-  "kotak": "Kotak Bank",
-  "kotak bank": "Kotak Bank",
-  "rbl": "Rbl Bank",
-  "rbl bank": "Rbl Bank",
-  "federal": "Federal Bank",
-  "federal bank": "Federal Bank",
-  "central bank of india": "Central Bank Of India",
-  "sbi bank": "SBI Bank",
-  "hsbc": "Hsbc",
-  "hsbc bank": "Hsbc Bank",
-  "bobcard ltd": "Bobcard Ltd",
-  "canara bank": "Canara Bank",
-  "flipkart axis": "Flipkart Axis",
-  "flipkart axis credit card": "Flipkart Axis Credit Card",
-  "mobikwik": "Mobikwik"
-};
-function canonicalBankOrLabel(s) {
-  if (!s) return "";
-  const k = String(s).trim().toLowerCase();
-  return BANK_CANON[k] || titleCase(s);
+await connectDB().catch((e) => {
+  console.error('❌ MongoDB Connection Error:', e);
+});
+
+// ---------- helpers ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function toTime(t) {
+  // '2025-12-20T23:30:00' -> '23:30'
+  if (!t) return '';
+  const m = t.match(/T(\d{2}:\d{2})/);
+  return m ? m[1] : t;
 }
-function titleCase(s) {
-  return String(s)
+
+function pickCarrierName(carriersMap, seg) {
+  const id = String(seg?.marketing_carrier_id ?? '');
+  const name = carriersMap.get(id);
+  return name || 'Unknown';
+}
+
+function buildDefaultPortalPrices(base) {
+  return [
+    { portal: 'MakeMyTrip', basePrice: base, finalPrice: base + MARKUP, source: 'carrier+markup' },
+    { portal: 'Goibibo',    basePrice: base, finalPrice: base + MARKUP, source: 'carrier+markup' },
+    { portal: 'EaseMyTrip', basePrice: base, finalPrice: base + MARKUP, source: 'carrier+markup' },
+    { portal: 'Yatra',      basePrice: base, finalPrice: base + MARKUP, source: 'carrier+markup' },
+    { portal: 'Cleartrip',  basePrice: base, finalPrice: base + MARKUP, source: 'carrier+markup' },
+  ];
+}
+
+// very defensive normalizer
+function norm(s) {
+  return String(s || '')
     .toLowerCase()
-    .replace(/\b\w/g, (m) => m.toUpperCase())
-    .replace(/\bOf\b/g, "of")
-    .replace(/\bAnd\b/g, "and");
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/ bank$/, '');
 }
-function normalizeType(rawType) {
-  if (!rawType) return "";
-  const t = String(rawType).trim().toLowerCase();
-  if (t.includes("credit")) return "CreditCard";
-  if (t.includes("debit")) return "DebitCard";
-  if (t.includes("wallet")) return "Wallet";
-  if (t.includes("upi")) return "UPI";
-  if (t.includes("net")) return "NetBanking";
-  if (t.includes("emi")) return "EMI";
-  if (t === "bank offer" || t === "bank") return "CreditCard"; // generic bank offers → usually cards
-  if (["online", "other", "any"].includes(t)) return "CreditCard";
-  return "CreditCard";
-}
-function looksEMI(pm) {
-  const blob = [
-    pm?.type, pm?.category, pm?.mode, pm?.method
-  ].filter(Boolean).join(" ").toLowerCase();
-  return /(^|\W)emi(\W|$)/.test(blob);
-}
-function withinDateRange(nowISO, range) {
-  // range may be object {start:'YYYY-MM-DD', end:'YYYY-MM-DD'} or strings
-  if (!range) return true;
-  const now = new Date(nowISO);
-  let start = null, end = null;
-  if (typeof range === "string") {
-    // attempt parse "YYYY-MM-DD to YYYY-MM-DD"
-    const m = range.match(/(\d{4}-\d{2}-\d{2}).*(\d{4}-\d{2}-\d{2})/);
-    if (m) { start = new Date(m[1]); end = new Date(m[2]); }
-  } else {
-    if (range.start) start = new Date(range.start);
-    if (range.end) end = new Date(range.end);
+
+// Offer eligibility (booking validity only; you can later add travel windows, weekday, minAmount, etc.)
+function isOfferCurrentlyValid(ofr) {
+  // explicit boolean wins
+  if (ofr.isExpired === true) return false;
+
+  const end =
+    ofr?.validityPeriod?.endDate ||
+    ofr?.validityPeriod?.to ||
+    ofr?.validityPeriod?.end ||
+    null;
+
+  if (!end) {
+    // if no end date provided, assume usable unless explicitly expired
+    return true;
   }
-  if (start && now < start) return false;
-  if (end && now > end) return false;
-  return true;
-}
-function numberish(x) {
-  if (x == null) return null;
-  const n = typeof x === "number" ? x : Number(String(x).replace(/[^\d.]/g, ""));
-  return Number.isFinite(n) ? n : null;
+  const now = new Date();
+  const endDt = new Date(end);
+  return now <= endDt;
 }
 
-// -----------------------------
-// Offer selection & application
-// -----------------------------
-/**
- * Extract a discount amount for a given offer and base price.
- * Supports:
- *  - percentage via `discountPercent`
- *  - flat via `maxDiscountAmount` (if no percent)
- *  - guard with `minTransactionValue`
- *  - cap via `maxDiscountAmount` (when percent)
- */
-function computeDiscountForPrice(offer, baseAmount) {
-  const amount = numberish(baseAmount) || 0;
-  const minTxn = numberish(offer?.minTransactionValue);
-  if (minTxn != null && amount < minTxn) return 0;
+// returns a minimal “applicable” offer bundle for the selected banks/types
+function pickApplicableOffers(allOffers, selectedLabels) {
+  if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
+  const wanted = new Set(selectedLabels.map(norm));
 
-  const pct = numberish(offer?.discountPercent);
-  const maxCap = numberish(offer?.maxDiscountAmount);
+  const res = [];
+  for (const ofr of allOffers) {
+    if (!isOfferCurrentlyValid(ofr)) continue;
+
+    const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
+    // Consider any bank/type/method/category/mode fields we stored
+    const tags = new Set();
+    for (const pm of pms) {
+      ['bank', 'type', 'method', 'category', 'mode', 'wallet'].forEach((k) => {
+        if (pm?.[k]) tags.add(norm(pm[k]));
+      });
+    }
+    // also consider parsedApplicablePlatforms if present (e.g., 'MakeMyTrip', etc.)
+    if (Array.isArray(ofr.parsedApplicablePlatforms)) {
+      for (const p of ofr.parsedApplicablePlatforms) tags.add(norm(p));
+    }
+
+    // If any selection matches, we keep it
+    let match = false;
+    for (const w of wanted) {
+      if (tags.has(w)) {
+        match = true;
+        break;
+      }
+    }
+    if (match) res.push(ofr);
+  }
+  return res;
+}
+
+function computeDiscountedPrice(base, ofr) {
+  // support % off and flat amounts, with optional cap
+  const b = Number(base) || 0;
+
+  const pct = Number(ofr?.discountPercent);
+  const flat = Number(ofr?.maxDiscountAmountFlat ?? ofr?.flatDiscountAmount);
+  const cap = Number(ofr?.maxDiscountAmount);
+
   let discount = 0;
 
-  if (pct != null && pct > 0) {
-    discount = (amount * pct) / 100.0;
-    if (maxCap != null && maxCap > 0) discount = Math.min(discount, maxCap);
-  } else {
-    // Flat amount if provided
-    if (maxCap != null && maxCap > 0) discount = maxCap;
+  if (!Number.isNaN(flat) && flat > 0) {
+    discount = flat;
+  } else if (!Number.isNaN(pct) && pct > 0) {
+    discount = (pct / 100) * b;
   }
 
-  // Don't allow negative final price
-  discount = Math.max(0, Math.min(discount, amount));
-  return Math.floor(discount); // integer rupees
+  if (!Number.isNaN(cap) && cap > 0) {
+    discount = Math.min(discount, cap);
+  }
+  // guard
+  if (discount < 0) discount = 0;
+  return Math.max(0, Math.round(b - discount));
 }
 
-/**
- * Check if an offer applies to:
- *  - the selected payment labels (banks/methods) from the UI
- *  - current booking date (validityPeriod)
- *  - not expired
- *  - portal (if filtering by portal)
- */
-function offerMatches(offer, selectedLabels, portalName) {
-  if (offer?.isExpired === true) return false;
+function applyOffersToPortals(base, applicableOffers) {
+  // Start with the default (carrier+markup) prices
+  const portals = buildDefaultPortalPrices(base);
 
-  // booking validity
-  const nowISO = new Date().toISOString().slice(0, 10);
-  if (offer?.validityPeriod && !withinDateRange(nowISO, offer.validityPeriod)) return false;
-
-  // portal filter if requested
-  if (portalName) {
-    // We stored portal under sourcePortal (per memory)
-    const p = (offer.sourcePortal || offer.portal || "").toString().trim().toLowerCase();
-    if (p && p !== portalName.toLowerCase()) return false;
+  if (!applicableOffers || applicableOffers.length === 0) {
+    return {
+      portalPrices: portals,
+      bestDeal: null,
+    };
   }
 
-  if (!selectedLabels || selectedLabels.length === 0) {
-    // If user selected nothing, do not auto-apply generic offers
-    return false;
-  }
+  // If offers specify a portal, apply there; otherwise, apply to all portals (conservative)
+  for (const ofr of applicableOffers) {
+    const targetedPortals =
+      (Array.isArray(ofr.parsedApplicablePlatforms) && ofr.parsedApplicablePlatforms.length > 0)
+        ? ofr.parsedApplicablePlatforms
+        : null;
 
-  // any intersection between user's selected labels and offer's paymentMethods banks/methods
-  const fromOffer = (offer.paymentMethods || []).flatMap(pm => {
-    const parts = [];
-    if (pm.bank) parts.push(canonicalBankOrLabel(pm.bank));
-    if (pm.method) parts.push(canonicalBankOrLabel(pm.method));
-    if (pm.wallet) parts.push(canonicalBankOrLabel(pm.wallet));
-    return parts;
-  }).map(s => s.toLowerCase());
-
-  const selected = selectedLabels.map(s => canonicalBankOrLabel(s).toLowerCase());
-
-  return selected.some(lbl => fromOffer.includes(lbl));
-}
-
-/**
- * For a base price and selected payment labels, compute best price per portal + overall best.
- * Returns:
- * {
- *   breakdown: [{ portal, basePrice, offerApplied, discount, finalPrice, offerInfo }],
- *   best: { portal, finalPrice, label, offerInfo }
- * }
- */
-async function applyOffersToPrice(basePrice, selectedLabels) {
-  const amount = numberish(basePrice) || 0;
-
-  // fetch active offers once
-  const offers = db
-    ? await db.collection("offers")
-        .find({ isExpired: { $ne: true } }, { projection: {
-          title: 1, terms: 1, rawText: 1, couponRequired: 1,
-          discountPercent: 1, maxDiscountAmount: 1, minTransactionValue: 1,
-          validityPeriod: 1, paymentMethods: 1, sourcePortal: 1, sourceUrl: 1
-        }})
-        .toArray()
-    : [];
-
-  const breakdown = [];
-  for (const portal of PORTALS) {
-    let bestForPortal = { portal, basePrice: amount, discount: 0, finalPrice: amount, offerApplied: false, offerInfo: null };
-
-    // Filter offers for this portal and user’s payment labels
-    const candidates = offers.filter(o => offerMatches(o, selectedLabels, portal));
-    if (candidates.length) {
-      // choose the offer that gives the max discount on this amount
-      let best = bestForPortal;
-      for (const o of candidates) {
-        const d = computeDiscountForPrice(o, amount);
-        const finalP = amount - d;
-        if (finalP < best.finalPrice) {
-          best = {
-            portal,
-            basePrice: amount,
-            discount: d,
-            finalPrice: finalP,
-            offerApplied: d > 0,
-            offerInfo: {
-              title: o.title || "",
-              couponRequired: !!o.couponRequired,
-              discountPercent: numberish(o.discountPercent),
-              maxDiscountAmount: numberish(o.maxDiscountAmount),
-              minTransactionValue: numberish(o.minTransactionValue),
-              sourceUrl: o.sourceUrl || "",
-              sourcePortal: o.sourcePortal || portal
-            }
-          };
+    if (targetedPortals) {
+      for (const p of portals) {
+        if (targetedPortals.map(norm).includes(norm(p.portal))) {
+          const discounted = computeDiscountedPrice(p.basePrice, ofr) + MARKUP;
+          p.finalPrice = Math.min(p.finalPrice, discounted);
+          p.source = 'carrier+offer+markup';
         }
       }
-      bestForPortal = best;
+    } else {
+      // apply to all portals
+      for (const p of portals) {
+        const discounted = computeDiscountedPrice(p.basePrice, ofr) + MARKUP;
+        p.finalPrice = Math.min(p.finalPrice, discounted);
+        p.source = 'carrier+offer+markup';
+      }
     }
-
-    // Always apply fixed portal markup
-    bestForPortal.finalPrice = bestForPortal.finalPrice + MARKUP_RS;
-
-    breakdown.push(bestForPortal);
   }
 
-  // choose overall best
-  let best = breakdown[0];
-  for (const b of breakdown) {
-    if (b.finalPrice < best.finalPrice) best = b;
+  // best deal = min finalPrice across portals
+  let best = portals[0];
+  for (const p of portals) {
+    if (p.finalPrice < best.finalPrice) best = p;
   }
+  const bestDeal = {
+    portal: best.portal,
+    finalPrice: best.finalPrice,
+    note: 'Best price after applicable offers (if any)',
+  };
 
-  // Make a short label like “Best on MakeMyTrip ₹12,345 with HDFC Bank”
-  let label = `Best on ${best.portal} ₹${best.finalPrice}`;
-  if (selectedLabels && selectedLabels.length) {
-    label += ` with ${canonicalBankOrLabel(selectedLabels[0])}`;
-  }
-
-  return { breakdown, best: { ...best, label } };
+  return { portalPrices: portals, bestDeal };
 }
 
-// -----------------------------
-// FlightAPI helpers
-// -----------------------------
-function buildFlightUrl(params, mode) {
-  const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = params;
-  const cabin = String(travelClass || "economy").toLowerCase();
-  const pax = Number(passengers || 1);
-
-  if (!FLIGHTAPI_KEY) return null;
-
-  if (tripType === "one-way") {
-    return `https://api.flightapi.io/onewaytrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${pax}/0/0/${cabin}/INR?region=${BASE_REGION}`;
-  }
-  // round-trip
-  return `https://api.flightapi.io/roundtrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${returnDate}/${pax}/0/0/${cabin}/INR?region=${BASE_REGION}`;
+// ---------- FlightAPI calling ----------
+function buildRoundtripUrl({ from, to, departureDate, returnDate, adults = 1, cabin = 'economy' }) {
+  return `https://api.flightapi.io/roundtrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${returnDate}/${adults}/0/0/${cabin}/${CURRENCY}?region=${REGION}`;
+}
+function buildOnewayUrl({ from, to, date, adults = 1, cabin = 'economy' }) {
+  // documented one-way endpoint is "onewaytrip"
+  return `https://api.flightapi.io/onewaytrip/${FLIGHTAPI_KEY}/${from}/${to}/${date}/${adults}/0/0/${cabin}/${CURRENCY}?region=${REGION}`;
 }
 
-async function callFlightApi(url) {
-  const resp = await fetch(url, { timeout: 25000 });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    return { ok: false, status: resp.status, error: txt };
+async function fetchJson(url, timeoutMs = 28000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    const status = r.status;
+    const text = await r.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+    return { status, json, raw: text };
+  } finally {
+    clearTimeout(t);
   }
-  const json = await resp.json();
-  return { ok: true, status: 200, data: json };
 }
 
-// Map carrier id→name
-function buildCarrierMap(carriers) {
-  const m = new Map();
-  for (const c of carriers || []) {
-    m.set(String(c.id), c.name || "");
-  }
-  return m;
-}
+// Extract flights from a one-way response
+function extractFlightsOneWay(resp) {
+  const r = resp?.json || {};
+  const itins = Array.isArray(r.itineraries) ? r.itineraries : [];
+  const legs = new Map();
+  const segments = new Map();
+  const carriers = new Map();
 
-// Extract outbound legs from one FlightAPI response (supports onewaytrip or roundtrip first leg)
-function extractOutbound(data) {
-  const out = [];
-  const legById = new Map();
-  (data.legs || []).forEach(l => legById.set(l.id, l));
-  const segById = new Map();
-  (data.segments || []).forEach(s => segById.set(s.id, s));
-  const carr = buildCarrierMap(data.carriers || []);
+  (Array.isArray(r.legs) ? r.legs : []).forEach((L) => legs.set(L.id, L));
+  (Array.isArray(r.segments) ? r.segments : []).forEach((S) => segments.set(S.id, S));
+  (Array.isArray(r.carriers) ? r.carriers : []).forEach((C) => carriers.set(String(C.id), C.name));
 
-  for (const it of data.itineraries || []) {
-    if (!Array.isArray(it.leg_ids) || it.leg_ids.length === 0) continue;
-    const outId = it.leg_ids[0];
-    const leg = legById.get(outId);
+  const flights = [];
+  for (const it of itins) {
+    // keep only itineraries with exactly 1 leg (pure one-way)
+    if (!Array.isArray(it.leg_ids) || it.leg_ids.length !== 1) continue;
+
+    const leg = legs.get(it.leg_ids[0]);
     if (!leg) continue;
 
-    const firstSeg = segById.get(leg.segment_ids?.[0]);
-    const carrierName = firstSeg ? carr.get(String(firstSeg.marketing_carrier_id)) || "" : "";
+    const seg0 = segments.get(leg.segment_ids?.[0]);
+    const airlineName = pickCarrierName(carriers, seg0);
+    const carrierCode = String(seg0?.marketing_carrier_id ?? '');
+    const number = seg0?.number ? `${seg0.number}` : airlineName;
 
-    // price from pricing_options[0]
-    const price = it?.pricing_options?.[0]?.price?.amount;
-    if (!price) continue;
+    const priceObj = it?.pricing_options?.[0]?.price;
+    const basePrice = Math.round(Number(priceObj?.amount) || 0);
+    if (!basePrice) continue;
 
-    out.push({
-      flightNumber: carrierName || "Flight",
-      airlineName: carrierName || "Flight",
-      departure: (leg.departure || "").slice(11,16),
-      arrival: (leg.arrival || "").slice(11,16),
-      price: String(Math.round(price)), // integer
-      stops: Math.max(0, (leg.segment_ids?.length || 1) - 1),
-      carrierCode: String(firstSeg?.marketing_carrier_id ?? "")
+    flights.push({
+      flightNumber: number,
+      airlineName,
+      departure: toTime(leg.departure),
+      arrival: toTime(leg.arrival),
+      price: String(basePrice),
+      stops: Array.isArray(leg.stop_ids) ? leg.stop_ids.length : 0,
+      carrierCode,
+      // portalPrices & bestDeal will be filled later depending on offers
     });
   }
-  return out;
+  return flights;
 }
 
-// Extract return legs from a roundtrip response (leg_ids[1])
-function extractReturn(data) {
-  const ret = [];
-  const legById = new Map();
-  (data.legs || []).forEach(l => legById.set(l.id, l));
-  const segById = new Map();
-  (data.segments || []).forEach(s => segById.set(s.id, s));
-  const carr = buildCarrierMap(data.carriers || []);
-
-  for (const it of data.itineraries || []) {
-    if (!Array.isArray(it.leg_ids) || it.leg_ids.length < 2) continue;
-    const retId = it.leg_ids[1];
-    const leg = legById.get(retId);
-    if (!leg) continue;
-
-    const firstSeg = segById.get(leg.segment_ids?.[0]);
-    const carrierName = firstSeg ? carr.get(String(firstSeg.marketing_carrier_id)) || "" : "";
-
-    // Use the same combined price (roundtrip) just to build “shape” here — we’ll prefer onewaytrips path.
-    const price = it?.pricing_options?.[0]?.price?.amount;
-    if (!price) continue;
-
-    ret.push({
-      flightNumber: carrierName || "Flight",
-      airlineName: carrierName || "Flight",
-      departure: (leg.departure || "").slice(11,16),
-      arrival: (leg.arrival || "").slice(11,16),
-      price: String(Math.round(price)),
-      stops: Math.max(0, (leg.segment_ids?.length || 1) - 1),
-      carrierCode: String(firstSeg?.marketing_carrier_id ?? "")
-    });
-  }
-  return ret;
-}
-
-// -----------------------------
-// Routes
-// -----------------------------
-app.get("/health", async (req, res) => {
-  return res.json({ ok: true, time: new Date().toISOString(), dbConnected: !!db });
+// ---------- Routes ----------
+app.get('/health', async (_req, res) => {
+  res.json({ ok: true, time: new Date().toISOString(), dbConnected: !!db });
 });
 
-// Payment options (already working for you with EMI scan). Keeping your improved logic:
-app.get("/payment-options", async (req, res) => {
+// For debugging exact FlightAPI call
+app.post('/debug-flightapi', async (req, res) => {
   try {
-    let options = {
-      CreditCard: [],
-      DebitCard: [],
-      Wallet: [],
-      UPI: [],
-      NetBanking: [],
-      EMI: [],
-    };
-    if (!db) return res.json({ usedFallback: true, options });
+    const { from, to, departureDate, returnDate, passengers = 1, travelClass = 'economy', tripType = 'round-trip' } = req.body || {};
+    if (req.query.dry === '1') {
+      if (!FLIGHTAPI_KEY) return res.json({ ok: false, url: null, mode: null });
+      if (tripType === 'one-way' || !returnDate) {
+        return res.json({ ok: true, url: buildOnewayUrl({ from, to, date: departureDate, adults: passengers, cabin: travelClass }), mode: 'dry' });
+      } else {
+        return res.json({ ok: true, url: buildRoundtripUrl({ from, to, departureDate, returnDate, adults: passengers, cabin: travelClass }), mode: 'dry' });
+      }
+    }
 
-    // Pass 1: structured
-    const rows = await db.collection("offers").aggregate([
-      { $match: { isExpired: { $ne: true } } },
-      { $unwind: "$paymentMethods" },
-      {
-        $project: {
-          pm: {
-            type: { $ifNull: ["$paymentMethods.type", ""] },
-            bank: { $ifNull: ["$paymentMethods.bank", ""] },
-            method: { $ifNull: ["$paymentMethods.method", ""] },
-            wallet: { $ifNull: ["$paymentMethods.wallet", ""] },
-            category: { $ifNull: ["$paymentMethods.category", ""] },
-            mode: { $ifNull: ["$paymentMethods.mode", ""] },
-          },
-        },
-      },
-    ]).toArray();
+    if (!FLIGHTAPI_KEY) return res.json({ ok: false, status: null, keys: null, hasItin: null, error: 'no-api-key' });
 
-    const sets = {
+    const url =
+      (tripType === 'one-way' || !returnDate)
+        ? buildOnewayUrl({ from, to, date: departureDate, adults: passengers, cabin: travelClass })
+        : buildRoundtripUrl({ from, to, departureDate, returnDate, adults: passengers, cabin: travelClass });
+
+    const r = await fetchJson(url);
+    const keys = r.json ? Object.keys(r.json) : [];
+    const hasItin = Array.isArray(r.json?.itineraries) ? r.json.itineraries.length : 0;
+    res.json({ ok: true, status: r.status, keys, hasItin, error: null });
+  } catch (e) {
+    const msg = (e?.name === 'AbortError') ? 'timeout' : (e?.message || 'error');
+    res.json({ ok: false, status: 0, keys: [], hasItin: false, error: msg });
+  }
+});
+
+// Payment options: normalize from Mongo and de-dupe
+app.get('/payment-options', async (_req, res) => {
+  try {
+    const active = { isExpired: { $ne: true } };
+    const cursor = offersCol.find(active, { projection: { paymentMethods: 1 } });
+    const buckets = {
       CreditCard: new Set(),
       DebitCard: new Set(),
+      EMI: new Set(),
+      NetBanking: new Set(),
       Wallet: new Set(),
       UPI: new Set(),
-      NetBanking: new Set(),
-      EMI: new Set(),
     };
 
-    for (const r of rows) {
-      const pm = r.pm || {};
-      const bucket = normalizeType(pm.type) || "";
-      const subRaw = pm.bank || pm.method || pm.wallet || "";
-      if (!subRaw) continue;
-      const label = canonicalBankOrLabel(subRaw);
-      const isEMI = looksEMI(pm);
-      if (isEMI) sets.EMI.add(label);
-      if (bucket) sets[bucket].add(label);
+    const mapType = (pm) => norm(pm?.type || '');
+    for await (const doc of cursor) {
+      const pms = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
+      for (const pm of pms) {
+        const t = mapType(pm);
+        const labelBank = norm(pm.bank) || norm(pm.wallet) || norm(pm.method) || '';
+        if (!labelBank) continue;
+
+        if (t === 'credit card' || t === 'credit_card' || t === 'credit') buckets.CreditCard.add(labelBank);
+        else if (t === 'debit card' || t === 'debit_card' || t === 'debit') buckets.DebitCard.add(labelBank);
+        else if (t === 'emi') buckets.EMI.add(labelBank);
+        else if (t === 'net banking' || t === 'net_banking' || t === 'internet banking') buckets.NetBanking.add(labelBank);
+        else if (t === 'wallet') buckets.Wallet.add(labelBank);
+        else if (t === 'upi') buckets.UPI.add(labelBank);
+        // Some offers mention EMI inside credit cards explicitly; put under EMI too
+        if (/emi/i.test(pm?.category || '') || /emi/i.test(pm?.method || '')) {
+          buckets.EMI.add(labelBank);
+        }
+      }
     }
 
-    // Pass 2: text/category EMI hints
-    const emiHintDocs = await db.collection("offers").aggregate([
-      { $match: { isExpired: { $ne: true } } },
-      {
-        $project: {
-          title: { $ifNull: ["$title", ""] },
-          terms: { $ifNull: ["$terms", ""] },
-          rawText: { $ifNull: ["$rawText", ""] },
-          offerCategories: { $ifNull: ["$offerCategories", []] },
-          paymentMethods: { $ifNull: ["$paymentMethods", []] },
-        },
-      },
-      {
-        $addFields: {
-          emiByText: {
-            $or: [
-              { $regexMatch: { input: "$title", regex: /emi/i } },
-              { $regexMatch: { input: "$terms", regex: /emi/i } },
-              { $regexMatch: { input: "$rawText", regex: /emi/i } },
-              {
-                $gt: [
-                  {
-                    $size: {
-                      $filter: {
-                        input: "$offerCategories",
-                        as: "c",
-                        cond: { $regexMatch: { input: "$$c", regex: /emi/i } },
-                      },
-                    },
-                  },
-                  0,
-                ],
-              },
-            ],
-          },
-        },
-      },
-      { $match: { emiByText: true } },
-      { $unwind: "$paymentMethods" },
-      {
-        $project: {
-          pm: {
-            type: { $ifNull: ["$paymentMethods.type", ""] },
-            bank: { $ifNull: ["$paymentMethods.bank", ""] },
-            method: { $ifNull: ["$paymentMethods.method", ""] },
-            category: { $ifNull: ["$paymentMethods.category", ""] },
-            mode: { $ifNull: ["$paymentMethods.mode", ""] },
-          },
-        },
-      },
-    ]).toArray();
+    const canon = (s) => {
+      if (!s) return s;
+      // Title Case basic canonicalization
+      return s
+        .split(' ')
+        .map((w) => w ? w[0].toUpperCase() + w.slice(1) : w)
+        .join(' ')
+        .replace(/\bHdfc\b/gi, 'HDFC')
+        .replace(/\bHsbc\b/gi, 'HSBC')
+        .replace(/\bIcici\b/gi, 'ICICI')
+        .replace(/\bIdfc\b/gi, 'IDFC')
+        .replace(/\bRbl\b/gi, 'RBL')
+        .replace(/\bSbi\b/gi, 'SBI');
+    };
 
-    for (const r of emiHintDocs) {
-      const pm = r.pm || {};
-      const subRaw = pm.bank || pm.method || "";
-      if (!subRaw) continue;
-      sets.EMI.add(canonicalBankOrLabel(subRaw));
-      const bucket = normalizeType(pm.type);
-      if (bucket) sets[bucket].add(canonicalBankOrLabel(subRaw));
-    }
+    const options = Object.fromEntries(
+      Object.entries(buckets).map(([k, set]) => [k, Array.from(set).sort().map(canon)])
+    );
 
-    for (const k of Object.keys(sets)) {
-      options[k] = Array.from(sets[k]).sort((a, b) => a.localeCompare(b));
-    }
-    return res.json({ usedFallback: false, options });
+    res.json({ usedFallback: false, options });
   } catch (e) {
-    console.error("payment-options error:", e);
-    return res.status(500).json({ error: e.message });
+    console.error('payment-options error', e);
+    res.json({
+      usedFallback: true,
+      options: {
+        CreditCard: [], DebitCard: [], EMI: [], NetBanking: [], Wallet: [], UPI: ['Mobikwik'],
+      },
+    });
   }
 });
 
-// Debug (dry / live) flightapi
-app.post("/debug-flightapi", async (req, res) => {
-  try {
-    const dry = String(req.query.dry || "") === "1";
-    const url = buildFlightUrl(req.body || {}, dry ? "dry" : "live");
-    if (!url) return res.json({ ok: false, error: "no-api-key", status: null, keys: null, hasItin: null });
-
-    if (dry) return res.json({ ok: true, url, mode: "dry" });
-
-    const r = await callFlightApi(url);
-    if (!r.ok) return res.json({ ok: false, status: r.status, keys: [], hasItin: false, error: r.error || "error" });
-    const keys = Object.keys(r.data || {});
-    const hasItin = Array.isArray(r.data?.itineraries) ? r.data.itineraries.length : 0;
-    return res.json({ ok: true, status: 200, keys, hasItin, error: null });
-  } catch (e) {
-    return res.json({ ok: false, status: 0, keys: [], hasItin: false, error: "timeout" });
-  }
-});
-
-// Main search
-app.post("/search", async (req, res) => {
+// Main search: one-way always; round-trip = 2 one-way calls
+app.post('/search', async (req, res) => {
   try {
     const {
       from, to, departureDate, returnDate,
-      passengers = 1, travelClass = "economy",
-      tripType = "round-trip",
-      paymentMethods = []
+      passengers = 1, travelClass = 'economy',
+      tripType = 'round-trip',
+      paymentMethods = [],
     } = req.body || {};
 
     if (!FLIGHTAPI_KEY) {
-      return res.json({ outboundFlights: [], returnFlights: [], meta: { source: "flightapi", reason: "no-key" } });
+      return res.json({ outboundFlights: [], returnFlights: [], meta: { source: 'flightapi', reason: 'no-key' } });
     }
 
-    // Always use one-way for better comparability
-    const urlOut = buildFlightUrl({ from, to, departureDate, passengers, travelClass, tripType: "one-way" });
-    const outResp = await callFlightApi(urlOut);
-    if (!outResp.ok) {
-      return res.json({ outboundFlights: [], returnFlights: [], meta: { source: "flightapi", reason: "outbound-failed" } });
-    }
-    const outbound = extractOutbound(outResp.data);
+    const fromCode = (from || '').slice(0, 3).toUpperCase();
+    const toCode = (to || '').slice(0, 3).toUpperCase();
 
-    let returns = [];
-    if (tripType === "round-trip" && returnDate) {
-      const urlRet = buildFlightUrl({ from: to, to: from, departureDate: returnDate, passengers, travelClass, tripType: "one-way" });
-      const retResp = await callFlightApi(urlRet);
-      if (retResp.ok) {
-        returns = extractOutbound(retResp.data);
-      }
-    }
+    // 1) Fetch outbound one-way
+    const urlOut = buildOnewayUrl({ from: fromCode, to: toCode, date: departureDate, adults: passengers, cabin: travelClass });
+    const outResp = await fetchJson(urlOut);
+    const outboundFlights = extractFlightsOneWay(outResp);
 
-    // Apply offers (selected payment labels) to each flight’s price
-    const selectedLabels = Array.isArray(paymentMethods) ? paymentMethods : [];
-
-    async function decorateWithOffers(f) {
-      const base = numberish(f.price) || 0;
-      const { breakdown, best } = db ? await applyOffersToPrice(base, selectedLabels) : {
-        breakdown: PORTALS.map(p => ({
-          portal: p, basePrice: base, discount: 0, finalPrice: base + MARKUP_RS, offerApplied: false, offerInfo: null
-        })),
-        best: { portal: "MakeMyTrip", finalPrice: base + MARKUP_RS, label: `Best on MakeMyTrip ₹${base + MARKUP_RS}` }
-      };
-      return {
-        ...f,
-        portalPrices: breakdown.map(b => ({
-          portal: b.portal,
-          basePrice: b.basePrice,
-          finalPrice: b.finalPrice,
-          source: b.offerApplied ? "carrier+offer+markup" : "carrier+markup",
-          offerInfo: b.offerInfo
-        })),
-        bestDeal: best // { portal, finalPrice, label, offerInfo }
-      };
+    // 2) If round-trip, fetch return one-way
+    let returnFlights = [];
+    if (tripType !== 'one-way' && returnDate) {
+      const urlRet = buildOnewayUrl({ from: toCode, to: fromCode, date: returnDate, adults: passengers, cabin: travelClass });
+      // small pause to be kind to API
+      await sleep(200);
+      const retResp = await fetchJson(urlRet);
+      returnFlights = extractFlightsOneWay(retResp);
     }
 
-    const outboundDecorated = await Promise.all(outbound.map(decorateWithOffers));
-    const returnDecorated = await Promise.all(returns.map(decorateWithOffers));
+    // 3) Load offers once (active only)
+    let applicable = [];
+    if (Array.isArray(paymentMethods) && paymentMethods.length > 0) {
+      const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
+      applicable = pickApplicableOffers(allActive, paymentMethods);
+    }
+
+    // 4) Attach portalPrices/bestDeal for each flight (ALWAYS keep base prices)
+    function decorate(f) {
+      const base = Number(f.price) || 0;
+      const { portalPrices, bestDeal } = applyOffersToPortals(base, applicable);
+      return { ...f, portalPrices, bestDeal };
+    }
+
+    const outboundDecorated = outboundFlights.map(decorate);
+    const returnDecorated = returnFlights.map(decorate);
 
     return res.json({
       outboundFlights: outboundDecorated,
       returnFlights: returnDecorated,
-      meta: { source: "flightapi" }
+      meta: { source: 'flightapi' },
     });
   } catch (e) {
-    console.error("❌ Search error:", e);
-    return res.json({ outboundFlights: [], returnFlights: [], error: "search-failed" });
+    console.error('❌ Search error:', e);
+    res.json({ outboundFlights: [], returnFlights: [], error: 'search-failed' });
   }
 });
 
+// ---------- start ----------
 app.listen(PORT, () => {
   console.log(`🚀 SkyDeal backend running on ${PORT}`);
 });
