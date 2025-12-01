@@ -1,404 +1,434 @@
-// index.js (ESM)
-// SkyDeal backend – dual-oneway strategy using FlightAPI "onewaytrip"
-// - One-way:    single onewaytrip call
-// - Round-trip: two onewaytrip calls (outbound + return)
-// - Payment options come from MongoDB (normalized), with fallback list if Mongo empty
-
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import axios from 'axios';
-import { MongoClient } from 'mongodb';
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import dotenv from "dotenv";
+import { MongoClient } from "mongodb";
 
 dotenv.config();
 
+const PORT = process.env.PORT || 10000;
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY || "";
+const MONGO_URI = process.env.MONGO_URI || ""; // e.g. mongodb://user:pass@host:27017/skydeal?authSource=skydeal&tls=false
+
+// -------------------------
+// App / middleware
+// -------------------------
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json());
 
-// ---- Config ----
-const PORT = process.env.PORT || 10000;
-const MONGO_URI = process.env.MONGO_URI;
-const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY; // <= your working key
-const DB_NAME = 'skydeal';
-const CARRIER_PORTALS = ['MakeMyTrip', 'Goibibo', 'EaseMyTrip', 'Yatra', 'Cleartrip'];
-const PER_PORTAL_MARKUP = 250; // ₹ per portal
-
-// ---- Mongo Connection ----
-let mongoClient;
-let offersColl;
+// -------------------------
+// Mongo (non-blocking boot)
+// -------------------------
+let mongoClient = null;
+let offersColl = null;
 
 async function connectDB() {
   if (!MONGO_URI) {
-    console.error('❌ Missing MONGO_URI');
+    console.warn("⚠️  MONGO_URI not set. DB features will be disabled.");
     return;
   }
-  try {
-    mongoClient = new MongoClient(MONGO_URI, { maxPoolSize: 5 });
-    await mongoClient.connect();
-    const db = mongoClient.db(DB_NAME);
-    offersColl = db.collection('offers');
-    console.log('✅ Connected to MongoDB (EC2)');
-  } catch (e) {
-    console.error('❌ MongoDB Connection Error:', e);
+  mongoClient = new MongoClient(MONGO_URI, {
+    maxPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 5000,
+  });
+  await mongoClient.connect();
+  const db = mongoClient.db(); // db name is in the URI
+  offersColl = db.collection("offers");
+  console.log("✅ Mongo connected");
+}
+
+function dbReady() {
+  return !!offersColl;
+}
+
+// kick it off in the background (don’t block server start)
+connectDB().catch((err) =>
+  console.error("Mongo background connect failed:", err?.message || err)
+);
+
+// -------------------------
+// Helpers
+// -------------------------
+
+// Normalize types/labels coming from GPT scraped offers
+const TYPE_MAP = new Map(
+  [
+    ["credit card", "CreditCard"],
+    ["credit_card", "CreditCard"],
+    ["Credit Card", "CreditCard"],
+    ["Debit Card", "DebitCard"],
+    ["debit card", "DebitCard"],
+    ["debit_card", "DebitCard"],
+    ["UPI", "UPI"],
+    ["upi", "UPI"],
+    ["wallet", "Wallet"],
+    ["Wallet", "Wallet"],
+    ["Internet Banking", "NetBanking"],
+    ["net banking", "NetBanking"],
+    ["net_banking", "NetBanking"],
+    ["online", "Other"],
+    ["other", "Other"],
+    ["any", "Other"],
+    ["Bank offer", "Other"],
+    ["EMI", "EMI"],
+  ].map(([a, b]) => [a.toLowerCase(), b])
+);
+
+function normType(t) {
+  if (!t || typeof t !== "string") return null;
+  const key = t.trim().toLowerCase();
+  return TYPE_MAP.get(key) || null;
+}
+
+function titleCase(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/\b([a-z])/g, (m) => m.toUpperCase());
+}
+
+// Build payment subtype label from multiple possible fields
+function pickSubtype(pm = {}) {
+  // prefer bank → method → wallet → category → mode
+  const candidates = [
+    pm.bank,
+    pm.method,
+    pm.wallet,
+    pm.category,
+    pm.mode,
+  ].filter(Boolean);
+  if (!candidates.length) return null;
+  return titleCase(candidates[0]);
+}
+
+async function getPaymentOptionsFromMongo() {
+  if (!dbReady()) throw new Error("DB not ready");
+
+  // Flatten all paymentMethods
+  const pipeline = [
+    { $match: { isExpired: { $ne: true } } },
+    { $unwind: "$paymentMethods" },
+    {
+      $project: {
+        rawType: {
+          $ifNull: ["$paymentMethods.type", "Other"],
+        },
+        bank: { $ifNull: ["$paymentMethods.bank", ""] },
+        method: { $ifNull: ["$paymentMethods.method", ""] },
+        wallet: { $ifNull: ["$paymentMethods.wallet", ""] },
+        category: { $ifNull: ["$paymentMethods.category", ""] },
+        mode: { $ifNull: ["$paymentMethods.mode", ""] },
+      },
+    },
+    {
+      $project: {
+        type: {
+          $toLower: {
+            $trim: { input: "$rawType" },
+          },
+        },
+        label: {
+          $let: {
+            vars: {
+              bank: "$bank",
+              method: "$method",
+              wallet: "$wallet",
+              category: "$category",
+              mode: "$mode",
+            },
+            in: {
+              $cond: [
+                { $ne: ["$$bank", ""] },
+                "$$bank",
+                {
+                  $cond: [
+                    { $ne: ["$$method", ""] },
+                    "$$method",
+                    {
+                      $cond: [
+                        { $ne: ["$$wallet", ""] },
+                        "$$wallet",
+                        {
+                          $cond: [
+                            { $ne: ["$$category", ""] },
+                            "$$category",
+                            "$$mode",
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+    {
+      $group: {
+        _id: "$type",
+        subtypes: { $addToSet: "$label" },
+      },
+    },
+  ];
+
+  const rows = await offersColl.aggregate(pipeline).toArray();
+
+  // Normalize to our final buckets
+  const buckets = {
+    CreditCard: new Set(),
+    DebitCard: new Set(),
+    Wallet: new Set(),
+    UPI: new Set(),
+    NetBanking: new Set(),
+    EMI: new Set(),
+    Other: new Set(),
+  };
+
+  for (const row of rows) {
+    const t = normType(row._id);
+    if (!t) continue;
+    for (const raw of row.subtypes || []) {
+      const label = titleCase(raw);
+      if (label) buckets[t].add(label);
+    }
   }
-}
-await connectDB();
 
-// ---- Utilities ----
-const toIsoTime = (ts) => {
-  try {
-    return ts?.slice(11, 16) || ''; // "YYYY-MM-DDTHH:mm:ss" -> "HH:mm"
-  } catch {
-    return '';
-  }
-};
+  // Convert to arrays & sort
+  const toList = (s) => Array.from(s).sort((a, b) => a.localeCompare(b));
 
-function safeNumber(x) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Map useful lookup dicts from a FlightAPI response
-function buildLookups(r) {
-  const legsById = {};
-  const segById = {};
-  const carriersById = {};
-  (r?.legs || []).forEach((l) => (legsById[l.id] = l));
-  (r?.segments || []).forEach((s) => (segById[s.id] = s));
-  (r?.carriers || []).forEach((c) => (carriersById[String(c.id)] = c));
-  return { legsById, segById, carriersById };
+  return {
+    usedFallback: false,
+    options: {
+      CreditCard: toList(buckets.CreditCard),
+      DebitCard: toList(buckets.DebitCard),
+      Wallet: toList(buckets.Wallet),
+      UPI: toList(buckets.UPI),
+      NetBanking: toList(buckets.NetBanking),
+      EMI: toList(buckets.EMI),
+    },
+  };
 }
 
-// Extract flights for a ONE-WAY response
-function extractFlightsOneWay(r) {
-  const out = [];
-  if (!r || !Array.isArray(r.itineraries)) return out;
-
-  const { legsById, segById, carriersById } = buildLookups(r);
-
-  for (const itin of r.itineraries) {
-    // one leg expected for onewaytrip
-    if (!Array.isArray(itin.leg_ids) || itin.leg_ids.length < 1) continue;
-
-    const leg = legsById[itin.leg_ids[0]];
-    if (!leg || !Array.isArray(leg.segment_ids) || !leg.segment_ids.length) continue;
-
-    const seg0 = segById[leg.segment_ids[0]];
-    const carrier = carriersById[String(seg0?.marketing_carrier_id)] || {};
-
-    const price = safeNumber(itin?.pricing_options?.[0]?.price?.amount);
-    if (price == null) continue;
-
-    const airlineName = carrier?.name || 'Unknown';
-    const flightNumber = `${airlineName}`; // keep simple/clean; flight "number" field from this API can be messy
-    const dep = toIsoTime(leg?.departure);
-    const arr = toIsoTime(leg?.arrival);
-
-    const portalPrices = CARRIER_PORTALS.map((p) => ({
-      portal: p,
-      basePrice: price,
-      finalPrice: price + PER_PORTAL_MARKUP,
-      source: 'carrier+markup'
-    }));
-
-    out.push({
-      flightNumber,
-      airlineName,
-      departure: dep,
-      arrival: arr,
-      price: String(Math.round(price)),
-      stops: (leg?.stop_count ?? 0),
-      carrierCode: String(seg0?.marketing_carrier_id ?? ''),
-      portalPrices
-    });
-  }
-
-  return out;
-}
-
-// ---- FlightAPI callers ----
-function buildOnewayUrl({ from, to, date, passengers, cabin, currency = 'INR', region = 'IN' }) {
-  if (!FLIGHTAPI_KEY) return null;
-  return `https://api.flightapi.io/onewaytrip/${FLIGHTAPI_KEY}/${from}/${to}/${date}/${passengers}/0/0/${encodeURIComponent(
-    cabin
-  )}/${currency}?region=${region}`;
-}
-
-// Single request to onewaytrip
-async function fetchOneWay({ from, to, date, passengers, cabin }) {
-  const url = buildOnewayUrl({ from, to, date, passengers, cabin });
-  if (!url) return { ok: false, error: 'no-key' };
-
-  try {
-    const { data, status } = await axios.get(url, { timeout: 25000, maxContentLength: Infinity, maxBodyLength: Infinity });
-    if (status !== 200) return { ok: false, status, error: 'non-200' };
-    return { ok: true, status, data };
-  } catch (err) {
-    return { ok: false, status: err.response?.status ?? 0, error: err.message || 'fetch-failed' };
-  }
-}
-
-// ---- Routes ----
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
-});
-
-// Normalize/aggregate payment options from Mongo (active offers only).
-// Falls back to a static list if Mongo missing/empty.
-app.get('/payment-options', async (_req, res) => {
-  try {
-    let usedFallback = false;
-    const result = {
+function fallbackPaymentOptions() {
+  return {
+    usedFallback: true,
+    options: {
       CreditCard: [],
       DebitCard: [],
       Wallet: [],
       UPI: [],
       NetBanking: [],
-      EMI: []
-    };
+      EMI: [],
+    },
+  };
+}
 
-    if (offersColl) {
-      // Collect normalized buckets from your live data (same logic we audited)
-      const cursor = offersColl.aggregate([
-        { $match: { isExpired: { $ne: true } } },
-        { $unwind: "$paymentMethods" },
-        {
-          $project: {
-            type: {
-              $toLower: {
-                $ifNull: ["$paymentMethods.type", ""]
-              }
-            },
-            bank: {
-              $concat: [
-                { $toUpper: { $substrCP: [{ $ifNull: ["$paymentMethods.bank", ""] }, 0, 1] } },
-                {
-                  $toLower: {
-                    $substrCP: [
-                      { $ifNull: ["$paymentMethods.bank", ""] },
-                      1,
-                      { $subtract: [{ $strLenCP: { $ifNull: ["$paymentMethods.bank", ""] } }, 1] }
-                    ]
-                  }
-                }
-              ]
-            },
-            method: { $ifNull: ["$paymentMethods.method", ""] },
-            wallet: { $ifNull: ["$paymentMethods.wallet", ""] },
-            category: { $ifNull: ["$paymentMethods.category", ""] },
-            mode: { $ifNull: ["$paymentMethods.mode", ""] }
-          }
-        }
-      ]);
+// Build portal prices (simple +₹250 markup per the current milestone)
+function portalPrices(base) {
+  const portals = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
+  const b = Math.max(0, Number(base) || 0);
+  const final = b + 250;
+  return portals.map((p) => ({
+    portal: p,
+    basePrice: b,
+    finalPrice: final,
+    source: "carrier+markup",
+  }));
+}
 
-      const buckets = {
-        'credit card': new Set(),
-        'credit_card': new Set(),
-        'debit card': new Set(),
-        'debit_card': new Set(),
-        UPI: new Set(),
-        upi: new Set(),
-        'net banking': new Set(),
-        net_banking: new Set(),
-        'internet banking': new Set(),
-        Wallet: new Set(),
-        wallet: new Set(),
-        EMI: new Set()
-      };
+// -------------------------
+// Endpoints
+// -------------------------
 
-      for await (const doc of cursor) {
-        const subtype =
-          doc.bank ||
-          doc.method ||
-          doc.wallet ||
-          doc.category ||
-          doc.mode ||
-          null;
-        if (!subtype) continue;
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    dbConnected: dbReady(),
+  });
+});
 
-        const t = doc.type;
-        if (t in buckets) {
-          buckets[t].add(subtype);
-        }
-      }
-
-      // Merge/lift into final shape
-      const cc = new Set([
-        ...buckets['credit card'],
-        ...buckets['credit_card']
-      ]);
-      const dc = new Set([
-        ...buckets['debit card'],
-        ...buckets['debit_card']
-      ]);
-      const upi = new Set([
-        ...buckets['UPI'],
-        ...buckets['upi']
-      ]);
-      const nb = new Set([
-        ...buckets['net banking'],
-        ...buckets['net_banking'],
-        ...buckets['internet banking']
-      ]);
-      const wl = new Set([
-        ...buckets['Wallet'],
-        ...buckets['wallet']
-      ]);
-      const emi = new Set([...buckets['EMI']]);
-
-      result.CreditCard = Array.from(cc).sort();
-      result.DebitCard = Array.from(dc).sort();
-      result.UPI = Array.from(upi).sort();
-      result.NetBanking = Array.from(nb).sort();
-      result.Wallet = Array.from(wl).sort();
-      result.EMI = Array.from(emi).sort();
-    }
-
-    // Fallback if all empty
-    const isEmpty =
-      !result.CreditCard.length &&
-      !result.DebitCard.length &&
-      !result.UPI.length &&
-      !result.NetBanking.length &&
-      !result.Wallet.length &&
-      !result.EMI.length;
-
-    if (isEmpty) {
-      usedFallback = true;
-      Object.assign(result, {
-        CreditCard: [
-          'HDFC Bank', 'ICICI Bank', 'Axis Bank', 'Kotak Bank', 'IDFC First Bank',
-          'Yes Bank', 'RBL Bank', 'Federal Bank', 'SBI Bank', 'HSBC'
-        ],
-        DebitCard: ['HDFC Bank', 'ICICI Bank', 'Axis Bank', 'Federal Bank', 'AU Small Bank'],
-        Wallet: [],
-        UPI: ['Mobikwik'],
-        NetBanking: ['HDFC Bank', 'ICICI Bank'],
-        EMI: []
-      });
-    }
-
-    res.json({ usedFallback, options: result });
+app.get("/payment-options", async (req, res) => {
+  try {
+    if (!dbReady()) return res.json(fallbackPaymentOptions());
+    const data = await getPaymentOptionsFromMongo();
+    res.json(data);
   } catch (e) {
-    console.error('❌ /payment-options error:', e.message);
-    res.status(500).json({ error: 'Failed loading payment options' });
+    console.error("payment-options error:", e?.message || e);
+    res.json(fallbackPaymentOptions());
   }
 });
 
-// Debug helper – supports both dry and real calls
-app.post('/debug-flightapi', async (req, res) => {
+// Simple diagnostics to see which source is active
+app.post("/debug-flightapi", async (req, res) => {
   try {
-    const { from, to, departureDate, returnDate, passengers, travelClass, tripType } = req.body || {};
-    const cabin = (travelClass || 'economy').toLowerCase();
-    const dry = String(req.query.dry || '') === '1';
+    const {
+      from,
+      to,
+      departureDate,
+      returnDate,
+      passengers = 1,
+      travelClass = "economy",
+      tripType = "round-trip",
+    } = req.body || {};
 
-    if (!FLIGHTAPI_KEY) {
-      return res.json({ ok: false, error: 'no-api-key' });
+    // DRY mode?
+    if (req.query.dry) {
+      const url = `https://api.flightapi.io/${
+        tripType === "round-trip" ? "roundtrip" : "onewaytrip"
+      }/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}${
+        tripType === "round-trip" ? `/${returnDate}` : ""
+      }/${passengers}/0/0/${travelClass}/INR?region=IN`;
+      return res.json({ ok: true, url, mode: "dry" });
     }
 
-    if (dry) {
-      if (tripType === 'round-trip') {
-        return res.json({
-          ok: true,
-          mode: 'dry-two-oneway',
-          urls: [
-            buildOnewayUrl({ from, to, date: departureDate, passengers, cabin }),
-            buildOnewayUrl({ from: to, to: from, date: returnDate, passengers, cabin })
-          ]
-        });
-      }
-      return res.json({
-        ok: true,
-        mode: 'dry-oneway',
-        url: buildOnewayUrl({ from, to, date: departureDate, passengers, cabin })
-      });
-    }
+    const url = `https://api.flightapi.io/${
+      tripType === "round-trip" ? "roundtrip" : "onewaytrip"
+    }/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}${
+      tripType === "round-trip" ? `/${returnDate}` : ""
+    }/${passengers}/0/0/${travelClass}/INR?region=IN`;
 
-    if (tripType === 'round-trip') {
-      const [out, ret] = await Promise.all([
-        fetchOneWay({ from, to, date: departureDate, passengers, cabin }),
-        fetchOneWay({ from: to, to: from, date: returnDate, passengers, cabin })
-      ]);
-      return res.json({
-        ok: out.ok && ret.ok,
-        outStatus: out.status ?? null,
-        retStatus: ret.status ?? null,
-        outKeys: out.data ? Object.keys(out.data) : [],
-        retKeys: ret.data ? Object.keys(ret.data) : [],
-        outHasItin: !!out.data?.itineraries?.length,
-        retHasItin: !!ret.data?.itineraries?.length,
-        error: (!out.ok && out.error) || (!ret.ok && ret.error) || null
-      });
-    }
-
-    // one-way
-    const one = await fetchOneWay({ from, to, date: departureDate, passengers, cabin });
-    return res.json({
-      ok: one.ok,
-      status: one.status ?? null,
-      keys: one.data ? Object.keys(one.data) : [],
-      hasItin: !!one.data?.itineraries?.length,
-      error: one.ok ? null : one.error
+    const r = await axios.get(url, { timeout: 25000 });
+    const keys = Object.keys(r.data || {});
+    res.json({
+      ok: true,
+      status: 200,
+      keys,
+      hasItin: Array.isArray(r.data?.itineraries) && r.data.itineraries.length,
+      error: null,
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message || 'debug-failed' });
+  } catch (err) {
+    res.json({
+      ok: false,
+      status: err.response?.status || 500,
+      hasItin: false,
+      error: err.message || "unknown",
+    });
   }
 });
 
 // Main search
-app.post('/search', async (req, res) => {
+app.post("/search", async (req, res) => {
   try {
     const {
-      from, to, departureDate, returnDate,
+      from,
+      to,
+      departureDate,
+      returnDate,
       passengers = 1,
-      travelClass = 'economy',
-      tripType = 'one-way',
-      paymentMethods = []
+      travelClass = "economy",
+      tripType = "round-trip",
+      paymentMethods = [],
     } = req.body || {};
 
-    const cabin = String(travelClass || 'economy').toLowerCase();
+    // Build URL (we use roundtrip for both one-way & round-trip;
+    // for one-way we just omit leg 2 downstream)
+    const isRound = tripType === "round-trip" && !!returnDate;
+    const endpoint = isRound ? "roundtrip" : "onewaytrip";
+    const url = `https://api.flightapi.io/${endpoint}/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}${
+      isRound ? `/${returnDate}` : ""
+    }/${passengers}/0/0/${travelClass}/INR?region=IN`;
 
-    // ROUND-TRIP => two onewaytrip calls
-    if (tripType === 'round-trip') {
-      const [outResp, retResp] = await Promise.all([
-        fetchOneWay({ from, to, date: departureDate, passengers, cabin }),
-        fetchOneWay({ from: to, to: from, date: returnDate, passengers, cabin })
-      ]);
+    const r = await axios.get(url, { timeout: 30000 });
+    const data = r.data || {};
 
-      if (!outResp.ok && !retResp.ok) {
-        return res.json({ outboundFlights: [], returnFlights: [], meta: { source: 'flightapi-oneway-dual', reason: 'both-failed' } });
-      }
-
-      const outboundFlights = outResp.ok ? extractFlightsOneWay(outResp.data).slice(0, 40) : [];
-      const returnFlights = retResp.ok ? extractFlightsOneWay(retResp.data).slice(0, 40) : [];
-
-      return res.json({
-        outboundFlights,
-        returnFlights,
-        meta: { source: 'flightapi-oneway-dual' }
-      });
-    }
-
-    // ONE-WAY => single onewaytrip call
-    const one = await fetchOneWay({ from, to, date: departureDate, passengers, cabin });
-    if (!one.ok) {
-      return res.json({ outboundFlights: [], returnFlights: [], meta: { source: 'flightapi-oneway', reason: one.error || 'failed' } });
-    }
-
-    const outboundFlights = extractFlightsOneWay(one.data).slice(0, 50);
-    return res.json({
-      outboundFlights,
-      returnFlights: [],
-      meta: { source: 'flightapi-oneway' }
+    // Index carriers for name lookup
+    const carriers = {};
+    (data.carriers || []).forEach((c) => {
+      carriers[String(c.id)] = c.name || c.display_code || c.alternate_di;
     });
-  } catch (e) {
-    console.error('❌ /search error:', e);
-    res.status(200).json({ outboundFlights: [], returnFlights: [], error: 'search-failed' });
+
+    // Legs map
+    const legsById = {};
+    (data.legs || []).forEach((lg) => {
+      legsById[String(lg.id)] = lg;
+    });
+
+    // Helper to render a leg into our UI model
+    const legToCard = (leg) => {
+      // marketing carrier for first segment
+      const segId = leg.segment_ids?.[0];
+      const seg = (data.segments || []).find((s) => s.id === segId);
+      const carrierName =
+        (seg && carriers[String(seg.marketing_carrier_id)]) || "Airline";
+
+      // These times are ISO; take HH:MM
+      const hhmm = (iso) =>
+        (iso || "")
+          .split("T")[1]
+          ?.slice(0, 5) || "";
+
+      // We don't have leg prices; use the **cheapest itinerary price** as base
+      const cheapest =
+        data.itineraries?.[0]?.pricing_options?.[0]?.price?.amount || 0;
+      const basePrice = Math.round(Number(cheapest) || 0);
+
+      return {
+        flightNumber: carrierName, // keep legacy field name for UI
+        airlineName: carrierName,
+        departure: hhmm(leg.departure),
+        arrival: hhmm(leg.arrival),
+        price: String(basePrice),
+        stops: (leg.stop_count ?? 0) | 0,
+        carrierCode: `-${seg?.marketing_flight_number || ""}`.trim(),
+        portalPrices: portalPrices(basePrice),
+      };
+    };
+
+    // Collect two columns
+    const outboundFlights = [];
+    const returnFlights = [];
+
+    // Strategy: take the first N (e.g., 80) itineraries, expand their legs
+    const MAX_ITINS = 120;
+    const itins = (data.itineraries || []).slice(0, MAX_ITINS);
+
+    for (const it of itins) {
+      const legIds = it.leg_ids || [];
+      // Outbound is always first leg in the itinerary
+      if (legIds[0] && legsById[legIds[0]]) {
+        outboundFlights.push(legToCard(legsById[legIds[0]]));
+      }
+      // Return leg present for round-trip
+      if (isRound && legIds[1] && legsById[legIds[1]]) {
+        returnFlights.push(legToCard(legsById[legIds[1]]));
+      }
+    }
+
+    // Simple de-dup: key by airline+dep+arr
+    const dedup = (arr) => {
+      const seen = new Set();
+      const out = [];
+      for (const f of arr) {
+        const key = `${f.airlineName}|${f.departure}|${f.arrival}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push(f);
+        }
+      }
+      return out;
+    };
+
+    const oDedup = dedup(outboundFlights).slice(0, 60);
+    const rDedup = dedup(returnFlights).slice(0, 60);
+
+    res.json({
+      meta: { source: "flightapi" },
+      outboundFlights: oDedup,
+      returnFlights: isRound ? rDedup : [],
+    });
+  } catch (err) {
+    console.error("search error:", err?.message || err);
+    res.status(500).json({ error: "Failed to fetch flights" });
   }
 });
 
-// ---- Start ----
+// -------------------------
+// Start server
+// -------------------------
 app.listen(PORT, () => {
   console.log(`🚀 SkyDeal backend running on ${PORT}`);
 });
