@@ -42,6 +42,66 @@ async function fetchJson(url) {
   const res = await axios.get(url, { timeout: 28000 });
   return res.data;
 }
+// ---- helpers (put near the top with other helpers) ----
+function titleCase(s = "") {
+  return s
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Normalize types to our 6 buckets
+function normalizeType(t = "") {
+  const x = t.toString().trim().toLowerCase();
+  if (["credit card", "creditcard", "credit_card"].includes(x)) return "CreditCard";
+  if (["debit card", "debitcard", "debit_card"].includes(x)) return "DebitCard";
+  if (["net banking", "net_banking", "internet banking"].includes(x)) return "NetBanking";
+  if (x === "upi") return "UPI";
+  if (x === "wallet") return "Wallet";
+  if (x === "emi") return "EMI";
+  if (x === "bank offer") return "CreditCard"; // treat generic bank offer like card
+  return null; // unknown/other gets dropped
+}
+
+// Canonicalize Indian bank / brand names (lowercased keys)
+const BANK_CANON = new Map([
+  ["hdfc", "HDFC Bank"], ["hdfc bank", "HDFC Bank"],
+  ["icici", "ICICI Bank"], ["icici bank", "ICICI Bank"],
+  ["axis", "Axis Bank"], ["axis bank", "Axis Bank"],
+  ["kotak", "Kotak Bank"], ["kotak bank", "Kotak Bank"],
+  ["idfc", "IDFC First Bank"], ["idfc bank", "IDFC First Bank"], ["idfc first bank", "IDFC First Bank"],
+  ["au", "AU Small Bank"], ["au bank", "AU Small Bank"], ["au small bank", "AU Small Bank"],
+  ["yes", "Yes Bank"], ["yes bank", "Yes Bank"],
+  ["sbi", "SBI Bank"], ["state bank of india", "SBI Bank"], ["sbi bank", "SBI Bank"],
+  ["hsbc", "HSBC Bank"], ["hsbc bank", "HSBC Bank"],
+  ["federal", "Federal Bank"], ["federal bank", "Federal Bank"],
+  ["rbl", "RBL Bank"], ["rbl bank", "RBL Bank"],
+  ["canara bank", "Canara Bank"],
+  ["central bank of india", "Central Bank Of India"],
+  ["bobcard ltd", "Bobcard Ltd"],
+  ["flipkart axis", "Flipkart Axis"],
+  ["flipkart axis credit card", "Flipkart Axis Credit Card"],
+]);
+
+function canonicalBankOrLabel(s = "") {
+  const key = s.toString().trim().toLowerCase();
+  if (BANK_CANON.has(key)) return BANK_CANON.get(key);
+  return titleCase(s);
+}
+
+// True if the payment method entry looks EMI-only or EMI-specific
+function looksEMI(pm = {}) {
+  const f = (v) => (v ? String(v).toLowerCase() : "");
+  return (
+    f(pm.type) === "emi" ||
+    f(pm.category).includes("emi") ||
+    f(pm.mode).includes("emi") ||
+    f(pm.method).includes("emi")
+  );
+}
+
 
 /** Map FlightAPI (onewaytrip) response to our flat flight cards */
 function mapOneWayToCards(data) {
@@ -142,66 +202,91 @@ app.post("/debug-flightapi", async (req, res) => {
 });
 
 /** Payment options from Mongo (deduped & normalized). Falls back to empty lists if DB not present. */
+// ==== REPLACE your /payment-options route with this one ====
 app.get("/payment-options", async (req, res) => {
   try {
     let options = {
-      CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [],
+      CreditCard: [],
+      DebitCard: [],
+      Wallet: [],
+      UPI: [],
+      NetBanking: [],
+      EMI: [],
     };
 
-    if (db) {
-      const active = { isExpired: { $ne: true } };
-      const raw = await db.collection("offers").aggregate([
-        { $match: active },
-        { $unwind: "$paymentMethods" },
-        {
-          $project: {
-            type: { $toLower: "$paymentMethods.type" },
-            subtype:
-              { $ifNull: ["$paymentMethods.bank",
-                { $ifNull: ["$paymentMethods.method",
-                  { $ifNull: ["$paymentMethods.wallet", ""] } ] }] }
-          }
-        },
-        { $match: { subtype: { $type: "string", $ne: "" } } },
-        { $group: { _id: { type: "$type", sub: { $toLower: "$subtype" } } } },
-      ]).toArray();
-
-      // Normalize into our 6 buckets with Title Case subtypes
-      const bucketMap = {
-        "credit card": "CreditCard", "credit_card": "CreditCard", "creditcard": "CreditCard",
-        "debit card": "DebitCard",   "debit_card": "DebitCard",   "debitcard": "DebitCard",
-        "net banking": "NetBanking", "net_banking": "NetBanking", "internet banking": "NetBanking",
-        "upi": "UPI",
-        "wallet": "Wallet",
-        "emi": "EMI",
-        "bank offer": "CreditCard",  // treat generic bank offers as cards for now
-        "any": null, "online": null, "other": null
-      };
-
-      function title(s) {
-        return s.replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase()
-          .replace(/\b\w/g, (c) => c.toUpperCase());
-      }
-
-      for (const r of raw) {
-        const b = bucketMap[r._id.type];
-        if (!b) continue;
-        const t = title(r._id.sub);
-        if (!options[b].includes(t)) options[b].push(t);
-      }
-      // Sort for nicer UI
-      Object.keys(options).forEach((k) => options[k].sort());
-      return res.json({ usedFallback: false, options });
+    if (!db) {
+      return res.json({ usedFallback: true, options });
     }
 
-    // Fallback (no DB)
-    return res.json({ usedFallback: true, options });
+    // Pull all active payment method rows we care about; we’ll classify in Node
+    const rows = await db.collection("offers").aggregate([
+      { $match: { isExpired: { $ne: true } } },
+      { $unwind: "$paymentMethods" },
+      {
+        $project: {
+          pm: {
+            type: { $ifNull: ["$paymentMethods.type", ""] },
+            bank: { $ifNull: ["$paymentMethods.bank", ""] },
+            method: { $ifNull: ["$paymentMethods.method", ""] },
+            wallet: { $ifNull: ["$paymentMethods.wallet", ""] },
+            category: { $ifNull: ["$paymentMethods.category", ""] },
+            mode: { $ifNull: ["$paymentMethods.mode", ""] },
+          },
+        },
+      },
+    ]).toArray();
+
+    // Use Sets to dedupe
+    const sets = {
+      CreditCard: new Set(),
+      DebitCard: new Set(),
+      Wallet: new Set(),
+      UPI: new Set(),
+      NetBanking: new Set(),
+      EMI: new Set(),
+    };
+
+    for (const r of rows) {
+      const pm = r.pm || {};
+      const bucket = normalizeType(pm.type) || ""; // our main bucket (if any)
+      const subRaw =
+        pm.bank || pm.method || pm.wallet || ""; // what we’ll display under each tab
+      if (!subRaw) {
+        // nothing to show for this row
+        continue;
+      }
+      const label = canonicalBankOrLabel(subRaw);
+
+      const isEMI = looksEMI(pm);
+
+      // If EMI-specific → always include under EMI
+      if (isEMI) {
+        sets.EMI.add(label);
+      }
+
+      // If it maps to one of our main buckets, include there
+      if (bucket) {
+        sets[bucket].add(label);
+      }
+
+      // If an offer is both card & EMI (e.g., ICICI Credit Card EMI):
+      // - looksEMI(pm) will have already added it to EMI
+      // - normalizeType("credit card") adds it to CreditCard
+      // So it shows in both tabs naturally.
+    }
+
+    // Convert Sets to sorted arrays
+    for (const k of Object.keys(sets)) {
+      options[k] = Array.from(sets[k]).sort((a, b) => a.localeCompare(b));
+    }
+
+    return res.json({ usedFallback: false, options });
   } catch (e) {
+    console.error("payment-options error:", e.message);
     return res.status(500).json({ error: e.message });
   }
 });
+
 
 /** Main search */
 app.post("/search", async (req, res) => {
