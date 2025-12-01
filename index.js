@@ -121,51 +121,124 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-app.get('/payment-options', async (_req, res) => {
+// ---- Payment options (types + subtypes) ----
+app.get('/payment-options', async (req, res) => {
   try {
-    // Build options list from offers collection (distinct banks by type)
-    const offers = db ? db.collection('offers') : null;
-    const byType = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
+    // Resolve Mongo client/db/collection safely
+    const client = global.mongoClient || mongoClient; // whichever you used at connect time
+    if (!client) {
+      throw new Error('mongo-not-connected');
+    }
+    const dbName = process.env.MONGODB_DB || 'skydeal';
+    const colName = process.env.OFFER_COLLECTIONS || 'offers';
+    const col = client.db(dbName).collection(colName);
 
-    if (offers) {
-      const cursor = offers.aggregate([
-        { $match: { isExpired: { $ne: true } } },
-        { $unwind: '$paymentMethods' },
-        {
-          $project: {
-            type: { $ifNull: ['$paymentMethods.type', ''] },
-            bank: { $ifNull: ['$paymentMethods.bank', ''] },
-            method: { $ifNull: ['$paymentMethods.method', ''] }
+    // Canonicalize type names to your UI tabs
+    const normalizeType = (t) => {
+      if (!t) return null;
+      const s = String(t).toLowerCase().replace(/\s+/g, '');
+      if (['credit','creditcard','cardcredit','cc'].includes(s)) return 'CreditCard';
+      if (['debit','debitcard','carddebit','dc'].includes(s))   return 'DebitCard';
+      if (['wallet','wallets'].includes(s))                      return 'Wallet';
+      if (['upi'].includes(s))                                   return 'UPI';
+      if (['netbanking','net-banking','internetbanking','nb'].includes(s)) return 'NetBanking';
+      if (['emi','paylater','bnpl'].includes(s))                 return 'EMI';
+      return null;
+    };
+
+    // Small safe defaults (used only if DB yields almost nothing)
+    const DEFAULTS = {
+      CreditCard: ['Hdfc Bank', 'Icici Bank', 'Axis Bank', 'Kotak'],
+      DebitCard:  ['Hdfc Bank', 'Icici Bank'],
+      Wallet:     ['Amazon Pay', 'Paytm'],
+      UPI:        ['PhonePe', 'Google Pay', 'Mobikwik'],
+      NetBanking: ['Hdfc Bank', 'Icici Bank'],
+      EMI:        ['Hdfc Bank EMI']
+    };
+
+    // Pipeline: explode paymentMethods and collect distinct names by normalized type
+    const pipe = [
+      { $match: { isExpired: { $ne: true } } },
+      { $unwind: '$paymentMethods' },
+      {
+        $project: {
+          rawType: '$paymentMethods.type',
+          // prefer bank, else method/wallet label
+          name: {
+            $ifNull: [
+              '$paymentMethods.bank',
+              { $ifNull: ['$paymentMethods.method', '$paymentMethods.wallet'] }
+            ]
           }
         }
-      ]);
-      const seen = new Set();
-      for await (const d of cursor) {
-        const t = (d.type || '').toLowerCase(); // credit/debit/wallet/upi/netbanking/emi
-        const mapKey =
-          t === 'credit' ? 'CreditCard' :
-          t === 'debit' ? 'DebitCard' :
-          t === 'wallet' ? 'Wallet' :
-          t === 'upi' ? 'UPI' :
-          t === 'netbanking' ? 'NetBanking' :
-          t === 'emi' ? 'EMI' : null;
+      },
+      // Filter out blanks
+      { $match: { name: { $ne: null, $type: 'string', $ne: '' } } },
+      // Normalize in JS after aggregation (Mongo can't call our JS function)
+    ];
 
-        if (!mapKey) continue;
-        const label = d.bank || d.method;
-        if (!label) continue;
-        const sig = `${mapKey}::${label}`;
-        if (seen.has(sig)) continue;
-        seen.add(sig);
-        byType[mapKey].push(label);
-      }
+    const rows = await col.aggregate(pipe).toArray();
+
+    const buckets = {
+      CreditCard: new Set(),
+      DebitCard:  new Set(),
+      Wallet:     new Set(),
+      UPI:        new Set(),
+      NetBanking: new Set(),
+      EMI:        new Set()
+    };
+
+    for (const r of rows) {
+      const typ = normalizeType(r.rawType);
+      if (!typ) continue;
+      // Title-case light normalization for names
+      const name = String(r.name).trim();
+      if (!name) continue;
+      buckets[typ].add(name);
     }
 
-    res.json({ options: byType });
-  } catch (e) {
-    console.error('payment-options error', e);
-    res.json({ options: { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] } });
+    const toSortedArray = (s) => Array.from(s).sort((a, b) => a.localeCompare(b));
+
+    let options = {
+      CreditCard: toSortedArray(buckets.CreditCard),
+      DebitCard:  toSortedArray(buckets.DebitCard),
+      Wallet:     toSortedArray(buckets.Wallet),
+      UPI:        toSortedArray(buckets.UPI),
+      NetBanking: toSortedArray(buckets.NetBanking),
+      EMI:        toSortedArray(buckets.EMI)
+    };
+
+    // Graceful fallback if the DB is too sparse (e.g., only 1 item like Mobikwik)
+    const total = Object.values(options).reduce((n, arr) => n + arr.length, 0);
+    if (total < 4) {
+      // Merge defaults without duplicating
+      const merged = {};
+      for (const k of Object.keys(DEFAULTS)) {
+        const have = new Set(options[k] || []);
+        for (const v of DEFAULTS[k]) have.add(v);
+        merged[k] = Array.from(have).sort((a, b) => a.localeCompare(b));
+      }
+      options = merged;
+    }
+
+    res.json({ options });
+  } catch (err) {
+    console.error('payment-options error:', err.message);
+    // Hard fallback so the UI always has something to show
+    res.json({
+      options: {
+        CreditCard: ['Hdfc Bank', 'Icici Bank', 'Axis Bank', 'Kotak'],
+        DebitCard:  ['Hdfc Bank', 'Icici Bank'],
+        Wallet:     ['Amazon Pay', 'Paytm'],
+        UPI:        ['PhonePe', 'Google Pay', 'Mobikwik'],
+        NetBanking: ['Hdfc Bank', 'Icici Bank'],
+        EMI:        ['Hdfc Bank EMI']
+      },
+      meta: { fallback: true }
+    });
   }
 });
+
 
 // Dry/diagnostic endpoint
 app.post('/debug-flightapi', async (req, res) => {
