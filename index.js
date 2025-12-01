@@ -122,122 +122,149 @@ app.get('/health', (_req, res) => {
 });
 
 // ---- Payment options (types + subtypes) ----
+// ===== Payment options (DB-first with normalization + debug) =====
 app.get('/payment-options', async (req, res) => {
   try {
-    // Resolve Mongo client/db/collection safely
-    const client = global.mongoClient || mongoClient; // whichever you used at connect time
-    if (!client) {
-      throw new Error('mongo-not-connected');
-    }
+    const client = global.mongoClient || mongoClient;
+    if (!client) throw new Error('mongo-not-connected');
+
     const dbName = process.env.MONGODB_DB || 'skydeal';
     const colName = process.env.OFFER_COLLECTIONS || 'offers';
     const col = client.db(dbName).collection(colName);
 
-    // Canonicalize type names to your UI tabs
+    // Tab names used by the UI
+    const TABS = ['CreditCard','DebitCard','Wallet','UPI','NetBanking','EMI'];
+
+    // --- Normalizers ---
     const normalizeType = (t) => {
       if (!t) return null;
-      const s = String(t).toLowerCase().replace(/\s+/g, '');
-      if (['credit','creditcard','cardcredit','cc'].includes(s)) return 'CreditCard';
-      if (['debit','debitcard','carddebit','dc'].includes(s))   return 'DebitCard';
-      if (['wallet','wallets'].includes(s))                      return 'Wallet';
-      if (['upi'].includes(s))                                   return 'UPI';
+      const s = String(t).toLowerCase().replace(/\s+/g,'');
+      if (['credit','creditcard','cc','cardcredit'].includes(s)) return 'CreditCard';
+      if (['debit','debitcard','dc','carddebit'].includes(s))     return 'DebitCard';
+      if (['wallet','wallets'].includes(s))                        return 'Wallet';
+      if (['upi'].includes(s))                                     return 'UPI';
       if (['netbanking','net-banking','internetbanking','nb'].includes(s)) return 'NetBanking';
-      if (['emi','paylater','bnpl'].includes(s))                 return 'EMI';
+      if (['emi','paylater','bnpl'].includes(s))                   return 'EMI';
       return null;
     };
 
-    // Small safe defaults (used only if DB yields almost nothing)
-    const DEFAULTS = {
-      CreditCard: ['Hdfc Bank', 'Icici Bank', 'Axis Bank', 'Kotak'],
-      DebitCard:  ['Hdfc Bank', 'Icici Bank'],
-      Wallet:     ['Amazon Pay', 'Paytm'],
-      UPI:        ['PhonePe', 'Google Pay', 'Mobikwik'],
-      NetBanking: ['Hdfc Bank', 'Icici Bank'],
-      EMI:        ['Hdfc Bank EMI']
+    // Bank/brand dictionary (extend anytime)
+    const BANK_MAP = [
+      [/^hdfc\b/i, 'HDFC Bank'],
+      [/^icici\b/i, 'ICICI Bank'],
+      [/^axis\b/i, 'Axis Bank'],
+      [/^kotak/i, 'Kotak'],
+      [/^bob|bank\s*of\s*baroda|bobcard/i, 'Bank of Baroda'],
+      [/^au(\s|$)|^au\s*small/i, 'AU Small Finance Bank'],
+      [/^sbi|state\s*bank\s*of\s*india/i, 'SBI'],
+      [/^idfc/i, 'IDFC FIRST Bank'],
+      [/^hsbc/i, 'HSBC'],
+      [/^rbl/i, 'RBL Bank'],
+    ];
+    const prettyName = (raw) => {
+      if (!raw) return null;
+      const s = String(raw).trim();
+      for (const [re, nice] of BANK_MAP) if (re.test(s)) return nice;
+      // Title-case fallback
+      return s.replace(/\b\w/g, c => c.toUpperCase());
     };
 
-    // Pipeline: explode paymentMethods and collect distinct names by normalized type
-    const pipe = [
+    // Hard fallback (only if you opt in)
+    const DEFAULTS = {
+      CreditCard: ['HDFC Bank','ICICI Bank','Axis Bank','Kotak','AU Small Finance Bank'],
+      DebitCard:  ['HDFC Bank','ICICI Bank'],
+      Wallet:     ['Amazon Pay','Paytm'],
+      UPI:        ['PhonePe','Google Pay','Mobikwik'],
+      NetBanking: ['HDFC Bank','ICICI Bank'],
+      EMI:        ['HDFC Bank EMI']
+    };
+
+    // --- Aggregation: explode paymentMethods and collect labels by type
+    const rows = await col.aggregate([
       { $match: { isExpired: { $ne: true } } },
+      { $project: { paymentMethods: 1 } },
       { $unwind: '$paymentMethods' },
       {
         $project: {
           rawType: '$paymentMethods.type',
-          // prefer bank, else method/wallet label
+          bank: { $ifNull: ['$paymentMethods.bank', null] },
+          method: { $ifNull: ['$paymentMethods.method', null] },
+          wallet: { $ifNull: ['$paymentMethods.wallet', null] },
+          category: { $ifNull: ['$paymentMethods.category', null] },
+          mode: { $ifNull: ['$paymentMethods.mode', null] }
+        }
+      },
+      // Prefer bank → method → wallet → category → mode for display label
+      {
+        $addFields: {
           name: {
             $ifNull: [
-              '$paymentMethods.bank',
-              { $ifNull: ['$paymentMethods.method', '$paymentMethods.wallet'] }
+              '$bank',
+              { $ifNull: [
+                  '$method',
+                  { $ifNull: ['$wallet', { $ifNull: ['$category', '$mode'] }] }
+              ]}
             ]
           }
         }
       },
-      // Filter out blanks
-      { $match: { name: { $ne: null, $type: 'string', $ne: '' } } },
-      // Normalize in JS after aggregation (Mongo can't call our JS function)
-    ];
+      { $match: { name: { $type: 'string', $ne: '' } } },
+      {
+        $group: {
+          _id: { t: '$rawType', n: { $toLower: { $trim: { input: '$name' } } } },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]).toArray();
 
-    const rows = await col.aggregate(pipe).toArray();
-
-    const buckets = {
-      CreditCard: new Set(),
-      DebitCard:  new Set(),
-      Wallet:     new Set(),
-      UPI:        new Set(),
-      NetBanking: new Set(),
-      EMI:        new Set()
-    };
+    const buckets = Object.fromEntries(TABS.map(t => [t, new Map()])); // name -> count
+    const rawSeen = []; // for debug
 
     for (const r of rows) {
-      const typ = normalizeType(r.rawType);
+      const typ = normalizeType(r._id.t);
       if (!typ) continue;
-      // Title-case light normalization for names
-      const name = String(r.name).trim();
-      if (!name) continue;
-      buckets[typ].add(name);
+      const pretty = prettyName(r._id.n);
+      if (!pretty) continue;
+      rawSeen.push({ typeRaw: r._id.t, nameRaw: r._id.n, type: typ, name: pretty, count: r.count });
+      buckets[typ].set(pretty, (buckets[typ].get(pretty) || 0) + r.count);
     }
 
-    const toSortedArray = (s) => Array.from(s).sort((a, b) => a.localeCompare(b));
+    // Convert to sorted arrays (by frequency desc, then A–Z)
+    const toSorted = (m) =>
+      Array.from(m.entries())
+        .sort((a,b) => (b[1]-a[1]) || a[0].localeCompare(b[0]))
+        .map(([k]) => k);
 
-    let options = {
-      CreditCard: toSortedArray(buckets.CreditCard),
-      DebitCard:  toSortedArray(buckets.DebitCard),
-      Wallet:     toSortedArray(buckets.Wallet),
-      UPI:        toSortedArray(buckets.UPI),
-      NetBanking: toSortedArray(buckets.NetBanking),
-      EMI:        toSortedArray(buckets.EMI)
-    };
+    let options = Object.fromEntries(TABS.map(t => [t, toSorted(buckets[t])]));
 
-    // Graceful fallback if the DB is too sparse (e.g., only 1 item like Mobikwik)
-    const total = Object.values(options).reduce((n, arr) => n + arr.length, 0);
-    if (total < 4) {
-      // Merge defaults without duplicating
-      const merged = {};
-      for (const k of Object.keys(DEFAULTS)) {
-        const have = new Set(options[k] || []);
-        for (const v of DEFAULTS[k]) have.add(v);
-        merged[k] = Array.from(have).sort((a, b) => a.localeCompare(b));
+    // Optional fallback if you want to pad (via env or query)
+    const useFallback = !!(+req.query.fallback || +process.env.PAYMENT_OPTIONS_FALLBACK || 0);
+    if (useFallback) {
+      for (const t of TABS) {
+        const s = new Set(options[t]);
+        (DEFAULTS[t] || []).forEach(v => s.add(v));
+        options[t] = Array.from(s).sort((a,b)=>a.localeCompare(b));
       }
-      options = merged;
+    }
+
+    // Debug mode shows counts/raw
+    if (req.query.debug === '1') {
+      return res.json({
+        options,
+        counts: Object.fromEntries(TABS.map(t => [t, Array.from(buckets[t].entries())])),
+        rawSeenSample: rawSeen.slice(0, 50),
+        usedFallback: useFallback
+      });
     }
 
     res.json({ options });
   } catch (err) {
-    console.error('payment-options error:', err.message);
-    // Hard fallback so the UI always has something to show
-    res.json({
-      options: {
-        CreditCard: ['Hdfc Bank', 'Icici Bank', 'Axis Bank', 'Kotak'],
-        DebitCard:  ['Hdfc Bank', 'Icici Bank'],
-        Wallet:     ['Amazon Pay', 'Paytm'],
-        UPI:        ['PhonePe', 'Google Pay', 'Mobikwik'],
-        NetBanking: ['Hdfc Bank', 'Icici Bank'],
-        EMI:        ['Hdfc Bank EMI']
-      },
-      meta: { fallback: true }
-    });
+    console.error('payment-options error:', err);
+    res.status(200).json({ options: { CreditCard:[],DebitCard:[],Wallet:[],UPI:[],NetBanking:[],EMI:[] }, error: 'payment-options-failed' });
   }
 });
+
 
 
 // Dry/diagnostic endpoint
