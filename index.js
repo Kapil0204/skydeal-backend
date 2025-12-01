@@ -202,7 +202,7 @@ app.post("/debug-flightapi", async (req, res) => {
 });
 
 /** Payment options from Mongo (deduped & normalized). Falls back to empty lists if DB not present. */
-// ==== REPLACE your /payment-options route with this one ====
+// ==== REPLACE ONLY THIS ROUTE ====
 app.get("/payment-options", async (req, res) => {
   try {
     let options = {
@@ -218,7 +218,7 @@ app.get("/payment-options", async (req, res) => {
       return res.json({ usedFallback: true, options });
     }
 
-    // Pull all active payment method rows we care about; we’ll classify in Node
+    // ---------- Pass 1: structured paymentMethods ----------
     const rows = await db.collection("offers").aggregate([
       { $match: { isExpired: { $ne: true } } },
       { $unwind: "$paymentMethods" },
@@ -236,7 +236,6 @@ app.get("/payment-options", async (req, res) => {
       },
     ]).toArray();
 
-    // Use Sets to dedupe
     const sets = {
       CreditCard: new Set(),
       DebitCard: new Set(),
@@ -248,44 +247,92 @@ app.get("/payment-options", async (req, res) => {
 
     for (const r of rows) {
       const pm = r.pm || {};
-      const bucket = normalizeType(pm.type) || ""; // our main bucket (if any)
-      const subRaw =
-        pm.bank || pm.method || pm.wallet || ""; // what we’ll display under each tab
-      if (!subRaw) {
-        // nothing to show for this row
-        continue;
-      }
+      const bucket = normalizeType(pm.type) || "";
+      const subRaw = pm.bank || pm.method || pm.wallet || "";
+      if (!subRaw) continue;
       const label = canonicalBankOrLabel(subRaw);
 
-      const isEMI = looksEMI(pm);
+      const isEMI = looksEMI(pm); // checks type/category/mode/method for 'emi'
 
-      // If EMI-specific → always include under EMI
-      if (isEMI) {
-        sets.EMI.add(label);
-      }
-
-      // If it maps to one of our main buckets, include there
-      if (bucket) {
-        sets[bucket].add(label);
-      }
-
-      // If an offer is both card & EMI (e.g., ICICI Credit Card EMI):
-      // - looksEMI(pm) will have already added it to EMI
-      // - normalizeType("credit card") adds it to CreditCard
-      // So it shows in both tabs naturally.
+      if (isEMI) sets.EMI.add(label);
+      if (bucket) sets[bucket].add(label);
     }
 
-    // Convert Sets to sorted arrays
+    // ---------- Pass 2: add EMI by text/category hints ----------
+    const emiHintDocs = await db.collection("offers").aggregate([
+      { $match: { isExpired: { $ne: true } } },
+      {
+        $project: {
+          title: { $ifNull: ["$title", ""] },
+          terms: { $ifNull: ["$terms", ""] },
+          rawText: { $ifNull: ["$rawText", ""] },
+          offerCategories: { $ifNull: ["$offerCategories", []] },
+          paymentMethods: { $ifNull: ["$paymentMethods", []] },
+        },
+      },
+      {
+        $addFields: {
+          emiByText: {
+            $or: [
+              { $regexMatch: { input: "$title", regex: /emi/i } },
+              { $regexMatch: { input: "$terms", regex: /emi/i } },
+              { $regexMatch: { input: "$rawText", regex: /emi/i } },
+              {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: "$offerCategories",
+                        as: "c",
+                        cond: { $regexMatch: { input: "$$c", regex: /emi/i } },
+                      },
+                    },
+                  },
+                  0,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { $match: { emiByText: true } },
+      { $unwind: "$paymentMethods" },
+      {
+        $project: {
+          pm: {
+            type: { $ifNull: ["$paymentMethods.type", ""] },
+            bank: { $ifNull: ["$paymentMethods.bank", ""] },
+            method: { $ifNull: ["$paymentMethods.method", ""] },
+            category: { $ifNull: ["$paymentMethods.category", ""] },
+            mode: { $ifNull: ["$paymentMethods.mode", ""] },
+          },
+        },
+      },
+    ]).toArray();
+
+    for (const r of emiHintDocs) {
+      const pm = r.pm || {};
+      const subRaw = pm.bank || pm.method || "";
+      if (!subRaw) continue;
+      sets.EMI.add(canonicalBankOrLabel(subRaw));
+      // If it’s a normal credit card instrument as well, it will already
+      // appear under CreditCard from pass 1 (or via normalizeType below).
+      const bucket = normalizeType(pm.type);
+      if (bucket) sets[bucket].add(canonicalBankOrLabel(subRaw));
+    }
+
+    // Finalize: sets → arrays
     for (const k of Object.keys(sets)) {
       options[k] = Array.from(sets[k]).sort((a, b) => a.localeCompare(b));
     }
 
     return res.json({ usedFallback: false, options });
   } catch (e) {
-    console.error("payment-options error:", e.message);
+    console.error("payment-options error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
+
 
 
 /** Main search */
