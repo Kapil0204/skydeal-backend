@@ -4,7 +4,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 import { MongoClient } from "mongodb";
 
 dotenv.config();
