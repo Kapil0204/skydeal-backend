@@ -29,8 +29,8 @@ async function connectDB() {
   if (db) return;
   mongo = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
   await mongo.connect();
-  db = mongo.db('skydeal');
-  offersCol = db.collection('offers');
+  db = mongo.db('skydeal');            // unchanged: use 'skydeal'
+  offersCol = db.collection('offers'); // convenience handle
   console.log('✅ Connected to MongoDB (EC2)');
 }
 
@@ -283,7 +283,7 @@ app.post('/debug-flightapi', async (req, res) => {
 
     const r = await fetchJson(url);
     const keys = r.json ? Object.keys(r.json) : [];
-    const hasItin = Array.isArray(r.json?.itineraries) ? r.json.itineraries.length : 0;
+    aconst hasItin = Array.isArray(r.json?.itineraries) ? r.json.itineraries.length : 0;
     res.json({ ok: true, status: r.status, keys, hasItin, error: null });
   } catch (e) {
     const msg = (e?.name === 'AbortError') ? 'timeout' : (e?.message || 'error');
@@ -291,33 +291,22 @@ app.post('/debug-flightapi', async (req, res) => {
   }
 });
 
-// Payment options from Mongo, normalized + de-duped
 // ---- Payment options (pull distinct banks by normalized method) ----
-app.get('/payment-options', async (req, res) => {
+app.get('/payment-options', async (_req, res) => {
   try {
-    // IMPORTANT: use your actual connected Mongo client variable name here
-    // If your code uses something else (e.g. `mongo`, `dbClient`), swap it below.
-    const db = client.db('skydeal');
-    const col = db.collection('offers');
+    // use the already-connected collection handle
+    if (!offersCol) throw new Error('offers collection unavailable');
 
-    // Normalize + distinct by method types and banks
     const pipeline = [
       { $match: { isExpired: { $ne: true } } },
       { $unwind: '$paymentMethods' },
       {
         $addFields: {
-          _type: {
-            $toLower: { $ifNull: ['$paymentMethods.type', ''] }
-          },
-          _method: {
-            $toLower: { $ifNull: ['$paymentMethods.method', ''] }
-          },
-          _bank: {
-            $trim: { input: { $toLower: { $ifNull: ['$paymentMethods.bank', ''] } } }
-          }
+          _type:   { $toLower: { $ifNull: ['$paymentMethods.type', ''] } },
+          _method: { $toLower: { $ifNull: ['$paymentMethods.method', ''] } },
+          _bank:   { $trim: { input: { $toLower: { $ifNull: ['$paymentMethods.bank', ''] } } } }
         }
       },
-      // Map many spellings to canonical buckets
       {
         $addFields: {
           bucket: {
@@ -328,7 +317,6 @@ app.get('/payment-options', async (req, res) => {
                 { case: { $in: ['$_type', ['net banking','net_banking','internet banking','internet_banking']] }, then: 'NetBanking' },
                 { case: { $regexMatch: { input: '$_type', regex: /upi/ } },    then: 'UPI' },
                 { case: { $regexMatch: { input: '$_type', regex: /wallet/ } }, then: 'Wallet' },
-                // Detect EMI by either type or method text
                 { case: { $or: [
                     { $regexMatch: { input: '$_type',   regex: /emi/ } },
                     { $regexMatch: { input: '$_method', regex: /emi/ } }
@@ -341,52 +329,27 @@ app.get('/payment-options', async (req, res) => {
       },
       { $match: { _bank: { $ne: '' }, bucket: { $in: ['CreditCard','DebitCard','NetBanking','UPI','Wallet','EMI'] } } },
       { $group: { _id: { bucket: '$bucket', bank: '$_bank' } } },
-      { $group: {
-          _id: '$_id.bucket',
-          banks: { $addToSet: '$_id.bank' }
-      }},
-      { $project: {
-          _id: 0,
-          bucket: '$_id',
-          banks: {
-            $map: {
-              input: '$banks',
-              as: 'b',
-              in: {
-                $concat: [
-                  { $toUpper: { $substrCP: ['$$b', 0, 1] } },
-                  {
-                    $replaceAll: {
-                      input: { $substrCP: ['$$b', 1, { $subtract: [{ $strLenCP: '$$b' }, 1] }] },
-                      find: /\b[a-z]/g, // will be ignored by server; we’ll do a simple title-case in JS below if you prefer
-                      replacement: ''
-                    }
-                  }
-                ]
-              }
-            }
-          }
-      }}
+      { $group: { _id: '$_id.bucket', banks: { $addToSet: '$_id.bank' } } },
+      { $project: { _id: 0, bucket: '$_id', banks: 1 } }
     ];
 
-    const rows = await col.aggregate(pipeline).toArray();
+    const rows = await offersCol.aggregate(pipeline).toArray();
 
-    // Build response buckets with light title-casing in JS
+    // Title-case & bank short-name normalization in JS
     const out = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
-    const title = (s) => s.replace(/\b\w/g, c => c.toUpperCase()); // simple Title Case
+    const title = (s) => String(s || '').replace(/\b\w/g, c => c.toUpperCase());
 
     for (const r of rows) {
-      const bucket = r.bucket;
       const list = (r.banks || []).map(b => {
-        // normalize common short forms
         if (b === 'hdfc') return 'HDFC Bank';
         if (b === 'icici') return 'ICICI Bank';
         if (b === 'axis') return 'Axis Bank';
-        if (b === 'rbl') return 'RBL Bank';
-        if (b === 'sbi') return 'SBI Bank';
+        if (b === 'rbl')  return 'RBL Bank';
+        if (b === 'sbi')  return 'SBI Bank';
+        if (b.endsWith(' bank')) return title(b); // keep "xxx bank"
         return title(b);
       }).sort();
-      if (out[bucket]) out[bucket] = list;
+      if (out[r.bucket]) out[r.bucket] = list;
     }
 
     return res.json({ usedFallback: false, options: out });
@@ -398,9 +361,6 @@ app.get('/payment-options', async (req, res) => {
     });
   }
 });
-
-
-
 
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
 app.post('/search', async (req, res) => {
@@ -435,7 +395,6 @@ app.post('/search', async (req, res) => {
       retStatus = retResp.status;
       returnFlights = extractFlightsOneWay(retResp);
 
-      // retry once if empty or status not 200
       if ((!Array.isArray(returnFlights) || returnFlights.length === 0) || retStatus !== 200) {
         await sleep(650);
         const retry = await fetchJson(urlRet);
@@ -450,7 +409,7 @@ app.post('/search', async (req, res) => {
 
     // 3) offers (active + flight-only)
     let applicable = [];
-    if (Array.isArray(paymentMethods) && paymentMethods.length > 0) {
+    if (Array.isArray(paymentMethods) && paymentMethods.length > 0 && offersCol) {
       const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
       applicable = pickApplicableOffers(allActive, paymentMethods);
     }
