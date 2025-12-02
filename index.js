@@ -1,4 +1,4 @@
-// index.js — SkyDeal backend (drop-in)
+// index.js — SkyDeal backend (with return-leg retry + flight-only offer filtering + meta counts)
 // Node >=18 (uses global fetch). ESM module.
 import express from 'express';
 import cors from 'cors';
@@ -42,7 +42,6 @@ await connectDB().catch((e) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function toTime(t) {
-  // '2025-12-20T23:30:00' -> '23:30'
   if (!t) return '';
   const m = t.match(/T(\d{2}:\d{2})/);
   return m ? m[1] : t;
@@ -64,7 +63,6 @@ function buildDefaultPortalPrices(base) {
   ];
 }
 
-// very defensive normalizer
 function norm(s) {
   return String(s || '')
     .toLowerCase()
@@ -73,27 +71,34 @@ function norm(s) {
     .replace(/ bank$/, '');
 }
 
-// Offer eligibility (booking validity only; you can later add travel windows, weekday, minAmount, etc.)
+// Offer validity by booking window
 function isOfferCurrentlyValid(ofr) {
-  // explicit boolean wins
   if (ofr.isExpired === true) return false;
-
   const end =
     ofr?.validityPeriod?.endDate ||
     ofr?.validityPeriod?.to ||
     ofr?.validityPeriod?.end ||
     null;
-
-  if (!end) {
-    // if no end date provided, assume usable unless explicitly expired
-    return true;
-  }
+  if (!end) return true;
   const now = new Date();
   const endDt = new Date(end);
   return now <= endDt;
 }
 
-// returns a minimal “applicable” offer bundle for the selected banks/types
+// Flight-only filter: rely on offerCategories (preferred), then keywords
+function isFlightOffer(ofr) {
+  const cats = Array.isArray(ofr.offerCategories) ? ofr.offerCategories.map(norm) : [];
+  if (cats.some(c => /flight/.test(c))) return true;
+
+  const raw = (
+    (ofr.rawText || '') + ' ' +
+    (ofr.title || '') + ' ' +
+    (ofr?.validityPeriod?.raw || '')
+  ).toLowerCase();
+
+  return /(flight|airfare|domestic flight|international flight)/.test(raw);
+}
+
 function pickApplicableOffers(allOffers, selectedLabels) {
   if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
   const wanted = new Set(selectedLabels.map(norm));
@@ -101,27 +106,23 @@ function pickApplicableOffers(allOffers, selectedLabels) {
   const res = [];
   for (const ofr of allOffers) {
     if (!isOfferCurrentlyValid(ofr)) continue;
+    if (!isFlightOffer(ofr)) continue;
 
     const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
-    // Consider any bank/type/method/category/mode fields we stored
     const tags = new Set();
+
     for (const pm of pms) {
       ['bank', 'type', 'method', 'category', 'mode', 'wallet'].forEach((k) => {
         if (pm?.[k]) tags.add(norm(pm[k]));
       });
     }
-    // also consider parsedApplicablePlatforms if present (e.g., 'MakeMyTrip', etc.)
     if (Array.isArray(ofr.parsedApplicablePlatforms)) {
       for (const p of ofr.parsedApplicablePlatforms) tags.add(norm(p));
     }
 
-    // If any selection matches, we keep it
     let match = false;
     for (const w of wanted) {
-      if (tags.has(w)) {
-        match = true;
-        break;
-      }
+      if (tags.has(w)) { match = true; break; }
     }
     if (match) res.push(ofr);
   }
@@ -129,12 +130,11 @@ function pickApplicableOffers(allOffers, selectedLabels) {
 }
 
 function computeDiscountedPrice(base, ofr) {
-  // support % off and flat amounts, with optional cap
   const b = Number(base) || 0;
 
   const pct = Number(ofr?.discountPercent);
   const flat = Number(ofr?.maxDiscountAmountFlat ?? ofr?.flatDiscountAmount);
-  const cap = Number(ofr?.maxDiscountAmount);
+  const cap  = Number(ofr?.maxDiscountAmount);
 
   let discount = 0;
 
@@ -147,23 +147,17 @@ function computeDiscountedPrice(base, ofr) {
   if (!Number.isNaN(cap) && cap > 0) {
     discount = Math.min(discount, cap);
   }
-  // guard
   if (discount < 0) discount = 0;
   return Math.max(0, Math.round(b - discount));
 }
 
 function applyOffersToPortals(base, applicableOffers) {
-  // Start with the default (carrier+markup) prices
   const portals = buildDefaultPortalPrices(base);
 
   if (!applicableOffers || applicableOffers.length === 0) {
-    return {
-      portalPrices: portals,
-      bestDeal: null,
-    };
+    return { portalPrices: portals, bestDeal: null };
   }
 
-  // If offers specify a portal, apply there; otherwise, apply to all portals (conservative)
   for (const ofr of applicableOffers) {
     const targetedPortals =
       (Array.isArray(ofr.parsedApplicablePlatforms) && ofr.parsedApplicablePlatforms.length > 0)
@@ -179,7 +173,6 @@ function applyOffersToPortals(base, applicableOffers) {
         }
       }
     } else {
-      // apply to all portals
       for (const p of portals) {
         const discounted = computeDiscountedPrice(p.basePrice, ofr) + MARKUP;
         p.finalPrice = Math.min(p.finalPrice, discounted);
@@ -188,7 +181,6 @@ function applyOffersToPortals(base, applicableOffers) {
     }
   }
 
-  // best deal = min finalPrice across portals
   let best = portals[0];
   for (const p of portals) {
     if (p.finalPrice < best.finalPrice) best = p;
@@ -207,7 +199,6 @@ function buildRoundtripUrl({ from, to, departureDate, returnDate, adults = 1, ca
   return `https://api.flightapi.io/roundtrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${returnDate}/${adults}/0/0/${cabin}/${CURRENCY}?region=${REGION}`;
 }
 function buildOnewayUrl({ from, to, date, adults = 1, cabin = 'economy' }) {
-  // documented one-way endpoint is "onewaytrip"
   return `https://api.flightapi.io/onewaytrip/${FLIGHTAPI_KEY}/${from}/${to}/${date}/${adults}/0/0/${cabin}/${CURRENCY}?region=${REGION}`;
 }
 
@@ -219,18 +210,13 @@ async function fetchJson(url, timeoutMs = 28000) {
     const status = r.status;
     const text = await r.text();
     let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = null;
-    }
+    try { json = JSON.parse(text); } catch { json = null; }
     return { status, json, raw: text };
   } finally {
     clearTimeout(t);
   }
 }
 
-// Extract flights from a one-way response
 function extractFlightsOneWay(resp) {
   const r = resp?.json || {};
   const itins = Array.isArray(r.itineraries) ? r.itineraries : [];
@@ -244,7 +230,6 @@ function extractFlightsOneWay(resp) {
 
   const flights = [];
   for (const it of itins) {
-    // keep only itineraries with exactly 1 leg (pure one-way)
     if (!Array.isArray(it.leg_ids) || it.leg_ids.length !== 1) continue;
 
     const leg = legs.get(it.leg_ids[0]);
@@ -267,18 +252,16 @@ function extractFlightsOneWay(resp) {
       price: String(basePrice),
       stops: Array.isArray(leg.stop_ids) ? leg.stop_ids.length : 0,
       carrierCode,
-      // portalPrices & bestDeal will be filled later depending on offers
     });
   }
   return flights;
 }
 
-// ---------- Routes ----------
+// ---------- routes ----------
 app.get('/health', async (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString(), dbConnected: !!db });
 });
 
-// For debugging exact FlightAPI call
 app.post('/debug-flightapi', async (req, res) => {
   try {
     const { from, to, departureDate, returnDate, passengers = 1, travelClass = 'economy', tripType = 'round-trip' } = req.body || {};
@@ -308,7 +291,7 @@ app.post('/debug-flightapi', async (req, res) => {
   }
 });
 
-// Payment options: normalize from Mongo and de-dupe
+// Payment options from Mongo, normalized + de-duped
 app.get('/payment-options', async (_req, res) => {
   try {
     const active = { isExpired: { $ne: true } };
@@ -336,7 +319,7 @@ app.get('/payment-options', async (_req, res) => {
         else if (t === 'net banking' || t === 'net_banking' || t === 'internet banking') buckets.NetBanking.add(labelBank);
         else if (t === 'wallet') buckets.Wallet.add(labelBank);
         else if (t === 'upi') buckets.UPI.add(labelBank);
-        // Some offers mention EMI inside credit cards explicitly; put under EMI too
+        // Also drop into EMI if category/method mentions EMI
         if (/emi/i.test(pm?.category || '') || /emi/i.test(pm?.method || '')) {
           buckets.EMI.add(labelBank);
         }
@@ -345,7 +328,6 @@ app.get('/payment-options', async (_req, res) => {
 
     const canon = (s) => {
       if (!s) return s;
-      // Title Case basic canonicalization
       return s
         .split(' ')
         .map((w) => w ? w[0].toUpperCase() + w.slice(1) : w)
@@ -367,14 +349,12 @@ app.get('/payment-options', async (_req, res) => {
     console.error('payment-options error', e);
     res.json({
       usedFallback: true,
-      options: {
-        CreditCard: [], DebitCard: [], EMI: [], NetBanking: [], Wallet: [], UPI: ['Mobikwik'],
-      },
+      options: { CreditCard: [], DebitCard: [], EMI: [], NetBanking: [], Wallet: [], UPI: ['Mobikwik'] },
     });
   }
 });
 
-// Main search: one-way always; round-trip = 2 one-way calls
+// Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
 app.post('/search', async (req, res) => {
   try {
     const {
@@ -389,31 +369,45 @@ app.post('/search', async (req, res) => {
     }
 
     const fromCode = (from || '').slice(0, 3).toUpperCase();
-    const toCode = (to || '').slice(0, 3).toUpperCase();
+    const toCode   = (to   || '').slice(0, 3).toUpperCase();
 
-    // 1) Fetch outbound one-way
+    // 1) outbound
     const urlOut = buildOnewayUrl({ from: fromCode, to: toCode, date: departureDate, adults: passengers, cabin: travelClass });
     const outResp = await fetchJson(urlOut);
     const outboundFlights = extractFlightsOneWay(outResp);
 
-    // 2) If round-trip, fetch return one-way
+    // 2) return (with single retry if empty)
     let returnFlights = [];
+    let retResp = null;
+    let retStatus = null;
     if (tripType !== 'one-way' && returnDate) {
       const urlRet = buildOnewayUrl({ from: toCode, to: fromCode, date: returnDate, adults: passengers, cabin: travelClass });
-      // small pause to be kind to API
-      await sleep(200);
-      const retResp = await fetchJson(urlRet);
+      await sleep(220); // brief gap for throttling
+      retResp = await fetchJson(urlRet);
+      retStatus = retResp.status;
       returnFlights = extractFlightsOneWay(retResp);
+
+      // retry once if empty or status not 200
+      if ((!Array.isArray(returnFlights) || returnFlights.length === 0) || retStatus !== 200) {
+        await sleep(650);
+        const retry = await fetchJson(urlRet);
+        retStatus = retry.status;
+        const again = extractFlightsOneWay(retry);
+        if (Array.isArray(again) && again.length > 0) {
+          returnFlights = again;
+          retResp = retry;
+        }
+      }
     }
 
-    // 3) Load offers once (active only)
+    // 3) offers (active + flight-only)
     let applicable = [];
     if (Array.isArray(paymentMethods) && paymentMethods.length > 0) {
       const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
       applicable = pickApplicableOffers(allActive, paymentMethods);
     }
 
-    // 4) Attach portalPrices/bestDeal for each flight (ALWAYS keep base prices)
+    // 4) decorate with portal prices & bestDeal (always keep carrier base)
     function decorate(f) {
       const base = Number(f.price) || 0;
       const { portalPrices, bestDeal } = applyOffersToPortals(base, applicable);
@@ -421,12 +415,21 @@ app.post('/search', async (req, res) => {
     }
 
     const outboundDecorated = outboundFlights.map(decorate);
-    const returnDecorated = returnFlights.map(decorate);
+    const returnDecorated  = returnFlights.map(decorate);
+
+    // meta debug counts
+    const meta = {
+      source: 'flightapi',
+      outStatus: outResp?.status ?? null,
+      outCount: Array.isArray(outboundFlights) ? outboundFlights.length : 0,
+      retStatus: retResp?.status ?? null,
+      retCount: Array.isArray(returnFlights) ? returnFlights.length : 0,
+    };
 
     return res.json({
       outboundFlights: outboundDecorated,
       returnFlights: returnDecorated,
-      meta: { source: 'flightapi' },
+      meta,
     });
   } catch (e) {
     console.error('❌ Search error:', e);
