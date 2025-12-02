@@ -292,67 +292,163 @@ app.post('/debug-flightapi', async (req, res) => {
 });
 
 // Payment options from Mongo, normalized + de-duped
-app.get('/payment-options', async (_req, res) => {
+// ===========================
+// /payment-options (REPLACE)
+// ===========================
+app.get('/payment-options', async (req, res) => {
   try {
-    const active = { isExpired: { $ne: true } };
-    const cursor = offersCol.find(active, { projection: { paymentMethods: 1 } });
-    const buckets = {
+    const db = mongoClient.db();
+    const col = db.collection('offers');
+
+    // Helper: normalize bank to a nice display label
+    function normalizeBankLabel(raw) {
+      if (!raw) return null;
+      let s = String(raw).trim().toLowerCase();
+      // common fixes
+      s = s.replace(/\s+bank$/, ''); // drop trailing " bank"
+      // canonical map first (explicit beats heuristics)
+      const map = {
+        'hdfc': 'HDFC Bank',
+        'hdfc bank': 'HDFC Bank',
+        'icici': 'ICICI Bank',
+        'icici bank': 'ICICI Bank',
+        'axis': 'Axis Bank',
+        'axis bank': 'Axis Bank',
+        'idfc first': 'IDFC First Bank',
+        'idfc first bank': 'IDFC First Bank',
+        'rbl': 'RBL Bank',
+        'rbl bank': 'RBL Bank',
+        'yes': 'Yes Bank',
+        'yes bank': 'Yes Bank',
+        'hsbc': 'HSBC',
+        'hsbc bank': 'HSBC',
+        'federal': 'Federal Bank',
+        'federal bank': 'Federal Bank',
+        'kotak': 'Kotak Bank',
+        'kotak bank': 'Kotak Bank',
+        'sbi': 'SBI Bank',
+        'sbi bank': 'SBI Bank',
+        'au small': 'AU Small Finance Bank',
+        'au small bank': 'AU Small Finance Bank',
+        'bobcard ltd': 'BOBCARD Ltd',
+        'canara': 'Canara Bank',
+        'canara bank': 'Canara Bank',
+        'central bank of india': 'Central Bank Of India',
+        'mobikwik': 'Mobikwik'
+      };
+      if (map[s]) return map[s];
+
+      // heuristic title-case + append " Bank" for likely banks
+      const needsBankSuffix = /^(hdfc|icici|axis|rbl|yes|federal|kotak|sbi|idfc first|canara|central bank of india|au small)$/i.test(s);
+      // title-case
+      const titled = s.replace(/\b\w/g, c => c.toUpperCase());
+      return needsBankSuffix ? `${titled} Bank` : titled;
+    }
+
+    // Helper: normalize type into our tabs
+    function normalizeType(tRaw, m, c, mo) {
+      const t = (tRaw || '').toLowerCase();
+      const method = (m || '').toLowerCase();
+      const cat = (c || '').toLowerCase();
+      const mode = (mo || '').toLowerCase();
+
+      const isCredit = /(credit[_\s-]?card|credit)\b/.test(t);
+      const isDebit  = /(debit[_\s-]?card|debit)\b/.test(t);
+      const isNet    = /(net[_\s-]?banking|internet[_\s-]?banking)/.test(t);
+      const isUPI    = /upi/.test(t) || /upi/.test(method) || /upi/.test(cat) || /upi/.test(mode);
+      const isWallet = /wallet/.test(t) || /wallet/.test(method) || /wallet/.test(cat) || /wallet/.test(mode);
+      const isEmi    = /emi/.test(t) || /emi/.test(method) || /emi/.test(cat) || /emi/.test(mode);
+
+      if (isEmi) return 'EMI';
+      if (isCredit) return 'CreditCard';
+      if (isDebit)  return 'DebitCard';
+      if (isNet)    return 'NetBanking';
+      if (isUPI)    return 'UPI';
+      if (isWallet) return 'Wallet';
+      return 'Other';
+    }
+
+    // Pull all active offers relevant to flights (same filters you and I used in probes)
+    const offers = await col.aggregate([
+      { $match: { isExpired: { $ne: true } } },
+      { $addFields: {
+          _end:  { $ifNull: ['$validityPeriod.endDate', '$validityPeriod.to'] },
+          _cats: { $ifNull: ['$offerCategories', []] },
+          _blob: {
+            $concat: [
+              { $ifNull: ['$rawText', ''] }, ' ',
+              { $ifNull: ['$title', ''] }, ' ',
+              { $ifNull: ['$validityPeriod.raw', ''] }
+            ]
+          }
+      }},
+      { $match: {
+          $or: [
+            { _cats: { $elemMatch: { $regex: /flight/i } } },
+            { _blob: /flight|airfare|domestic flight|international flight/i }
+          ],
+          $or: [
+            { _end: null },
+            { _end: { $gte: new Date() } }
+          ]
+      }},
+      { $unwind: '$paymentMethods' },
+      { $project: {
+          type: '$paymentMethods.type',
+          method: { $ifNull: ['$paymentMethods.method', ''] },
+          category: { $ifNull: ['$paymentMethods.category', ''] },
+          mode: { $ifNull: ['$paymentMethods.mode', ''] },
+          bank: '$paymentMethods.bank'
+      }}
+    ]).toArray();
+
+    // Build sets per tab
+    const sets = {
       CreditCard: new Set(),
       DebitCard: new Set(),
-      EMI: new Set(),
       NetBanking: new Set(),
-      Wallet: new Set(),
       UPI: new Set(),
+      Wallet: new Set(),
+      EMI: new Set()
     };
 
-    const mapType = (pm) => norm(pm?.type || '');
-    for await (const doc of cursor) {
-      const pms = Array.isArray(doc.paymentMethods) ? doc.paymentMethods : [];
-      for (const pm of pms) {
-        const t = mapType(pm);
-        const labelBank = norm(pm.bank) || norm(pm.wallet) || norm(pm.method) || '';
-        if (!labelBank) continue;
+    for (const p of offers) {
+      const bankLabel = normalizeBankLabel(p.bank);
+      if (!bankLabel) continue;
+      const tab = normalizeType(p.type, p.method, p.category, p.mode);
+      if (tab === 'Other') continue;
+      sets[tab]?.add(bankLabel);
 
-        if (t === 'credit card' || t === 'credit_card' || t === 'credit') buckets.CreditCard.add(labelBank);
-        else if (t === 'debit card' || t === 'debit_card' || t === 'debit') buckets.DebitCard.add(labelBank);
-        else if (t === 'emi') buckets.EMI.add(labelBank);
-        else if (t === 'net banking' || t === 'net_banking' || t === 'internet banking') buckets.NetBanking.add(labelBank);
-        else if (t === 'wallet') buckets.Wallet.add(labelBank);
-        else if (t === 'upi') buckets.UPI.add(labelBank);
-        // Also drop into EMI if category/method mentions EMI
-        if (/emi/i.test(pm?.category || '') || /emi/i.test(pm?.method || '')) {
-          buckets.EMI.add(labelBank);
-        }
+      // If an offer is explicitly EMI AND also a credit card EMI, it should also appear in CreditCard
+      if (tab === 'EMI') {
+        // Heuristic: if the bank label ends with 'Bank' (i.e., CC EMI), include under CreditCard too
+        if (/bank$/i.test(bankLabel)) sets.CreditCard.add(bankLabel);
       }
     }
 
-    const canon = (s) => {
-      if (!s) return s;
-      return s
-        .split(' ')
-        .map((w) => w ? w[0].toUpperCase() + w.slice(1) : w)
-        .join(' ')
-        .replace(/\bHdfc\b/gi, 'HDFC')
-        .replace(/\bHsbc\b/gi, 'HSBC')
-        .replace(/\bIcici\b/gi, 'ICICI')
-        .replace(/\bIdfc\b/gi, 'IDFC')
-        .replace(/\bRbl\b/gi, 'RBL')
-        .replace(/\bSbi\b/gi, 'SBI');
-    };
-
+    // Convert to sorted arrays
     const options = Object.fromEntries(
-      Object.entries(buckets).map(([k, set]) => [k, Array.from(set).sort().map(canon)])
+      Object.entries(sets).map(([k, v]) => [k, Array.from(v).sort()])
     );
 
     res.json({ usedFallback: false, options });
   } catch (e) {
-    console.error('payment-options error', e);
+    console.error('payment-options error:', e);
+    // Fallback to whatever you had before if needed
     res.json({
       usedFallback: true,
-      options: { CreditCard: [], DebitCard: [], EMI: [], NetBanking: [], Wallet: [], UPI: ['Mobikwik'] },
+      options: {
+        CreditCard: [],
+        DebitCard: [],
+        Wallet: [],
+        UPI: [],
+        NetBanking: [],
+        EMI: []
+      }
     });
   }
 });
+
 
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
 app.post('/search', async (req, res) => {
