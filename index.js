@@ -283,7 +283,7 @@ app.post('/debug-flightapi', async (req, res) => {
 
     const r = await fetchJson(url);
     const keys = r.json ? Object.keys(r.json) : [];
-    aconst hasItin = Array.isArray(r.json?.itineraries) ? r.json.itineraries.length : 0;
+    const hasItin = Array.isArray(r.json?.itineraries) ? r.json.itineraries.length : 0;
     res.json({ ok: true, status: r.status, keys, hasItin, error: null });
   } catch (e) {
     const msg = (e?.name === 'AbortError') ? 'timeout' : (e?.message || 'error');
