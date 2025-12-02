@@ -293,20 +293,20 @@ app.post('/debug-flightapi', async (req, res) => {
 
 // Payment options from Mongo, normalized + de-duped
 // ===========================
-// /payment-options (REPLACE)
+// ===========================
+// /payment-options (FIXED)
 // ===========================
 app.get('/payment-options', async (req, res) => {
   try {
-    const db = mongoClient.db();
+    // 1) Use the correct DB explicitly
+    const db = mongoClient.db('skydeal');
     const col = db.collection('offers');
 
-    // Helper: normalize bank to a nice display label
+    // ---- helpers ----
     function normalizeBankLabel(raw) {
       if (!raw) return null;
       let s = String(raw).trim().toLowerCase();
-      // common fixes
       s = s.replace(/\s+bank$/, ''); // drop trailing " bank"
-      // canonical map first (explicit beats heuristics)
       const map = {
         'hdfc': 'HDFC Bank',
         'hdfc bank': 'HDFC Bank',
@@ -337,27 +337,23 @@ app.get('/payment-options', async (req, res) => {
         'mobikwik': 'Mobikwik'
       };
       if (map[s]) return map[s];
-
-      // heuristic title-case + append " Bank" for likely banks
       const needsBankSuffix = /^(hdfc|icici|axis|rbl|yes|federal|kotak|sbi|idfc first|canara|central bank of india|au small)$/i.test(s);
-      // title-case
       const titled = s.replace(/\b\w/g, c => c.toUpperCase());
       return needsBankSuffix ? `${titled} Bank` : titled;
     }
 
-    // Helper: normalize type into our tabs
     function normalizeType(tRaw, m, c, mo) {
       const t = (tRaw || '').toLowerCase();
       const method = (m || '').toLowerCase();
       const cat = (c || '').toLowerCase();
       const mode = (mo || '').toLowerCase();
 
+      const isEmi    = /emi/.test(t) || /emi/.test(method) || /emi/.test(cat) || /emi/.test(mode);
       const isCredit = /(credit[_\s-]?card|credit)\b/.test(t);
       const isDebit  = /(debit[_\s-]?card|debit)\b/.test(t);
       const isNet    = /(net[_\s-]?banking|internet[_\s-]?banking)/.test(t);
       const isUPI    = /upi/.test(t) || /upi/.test(method) || /upi/.test(cat) || /upi/.test(mode);
       const isWallet = /wallet/.test(t) || /wallet/.test(method) || /wallet/.test(cat) || /wallet/.test(mode);
-      const isEmi    = /emi/.test(t) || /emi/.test(method) || /emi/.test(cat) || /emi/.test(mode);
 
       if (isEmi) return 'EMI';
       if (isCredit) return 'CreditCard';
@@ -368,73 +364,87 @@ app.get('/payment-options', async (req, res) => {
       return 'Other';
     }
 
-    // Pull all active offers relevant to flights (same filters you and I used in probes)
-    const offers = await col.aggregate([
-      { $match: { isExpired: { $ne: true } } },
-      { $addFields: {
-          _end:  { $ifNull: ['$validityPeriod.endDate', '$validityPeriod.to'] },
-          _cats: { $ifNull: ['$offerCategories', []] },
-          _blob: {
-            $concat: [
-              { $ifNull: ['$rawText', ''] }, ' ',
-              { $ifNull: ['$title', ''] }, ' ',
-              { $ifNull: ['$validityPeriod.raw', ''] }
+    async function loadOptions({ flightRelevant = true } = {}) {
+      const now = new Date();
+
+      const pipeline = [
+        { $match: { isExpired: { $ne: true } } },
+        { $addFields: {
+            _end:  { $ifNull: ['$validityPeriod.endDate', '$validityPeriod.to'] },
+            _cats: { $ifNull: ['$offerCategories', []] },
+            _blob: {
+              $concat: [
+                { $ifNull: ['$rawText', ''] }, ' ',
+                { $ifNull: ['$title', ''] }, ' ',
+                { $ifNull: ['$validityPeriod.raw', ''] }
+              ]
+            }
+        }},
+        // ✅ combine flight filter + validity with $and
+        { $match: {
+            $and: [
+              flightRelevant ? {
+                $or: [
+                  { _cats: { $elemMatch: { $regex: /flight/i } } },
+                  { _blob: /flight|airfare|domestic flight|international flight/i }
+                ]
+              } : { }, // no-op if not filtering by flight relevance
+              {
+                $or: [
+                  { _end: null },
+                  { _end: { $gte: now } }
+                ]
+              }
             ]
-          }
-      }},
-      { $match: {
-          $or: [
-            { _cats: { $elemMatch: { $regex: /flight/i } } },
-            { _blob: /flight|airfare|domestic flight|international flight/i }
-          ],
-          $or: [
-            { _end: null },
-            { _end: { $gte: new Date() } }
-          ]
-      }},
-      { $unwind: '$paymentMethods' },
-      { $project: {
-          type: '$paymentMethods.type',
-          method: { $ifNull: ['$paymentMethods.method', ''] },
-          category: { $ifNull: ['$paymentMethods.category', ''] },
-          mode: { $ifNull: ['$paymentMethods.mode', ''] },
-          bank: '$paymentMethods.bank'
-      }}
-    ]).toArray();
+        }},
+        { $unwind: '$paymentMethods' },
+        { $project: {
+            type: '$paymentMethods.type',
+            method: { $ifNull: ['$paymentMethods.method', ''] },
+            category: { $ifNull: ['$paymentMethods.category', ''] },
+            mode: { $ifNull: ['$paymentMethods.mode', ''] },
+            bank: '$paymentMethods.bank'
+        }}
+      ];
 
-    // Build sets per tab
-    const sets = {
-      CreditCard: new Set(),
-      DebitCard: new Set(),
-      NetBanking: new Set(),
-      UPI: new Set(),
-      Wallet: new Set(),
-      EMI: new Set()
-    };
+      const docs = await col.aggregate(pipeline).toArray();
 
-    for (const p of offers) {
-      const bankLabel = normalizeBankLabel(p.bank);
-      if (!bankLabel) continue;
-      const tab = normalizeType(p.type, p.method, p.category, p.mode);
-      if (tab === 'Other') continue;
-      sets[tab]?.add(bankLabel);
+      const sets = {
+        CreditCard: new Set(),
+        DebitCard: new Set(),
+        NetBanking: new Set(),
+        UPI: new Set(),
+        Wallet: new Set(),
+        EMI: new Set()
+      };
 
-      // If an offer is explicitly EMI AND also a credit card EMI, it should also appear in CreditCard
-      if (tab === 'EMI') {
-        // Heuristic: if the bank label ends with 'Bank' (i.e., CC EMI), include under CreditCard too
-        if (/bank$/i.test(bankLabel)) sets.CreditCard.add(bankLabel);
+      for (const p of docs) {
+        const bank = normalizeBankLabel(p.bank);
+        if (!bank) continue;
+        const tab = normalizeType(p.type, p.method, p.category, p.mode);
+        if (tab === 'Other') continue;
+        sets[tab].add(bank);
+        if (tab === 'EMI' && /bank$/i.test(bank)) sets.CreditCard.add(bank);
       }
+
+      return Object.fromEntries(
+        Object.entries(sets).map(([k, v]) => [k, Array.from(v).sort()])
+      );
     }
 
-    // Convert to sorted arrays
-    const options = Object.fromEntries(
-      Object.entries(sets).map(([k, v]) => [k, Array.from(v).sort()])
-    );
+    // First pass: flight-relevant only
+    let options = await loadOptions({ flightRelevant: true });
+
+    // If everything is empty (unexpected), fall back to “not flight-filtered” to avoid blank UI
+    const allEmpty = Object.values(options).every(arr => arr.length === 0);
+    if (allEmpty) {
+      options = await loadOptions({ flightRelevant: false });
+      return res.json({ usedFallback: true, options });
+    }
 
     res.json({ usedFallback: false, options });
   } catch (e) {
     console.error('payment-options error:', e);
-    // Fallback to whatever you had before if needed
     res.json({
       usedFallback: true,
       options: {
@@ -448,6 +458,7 @@ app.get('/payment-options', async (req, res) => {
     });
   }
 });
+
 
 
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
