@@ -292,172 +292,113 @@ app.post('/debug-flightapi', async (req, res) => {
 });
 
 // Payment options from Mongo, normalized + de-duped
-// ===========================
-// ===========================
-// /payment-options (FIXED)
-// ===========================
+// ---- Payment options (pull distinct banks by normalized method) ----
 app.get('/payment-options', async (req, res) => {
   try {
-    // 1) Use the correct DB explicitly
-    const db = mongoClient.db('skydeal');
+    // IMPORTANT: use your actual connected Mongo client variable name here
+    // If your code uses something else (e.g. `mongo`, `dbClient`), swap it below.
+    const db = client.db('skydeal');
     const col = db.collection('offers');
 
-    // ---- helpers ----
-    function normalizeBankLabel(raw) {
-      if (!raw) return null;
-      let s = String(raw).trim().toLowerCase();
-      s = s.replace(/\s+bank$/, ''); // drop trailing " bank"
-      const map = {
-        'hdfc': 'HDFC Bank',
-        'hdfc bank': 'HDFC Bank',
-        'icici': 'ICICI Bank',
-        'icici bank': 'ICICI Bank',
-        'axis': 'Axis Bank',
-        'axis bank': 'Axis Bank',
-        'idfc first': 'IDFC First Bank',
-        'idfc first bank': 'IDFC First Bank',
-        'rbl': 'RBL Bank',
-        'rbl bank': 'RBL Bank',
-        'yes': 'Yes Bank',
-        'yes bank': 'Yes Bank',
-        'hsbc': 'HSBC',
-        'hsbc bank': 'HSBC',
-        'federal': 'Federal Bank',
-        'federal bank': 'Federal Bank',
-        'kotak': 'Kotak Bank',
-        'kotak bank': 'Kotak Bank',
-        'sbi': 'SBI Bank',
-        'sbi bank': 'SBI Bank',
-        'au small': 'AU Small Finance Bank',
-        'au small bank': 'AU Small Finance Bank',
-        'bobcard ltd': 'BOBCARD Ltd',
-        'canara': 'Canara Bank',
-        'canara bank': 'Canara Bank',
-        'central bank of india': 'Central Bank Of India',
-        'mobikwik': 'Mobikwik'
-      };
-      if (map[s]) return map[s];
-      const needsBankSuffix = /^(hdfc|icici|axis|rbl|yes|federal|kotak|sbi|idfc first|canara|central bank of india|au small)$/i.test(s);
-      const titled = s.replace(/\b\w/g, c => c.toUpperCase());
-      return needsBankSuffix ? `${titled} Bank` : titled;
-    }
-
-    function normalizeType(tRaw, m, c, mo) {
-      const t = (tRaw || '').toLowerCase();
-      const method = (m || '').toLowerCase();
-      const cat = (c || '').toLowerCase();
-      const mode = (mo || '').toLowerCase();
-
-      const isEmi    = /emi/.test(t) || /emi/.test(method) || /emi/.test(cat) || /emi/.test(mode);
-      const isCredit = /(credit[_\s-]?card|credit)\b/.test(t);
-      const isDebit  = /(debit[_\s-]?card|debit)\b/.test(t);
-      const isNet    = /(net[_\s-]?banking|internet[_\s-]?banking)/.test(t);
-      const isUPI    = /upi/.test(t) || /upi/.test(method) || /upi/.test(cat) || /upi/.test(mode);
-      const isWallet = /wallet/.test(t) || /wallet/.test(method) || /wallet/.test(cat) || /wallet/.test(mode);
-
-      if (isEmi) return 'EMI';
-      if (isCredit) return 'CreditCard';
-      if (isDebit)  return 'DebitCard';
-      if (isNet)    return 'NetBanking';
-      if (isUPI)    return 'UPI';
-      if (isWallet) return 'Wallet';
-      return 'Other';
-    }
-
-    async function loadOptions({ flightRelevant = true } = {}) {
-      const now = new Date();
-
-      const pipeline = [
-        { $match: { isExpired: { $ne: true } } },
-        { $addFields: {
-            _end:  { $ifNull: ['$validityPeriod.endDate', '$validityPeriod.to'] },
-            _cats: { $ifNull: ['$offerCategories', []] },
-            _blob: {
-              $concat: [
-                { $ifNull: ['$rawText', ''] }, ' ',
-                { $ifNull: ['$title', ''] }, ' ',
-                { $ifNull: ['$validityPeriod.raw', ''] }
-              ]
+    // Normalize + distinct by method types and banks
+    const pipeline = [
+      { $match: { isExpired: { $ne: true } } },
+      { $unwind: '$paymentMethods' },
+      {
+        $addFields: {
+          _type: {
+            $toLower: { $ifNull: ['$paymentMethods.type', ''] }
+          },
+          _method: {
+            $toLower: { $ifNull: ['$paymentMethods.method', ''] }
+          },
+          _bank: {
+            $trim: { input: { $toLower: { $ifNull: ['$paymentMethods.bank', ''] } } }
+          }
+        }
+      },
+      // Map many spellings to canonical buckets
+      {
+        $addFields: {
+          bucket: {
+            $switch: {
+              branches: [
+                { case: { $in: ['$_type', ['credit card','credit_card','credit']] }, then: 'CreditCard' },
+                { case: { $in: ['$_type', ['debit card','debit_card','debit']] },  then: 'DebitCard' },
+                { case: { $in: ['$_type', ['net banking','net_banking','internet banking','internet_banking']] }, then: 'NetBanking' },
+                { case: { $regexMatch: { input: '$_type', regex: /upi/ } },    then: 'UPI' },
+                { case: { $regexMatch: { input: '$_type', regex: /wallet/ } }, then: 'Wallet' },
+                // Detect EMI by either type or method text
+                { case: { $or: [
+                    { $regexMatch: { input: '$_type',   regex: /emi/ } },
+                    { $regexMatch: { input: '$_method', regex: /emi/ } }
+                ] }, then: 'EMI' }
+              ],
+              default: 'Other'
             }
-        }},
-        // ✅ combine flight filter + validity with $and
-        { $match: {
-            $and: [
-              flightRelevant ? {
-                $or: [
-                  { _cats: { $elemMatch: { $regex: /flight/i } } },
-                  { _blob: /flight|airfare|domestic flight|international flight/i }
-                ]
-              } : { }, // no-op if not filtering by flight relevance
-              {
-                $or: [
-                  { _end: null },
-                  { _end: { $gte: now } }
+          }
+        }
+      },
+      { $match: { _bank: { $ne: '' }, bucket: { $in: ['CreditCard','DebitCard','NetBanking','UPI','Wallet','EMI'] } } },
+      { $group: { _id: { bucket: '$bucket', bank: '$_bank' } } },
+      { $group: {
+          _id: '$_id.bucket',
+          banks: { $addToSet: '$_id.bank' }
+      }},
+      { $project: {
+          _id: 0,
+          bucket: '$_id',
+          banks: {
+            $map: {
+              input: '$banks',
+              as: 'b',
+              in: {
+                $concat: [
+                  { $toUpper: { $substrCP: ['$$b', 0, 1] } },
+                  {
+                    $replaceAll: {
+                      input: { $substrCP: ['$$b', 1, { $subtract: [{ $strLenCP: '$$b' }, 1] }] },
+                      find: /\b[a-z]/g, // will be ignored by server; we’ll do a simple title-case in JS below if you prefer
+                      replacement: ''
+                    }
+                  }
                 ]
               }
-            ]
-        }},
-        { $unwind: '$paymentMethods' },
-        { $project: {
-            type: '$paymentMethods.type',
-            method: { $ifNull: ['$paymentMethods.method', ''] },
-            category: { $ifNull: ['$paymentMethods.category', ''] },
-            mode: { $ifNull: ['$paymentMethods.mode', ''] },
-            bank: '$paymentMethods.bank'
-        }}
-      ];
+            }
+          }
+      }}
+    ];
 
-      const docs = await col.aggregate(pipeline).toArray();
+    const rows = await col.aggregate(pipeline).toArray();
 
-      const sets = {
-        CreditCard: new Set(),
-        DebitCard: new Set(),
-        NetBanking: new Set(),
-        UPI: new Set(),
-        Wallet: new Set(),
-        EMI: new Set()
-      };
+    // Build response buckets with light title-casing in JS
+    const out = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
+    const title = (s) => s.replace(/\b\w/g, c => c.toUpperCase()); // simple Title Case
 
-      for (const p of docs) {
-        const bank = normalizeBankLabel(p.bank);
-        if (!bank) continue;
-        const tab = normalizeType(p.type, p.method, p.category, p.mode);
-        if (tab === 'Other') continue;
-        sets[tab].add(bank);
-        if (tab === 'EMI' && /bank$/i.test(bank)) sets.CreditCard.add(bank);
-      }
-
-      return Object.fromEntries(
-        Object.entries(sets).map(([k, v]) => [k, Array.from(v).sort()])
-      );
+    for (const r of rows) {
+      const bucket = r.bucket;
+      const list = (r.banks || []).map(b => {
+        // normalize common short forms
+        if (b === 'hdfc') return 'HDFC Bank';
+        if (b === 'icici') return 'ICICI Bank';
+        if (b === 'axis') return 'Axis Bank';
+        if (b === 'rbl') return 'RBL Bank';
+        if (b === 'sbi') return 'SBI Bank';
+        return title(b);
+      }).sort();
+      if (out[bucket]) out[bucket] = list;
     }
 
-    // First pass: flight-relevant only
-    let options = await loadOptions({ flightRelevant: true });
-
-    // If everything is empty (unexpected), fall back to “not flight-filtered” to avoid blank UI
-    const allEmpty = Object.values(options).every(arr => arr.length === 0);
-    if (allEmpty) {
-      options = await loadOptions({ flightRelevant: false });
-      return res.json({ usedFallback: true, options });
-    }
-
-    res.json({ usedFallback: false, options });
-  } catch (e) {
-    console.error('payment-options error:', e);
-    res.json({
+    return res.json({ usedFallback: false, options: out });
+  } catch (err) {
+    console.error('payment-options error:', err);
+    return res.json({
       usedFallback: true,
-      options: {
-        CreditCard: [],
-        DebitCard: [],
-        Wallet: [],
-        UPI: [],
-        NetBanking: [],
-        EMI: []
-      }
+      options: { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] }
     });
   }
 });
+
 
 
 
