@@ -476,9 +476,35 @@ app.post('/search', async (req, res) => {
     const toCode   = (to   || '').slice(0, 3).toUpperCase();
 
     // 1) outbound
-    const urlOut = buildOnewayUrl({ from: fromCode, to: toCode, date: departureDate, adults: passengers, cabin: travelClass });
-    const outResp = await fetchJson(urlOut);
-    const outboundFlights = extractFlightsOneWay(outResp);
+    // 1) outbound  (now with single retry + logging)
+const urlOut = buildOnewayUrl({
+  from: fromCode, to: toCode, date: departureDate,
+  adults: passengers, cabin: travelClass
+});
+
+let outResp = await fetchJson(urlOut);
+let outboundFlights = extractFlightsOneWay(outResp);
+
+// retry once if non-200 or empty itineraries
+if ((outResp?.status !== 200) || !Array.isArray(outboundFlights) || outboundFlights.length === 0) {
+  await sleep(650);
+  const retry = await fetchJson(urlOut);
+
+  // log first 400 chars of body to see why FlightAPI failed
+  if (retry?.status !== 200) {
+    console.error('FlightAPI outbound non-200', {
+      status: retry.status,
+      body: String(retry.raw || '').slice(0, 400)
+    });
+  }
+
+  const again = extractFlightsOneWay(retry);
+  if (Array.isArray(again) && again.length > 0) {
+    outResp = retry;
+    outboundFlights = again;
+  }
+}
+
 
     // 2) return (with single retry if empty)
     let returnFlights = [];
