@@ -292,75 +292,91 @@ app.post('/debug-flightapi', async (req, res) => {
 });
 
 // ---- Payment options (pull distinct banks by normalized method) ----
+// ---- Payment options (distinct banks per bucket; allow multi-bucket like EMI + CreditCard) ----
 app.get('/payment-options', async (_req, res) => {
   try {
-    // use the already-connected collection handle
-    if (!offersCol) throw new Error('offers collection unavailable');
-
-    const pipeline = [
+    // pull only what's needed, then bucket in JS so one bank can live in multiple tabs
+    const pipe = [
       { $match: { isExpired: { $ne: true } } },
-      { $unwind: '$paymentMethods' },
+      { $project: { title: 1, rawText: 1, paymentMethods: 1 } },
+      { $unwind: "$paymentMethods" },
       {
-        $addFields: {
-          _type:   { $toLower: { $ifNull: ['$paymentMethods.type', ''] } },
-          _method: { $toLower: { $ifNull: ['$paymentMethods.method', ''] } },
-          _bank:   { $trim: { input: { $toLower: { $ifNull: ['$paymentMethods.bank', ''] } } } }
+        $project: {
+          title: { $ifNull: ["$title", ""] },
+          rawText: { $ifNull: ["$rawText", ""] },
+          bank: {
+            $trim: { input: { $toLower: { $ifNull: ["$paymentMethods.bank", ""] } } }
+          },
+          type:      { $toLower: { $ifNull: ["$paymentMethods.type", ""] } },
+          method:    { $toLower: { $ifNull: ["$paymentMethods.method", ""] } },
+          category:  { $toLower: { $ifNull: ["$paymentMethods.category", ""] } },
+          mode:      { $toLower: { $ifNull: ["$paymentMethods.mode", ""] } },
+          wallet:    { $toLower: { $ifNull: ["$paymentMethods.wallet", ""] } }
         }
-      },
-      {
-        $addFields: {
-          bucket: {
-            $switch: {
-              branches: [
-                { case: { $in: ['$_type', ['credit card','credit_card','credit']] }, then: 'CreditCard' },
-                { case: { $in: ['$_type', ['debit card','debit_card','debit']] },  then: 'DebitCard' },
-                { case: { $in: ['$_type', ['net banking','net_banking','internet banking','internet_banking']] }, then: 'NetBanking' },
-                { case: { $regexMatch: { input: '$_type', regex: /upi/ } },    then: 'UPI' },
-                { case: { $regexMatch: { input: '$_type', regex: /wallet/ } }, then: 'Wallet' },
-                { case: { $or: [
-                    { $regexMatch: { input: '$_type',   regex: /emi/ } },
-                    { $regexMatch: { input: '$_method', regex: /emi/ } }
-                ] }, then: 'EMI' }
-              ],
-              default: 'Other'
-            }
-          }
-        }
-      },
-      { $match: { _bank: { $ne: '' }, bucket: { $in: ['CreditCard','DebitCard','NetBanking','UPI','Wallet','EMI'] } } },
-      { $group: { _id: { bucket: '$bucket', bank: '$_bank' } } },
-      { $group: { _id: '$_id.bucket', banks: { $addToSet: '$_id.bank' } } },
-      { $project: { _id: 0, bucket: '$_id', banks: 1 } }
+      }
     ];
 
-    const rows = await offersCol.aggregate(pipeline).toArray();
+    const rows = await offersCol.aggregate(pipe).toArray();
 
-    // Title-case & bank short-name normalization in JS
-    const out = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
-    const title = (s) => String(s || '').replace(/\b\w/g, c => c.toUpperCase());
+    // helpers
+    const sets = {
+      CreditCard: new Set(), DebitCard: new Set(),
+      NetBanking: new Set(), UPI: new Set(),
+      Wallet: new Set(), EMI: new Set()
+    };
+    const normBank = (b) => {
+      const x = String(b || "").trim().toLowerCase().replace(/\s+/g, " ").replace(/ bank$/, "");
+      return x;
+    };
+    const titleCase = (s) => s.replace(/\b\w/g, c => c.toUpperCase());
+    const prettyBank = (b) => {
+      if (b === "hdfc") return "HDFC Bank";
+      if (b === "icici") return "ICICI Bank";
+      if (b === "axis") return "Axis Bank";
+      if (b === "rbl")  return "RBL Bank";
+      if (b === "sbi")  return "SBI Bank";
+      return titleCase(b) + (/\bbank$/.test(b) ? "" : "");
+    };
 
     for (const r of rows) {
-      const list = (r.banks || []).map(b => {
-        if (b === 'hdfc') return 'HDFC Bank';
-        if (b === 'icici') return 'ICICI Bank';
-        if (b === 'axis') return 'Axis Bank';
-        if (b === 'rbl')  return 'RBL Bank';
-        if (b === 'sbi')  return 'SBI Bank';
-        if (b.endsWith(' bank')) return title(b); // keep "xxx bank"
-        return title(b);
-      }).sort();
-      if (out[r.bucket]) out[r.bucket] = list;
+      const bank = normBank(r.bank);
+      if (!bank) continue;
+
+      const blob = [r.type, r.method, r.category, r.mode, r.wallet, r.title, r.rawText]
+        .filter(Boolean).join(" ");
+
+      const isCredit = /\bcredit\b/.test(blob);
+      const isDebit  = /\bdebit\b/.test(blob);
+      const isNB     = /\bnet[_ ]?banking\b|\binternet[_ ]?banking\b/.test(blob);
+      const isUPI    = /\bupi\b/.test(blob);
+      const isWallet = /\bwallet\b/.test(blob);
+      const isEMI    = /\bemi\b/.test(blob);               // <-- crucial: checks type/method/category/mode/title/raw
+
+      if (isCredit) sets.CreditCard.add(bank);
+      if (isDebit)  sets.DebitCard.add(bank);
+      if (isNB)     sets.NetBanking.add(bank);
+      if (isUPI)    sets.UPI.add(bank);
+      if (isWallet) sets.Wallet.add(bank);
+      if (isEMI)    sets.EMI.add(bank);
+    }
+
+    const out = {};
+    for (const [bucket, set] of Object.entries(sets)) {
+      out[bucket] = Array.from(set)
+        .map(prettyBank)
+        .sort((a, b) => a.localeCompare(b));
     }
 
     return res.json({ usedFallback: false, options: out });
   } catch (err) {
-    console.error('payment-options error:', err);
+    console.error("payment-options error:", err);
     return res.json({
       usedFallback: true,
       options: { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] }
     });
   }
 });
+
 
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
 app.post('/search', async (req, res) => {
