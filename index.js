@@ -156,6 +156,13 @@ function pickApplicableOffers(allOffers, selectedLabels) {
 
 function computeDiscountedPrice(base, ofr) {
   const b = Number(base) || 0;
+  // Respect minimum transaction value if present
+const minTxn = Number(ofr?.minTransactionValue);
+if (!Number.isNaN(minTxn) && minTxn > 0 && b < minTxn) {
+  // Not eligible for discount; return base unchanged
+  return Math.max(0, Math.round(b));
+}
+
 
   const pct = Number(ofr?.discountPercent);
   const flat = Number(ofr?.maxDiscountAmountFlat ?? ofr?.flatDiscountAmount);
