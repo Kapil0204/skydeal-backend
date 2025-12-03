@@ -87,17 +87,42 @@ function isOfferCurrentlyValid(ofr) {
 
 // Flight-only filter: rely on offerCategories (preferred), then keywords
 function isFlightOffer(ofr) {
+  // 1) category says flight (preferred)
   const cats = Array.isArray(ofr.offerCategories) ? ofr.offerCategories.map(norm) : [];
   if (cats.some(c => /flight/.test(c))) return true;
 
+  // 2) text signals flight
   const raw = (
     (ofr.rawText || '') + ' ' +
     (ofr.title || '') + ' ' +
     (ofr?.validityPeriod?.raw || '')
   ).toLowerCase();
+  if (/(flight|airfare|one\-way|round[-\s]?trip|pnr|domestic flight|international flight)/.test(raw)) {
+    return true;
+  }
 
-  return /(flight|airfare|domestic flight|international flight)/.test(raw);
+  // 3) metadata path/URL suggests this came from a flights page (new!)
+  const meta = [
+    ofr?.sourceUrl,
+    ofr?.sourceFileName,
+    ofr?.sourcePortal, // sometimes portals include 'flights' in path names we stored
+  ].map(s => String(s || '').toLowerCase()).join(' ');
+
+  if (
+    /\/flights?\/|flights[-_]offers|domestic[-_]?flights|international[-_]?flights|flight[-_]offers/.test(meta)
+  ) {
+    return true;
+  }
+
+  // 4) platforms sometimes hint mode; keep as soft signal only
+  const plats = Array.isArray(ofr.parsedApplicablePlatforms)
+    ? ofr.parsedApplicablePlatforms.map(norm).join(' ')
+    : '';
+  if (/flight/.test(plats)) return true;
+
+  return false;
 }
+
 
 function pickApplicableOffers(allOffers, selectedLabels) {
   if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
