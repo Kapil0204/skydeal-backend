@@ -317,90 +317,145 @@ app.post('/debug-flightapi', async (req, res) => {
 });
 
 // ---- Payment options (pull distinct banks by normalized method) ----
-// ---- Payment options (distinct banks per bucket; allow multi-bucket like EMI + CreditCard) ----
-app.get('/payment-options', async (_req, res) => {
+// Payment options from Mongo, normalized + de-duped (flight-only; not-expired)
+// ---- Payment options (distinct banks by bucket) ----
+app.get('/payment-options', async (req, res) => {
   try {
-    // pull only what's needed, then bucket in JS so one bank can live in multiple tabs
-    const pipe = [
-      { $match: { isExpired: { $ne: true } } },
-      { $project: { title: 1, rawText: 1, paymentMethods: 1 } },
-      { $unwind: "$paymentMethods" },
-      {
-        $project: {
-          title: { $ifNull: ["$title", ""] },
-          rawText: { $ifNull: ["$rawText", ""] },
-          bank: {
-            $trim: { input: { $toLower: { $ifNull: ["$paymentMethods.bank", ""] } } }
-          },
-          type:      { $toLower: { $ifNull: ["$paymentMethods.type", ""] } },
-          method:    { $toLower: { $ifNull: ["$paymentMethods.method", ""] } },
-          category:  { $toLower: { $ifNull: ["$paymentMethods.category", ""] } },
-          mode:      { $toLower: { $ifNull: ["$paymentMethods.mode", ""] } },
-          wallet:    { $toLower: { $ifNull: ["$paymentMethods.wallet", ""] } }
-        }
-      }
-    ];
-
-    const rows = await offersCol.aggregate(pipe).toArray();
-
-    // helpers
-    const sets = {
-      CreditCard: new Set(), DebitCard: new Set(),
-      NetBanking: new Set(), UPI: new Set(),
-      Wallet: new Set(), EMI: new Set()
-    };
-    const normBank = (b) => {
-      const x = String(b || "").trim().toLowerCase().replace(/\s+/g, " ").replace(/ bank$/, "");
-      return x;
-    };
-    const titleCase = (s) => s.replace(/\b\w/g, c => c.toUpperCase());
-    const prettyBank = (b) => {
-      if (b === "hdfc") return "HDFC Bank";
-      if (b === "icici") return "ICICI Bank";
-      if (b === "axis") return "Axis Bank";
-      if (b === "rbl")  return "RBL Bank";
-      if (b === "sbi")  return "SBI Bank";
-      return titleCase(b) + (/\bbank$/.test(b) ? "" : "");
-    };
-
-    for (const r of rows) {
-      const bank = normBank(r.bank);
-      if (!bank) continue;
-
-      const blob = [r.type, r.method, r.category, r.mode, r.wallet, r.title, r.rawText]
-        .filter(Boolean).join(" ");
-
-      const isCredit = /\bcredit\b/.test(blob);
-      const isDebit  = /\bdebit\b/.test(blob);
-      const isNB     = /\bnet[_ ]?banking\b|\binternet[_ ]?banking\b/.test(blob);
-      const isUPI    = /\bupi\b/.test(blob);
-      const isWallet = /\bwallet\b/.test(blob);
-      const isEMI    = /\bemi\b/.test(blob);               // <-- crucial: checks type/method/category/mode/title/raw
-
-      if (isCredit) sets.CreditCard.add(bank);
-      if (isDebit)  sets.DebitCard.add(bank);
-      if (isNB)     sets.NetBanking.add(bank);
-      if (isUPI)    sets.UPI.add(bank);
-      if (isWallet) sets.Wallet.add(bank);
-      if (isEMI)    sets.EMI.add(bank);
+    if (!offersCol) {
+      return res.json({
+        usedFallback: true,
+        options: { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] }
+      });
     }
 
-    const out = {};
-    for (const [bucket, set] of Object.entries(sets)) {
-      out[bucket] = Array.from(set)
-        .map(prettyBank)
-        .sort((a, b) => a.localeCompare(b));
+    const now = new Date();
+
+    // Helper to title-case + canonicalize common banks
+    const canon = (s) => {
+      const t = String(s || '').toLowerCase().trim();
+      if (!t) return '';
+      if (t === 'hdfc' || t === 'hdfc bank') return 'HDFC Bank';
+      if (t === 'icici' || t === 'icici bank') return 'ICICI Bank';
+      if (t === 'axis' || t === 'axis bank') return 'Axis Bank';
+      if (t === 'rbl' || t === 'rbl bank') return 'RBL Bank';
+      if (t === 'sbi' || t === 'sbi bank') return 'SBI Bank';
+      if (t === 'hsbc' || t === 'hsbc bank') return 'HSBC Bank';
+      if (t === 'federal' || t === 'federal bank') return 'Federal Bank';
+      if (t === 'yes' || t === 'yes bank') return 'Yes Bank';
+      if (t === 'idfc first' || t === 'idfc first bank') return 'IDFC First Bank';
+      if (t === 'kotak' || t === 'kotak bank') return 'Kotak Bank';
+      if (t === 'au small' || t === 'au small bank') return 'AU Small Bank';
+      // generic Title Case
+      return t.replace(/\b\w/g, c => c.toUpperCase());
+    };
+
+    // Common pre-filter: flight-relevant + not-expired
+    const prelude = [
+      { $match: { isExpired: { $ne: true } } },
+      {
+        $addFields: {
+          _end: { $ifNull: ["$validityPeriod.endDate", "$validityPeriod.to"] },
+          _cats: { $ifNull: ["$offerCategories", []] },
+          _blob: {
+            $concat: [
+              { $ifNull: ["$rawText", ""] }, " ",
+              { $ifNull: ["$title", ""] }, " ",
+              { $ifNull: ["$validityPeriod.raw", ""] }
+            ]
+          }
+        }
+      },
+      {
+        $match: {
+          $or: [
+            { _cats: { $elemMatch: { $regex: /flight/i } } },
+            { _blob: /flight|airfare|domestic flight|international flight/i }
+          ],
+          $or: [
+            { _end: null },
+            { _end: { $gte: now } }
+          ]
+        }
+      },
+      { $unwind: "$paymentMethods" },
+      {
+        $addFields: {
+          _bank: { $trim: { input: { $toLower: { $ifNull: ["$paymentMethods.bank", ""] } } } },
+          _type: { $toLower: { $ifNull: ["$paymentMethods.type", ""] } },
+          _method: { $toLower: { $ifNull: ["$paymentMethods.method", ""] } },
+          _cat: { $toLower: { $ifNull: ["$paymentMethods.category", ""] } },
+          _mode: { $toLower: { $ifNull: ["$paymentMethods.mode", ""] } }
+        }
+      },
+      { $match: { _bank: { $ne: "" } } }
+    ];
+
+    // Buckets:
+    // 1) CreditCard / DebitCard / NetBanking / UPI / Wallet: from 'type'
+    const baseBucket = [
+      {
+        $addFields: {
+          bucket: {
+            $switch: {
+              branches: [
+                { case: { $in: ["$_type", ["credit card", "credit_card", "credit"]] }, then: "CreditCard" },
+                { case: { $in: ["$_type", ["debit card", "debit_card", "debit"]] }, then: "DebitCard" },
+                { case: { $in: ["$_type", ["net banking", "net_banking", "internet banking", "internet_banking"]] }, then: "NetBanking" },
+                { case: { $regexMatch: { input: "$_type", regex: /upi/ } }, then: "UPI" },
+                { case: { $regexMatch: { input: "$_type", regex: /wallet/ } }, then: "Wallet" }
+              ],
+              default: null
+            }
+          }
+        }
+      },
+      { $match: { bucket: { $ne: null } } },
+      { $group: { _id: { bucket: "$bucket", bank: "$_bank" } } },
+      { $group: { _id: "$_id.bucket", banks: { $addToSet: "$_id.bank" } } }
+    ];
+
+    // 2) EMI: detected by any of type/method/category/mode/title/rawText containing "emi"
+    const emiBucket = [
+      {
+        $match: {
+          $or: [
+            { _type: /emi/ },
+            { _method: /emi/ },
+            { _cat: /emi/ },
+            { _mode: /emi/ },
+            { title: /\bemi\b/i },
+            { rawText: /\bemi\b/i }
+          ]
+        }
+      },
+      { $group: { _id: "EMI", banks: { $addToSet: "$_bank" } } }
+    ];
+
+    const rowsBase = await offersCol.aggregate([...prelude, ...baseBucket]).toArray();
+    const rowsEmi  = await offersCol.aggregate([...prelude, ...emiBucket]).toArray();
+
+    // Assemble final structure
+    const out = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
+
+    for (const r of rowsBase) {
+      const bucket = r._id;
+      const list = (r.banks || []).map(canon).sort();
+      if (out[bucket]) out[bucket] = list;
+    }
+    if (rowsEmi[0]?.banks?.length) {
+      out.EMI = Array.from(new Set(rowsEmi[0].banks.map(canon))).sort();
     }
 
     return res.json({ usedFallback: false, options: out });
   } catch (err) {
-    console.error("payment-options error:", err);
+    console.error('payment-options error:', err);
     return res.json({
       usedFallback: true,
       options: { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] }
     });
   }
 });
+
 
 
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
