@@ -212,6 +212,40 @@ function normalizePortalName(s) {
   // Keep original (title-cased) if unknown
   return s && s.trim() ? s.trim() : null;
 }
+// --- Compute discounted price for a given offer ---
+function computeDiscountedPrice(base, ofr) {
+  const b = Number(base) || 0;
+
+  // --- Min transaction guard (eligible only if base >= minTransactionValue)
+  const minTxn = Number(ofr?.minTransactionValue);
+  if (!Number.isNaN(minTxn) && minTxn > 0 && b < minTxn) {
+    return Math.max(0, Math.round(b)); // No discount
+  }
+
+  const pct  = Number(ofr?.discountPercent);
+  const flat = Number(ofr?.maxDiscountAmountFlat ?? ofr?.flatDiscountAmount);
+  const cap  = Number(ofr?.maxDiscountAmount);
+
+  let discount = 0;
+
+  // Flat discount
+  if (!Number.isNaN(flat) && flat > 0) {
+    discount = flat;
+  }
+  // Percentage discount
+  else if (!Number.isNaN(pct) && pct > 0) {
+    discount = (pct / 100) * b;
+  }
+
+  // Cap (max discount)
+  if (!Number.isNaN(cap) && cap > 0) {
+    discount = Math.min(discount, cap);
+  }
+
+  if (discount < 0) discount = 0;
+
+  return Math.max(0, Math.round(b - discount));
+}
 
 
 function pickApplicableOffers(allOffers, selectedLabels) {
