@@ -85,13 +85,11 @@ function isOfferCurrentlyValid(ofr) {
   return now <= endDt;
 }
 
-// Flight-only filter: rely on offerCategories (preferred), then keywords
+// Flight-only filter: rely on offerCategories (preferred), then keywords and source hints
 function isFlightOffer(ofr) {
-  // 1) category says flight (preferred)
   const cats = Array.isArray(ofr.offerCategories) ? ofr.offerCategories.map(norm) : [];
   if (cats.some(c => /flight/.test(c))) return true;
 
-  // 2) text signals flight
   const raw = (
     (ofr.rawText || '') + ' ' +
     (ofr.title || '') + ' ' +
@@ -101,20 +99,15 @@ function isFlightOffer(ofr) {
     return true;
   }
 
-  // 3) metadata path/URL suggests this came from a flights page (new!)
   const meta = [
     ofr?.sourceUrl,
     ofr?.sourceFileName,
-    ofr?.sourcePortal, // sometimes portals include 'flights' in path names we stored
+    ofr?.sourcePortal,
   ].map(s => String(s || '').toLowerCase()).join(' ');
-
-  if (
-    /\/flights?\/|flights[-_]offers|domestic[-_]?flights|international[-_]?flights|flight[-_]offers/.test(meta)
-  ) {
+  if (/\/flights?\/|flights[-_]offers|domestic[-_]?flights|international[-_]?flights|flight[-_]offers/.test(meta)) {
     return true;
   }
 
-  // 4) platforms sometimes hint mode; keep as soft signal only
   const plats = Array.isArray(ofr.parsedApplicablePlatforms)
     ? ofr.parsedApplicablePlatforms.map(norm).join(' ')
     : '';
@@ -169,7 +162,6 @@ function parseDaysSpec(spec) {
 }
 
 function isBookingDayAllowed(ofr, now = new Date()) {
-  // Try multiple common fields; treat missing as "no restriction"
   const candidates = [
     ofr?.bookingDayRule,
     ofr?.bookingDays,
@@ -182,23 +174,19 @@ function isBookingDayAllowed(ofr, now = new Date()) {
 
   if (!candidates.length) return true;
 
-  // Combine all specs (logical OR: if any spec includes today, allow)
   const today = now.getDay(); // 0..6
   for (const c of candidates) {
     const set = parseDaysSpec(c);
     if (set && set.has(today)) return true;
   }
 
-  // Last-chance: infer from raw text (loose). Example: "Valid Fri–Sun"
   const raw = (ofr?.rawText || ofr?.title || '').toLowerCase();
   const hint = raw.match(/\b(mon|tue|wed|thu|fri|sat|sun)\b(?:\s*[-–—]\s*\b(mon|tue|wed|thu|fri|sat|sun)\b)?/);
   if (hint) {
     const set = hint[2] ? new Set(expandRange(hint[1], hint[2])) : new Set([dowIdx(hint[1])]);
-    if (set.has(today)) return true;
-    return false;
+    return set.has(today);
   }
 
-  // If there were explicit fields but none matched today, disallow
   return false;
 }
 
@@ -209,11 +197,8 @@ function normalizePortalName(s) {
   if (/^emt|ease ?my ?trip$/.test(x)) return 'EaseMyTrip';
   if (/^yatra$/.test(x)) return 'Yatra';
   if (/^clear ?trip$/.test(x)) return 'Cleartrip';
-  // Keep original (title-cased) if unknown
   return s && s.trim() ? s.trim() : null;
 }
-
-
 
 function pickApplicableOffers(allOffers, selectedLabels) {
   if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
@@ -223,9 +208,8 @@ function pickApplicableOffers(allOffers, selectedLabels) {
   for (const ofr of allOffers) {
     if (!isOfferCurrentlyValid(ofr)) continue;
     if (!isFlightOffer(ofr)) continue;
-    if (!isBookingDayAllowed(ofr)) continue; // NEW: enforce booking day / DOW constraints
+    if (!isBookingDayAllowed(ofr)) continue;
 
-    // collect tags from paymentMethods + applicablePlatforms
     const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
     const tags = new Set();
     for (const pm of pms) {
@@ -246,36 +230,7 @@ function pickApplicableOffers(allOffers, selectedLabels) {
   return res;
 }
 
-    // Guard: minimum transaction (booking) amount
-  const minTxn = Number(ofr?.minTransactionValue);
-  if (!Number.isNaN(minTxn) && minTxn > 0 && b < minTxn) {
-    // Not eligible — return base unchanged (no discount)
-    return Math.max(0, Math.round(b));
-  }
-
-
-
-  const pct = Number(ofr?.discountPercent);
-  const flat = Number(ofr?.maxDiscountAmountFlat ?? ofr?.flatDiscountAmount);
-  const cap  = Number(ofr?.maxDiscountAmount);
-
-  let discount = 0;
-
-  if (!Number.isNaN(flat) && flat > 0) {
-    discount = flat;
-  } else if (!Number.isNaN(pct) && pct > 0) {
-    discount = (pct / 100) * b;
-  }
-
-  if (!Number.isNaN(cap) && cap > 0) {
-    discount = Math.min(discount, cap);
-  }
-  if (discount < 0) discount = 0;
-  return Math.max(0, Math.round(b - discount));
-}
-
-function applyOffersToPortals(base, applicableOffers) {
-  // === PRICE MATH =============================================================
+// === PRICE MATH =============================================================
 function computeDiscountedPrice(base, ofr) {
   const b = Number(base) || 0;
 
@@ -300,13 +255,14 @@ function computeDiscountedPrice(base, ofr) {
   return Math.max(0, Math.round(b - discount));
 }
 
+function applyOffersToPortals(base, applicableOffers) {
   const portals = buildDefaultPortalPrices(base);
 
   if (!applicableOffers || applicableOffers.length === 0) {
     return { portalPrices: portals, bestDeal: null };
   }
 
-    for (const ofr of applicableOffers) {
+  for (const ofr of applicableOffers) {
     // Normalize any platform targeting to our 5 known portals
     let targeted = null;
     if (Array.isArray(ofr.parsedApplicablePlatforms) && ofr.parsedApplicablePlatforms.length > 0) {
@@ -335,7 +291,6 @@ function computeDiscountedPrice(base, ofr) {
       }
     }
   }
-
 
   let best = portals[0];
   for (const p of portals) {
@@ -447,9 +402,7 @@ app.post('/debug-flightapi', async (req, res) => {
   }
 });
 
-// ---- Payment options (pull distinct banks by normalized method) ----
-// Payment options from Mongo, normalized + de-duped (flight-only; not-expired)
-// ---- Payment options (distinct banks by bucket) ----
+// ---- Payment options (distinct banks by bucket; flight-only; not-expired) ----
 app.get('/payment-options', async (req, res) => {
   try {
     if (!offersCol) {
@@ -461,7 +414,6 @@ app.get('/payment-options', async (req, res) => {
 
     const now = new Date();
 
-    // Helper to title-case + canonicalize common banks
     const canon = (s) => {
       const t = String(s || '').toLowerCase().trim();
       if (!t) return '';
@@ -476,11 +428,9 @@ app.get('/payment-options', async (req, res) => {
       if (t === 'idfc first' || t === 'idfc first bank') return 'IDFC First Bank';
       if (t === 'kotak' || t === 'kotak bank') return 'Kotak Bank';
       if (t === 'au small' || t === 'au small bank') return 'AU Small Bank';
-      // generic Title Case
       return t.replace(/\b\w/g, c => c.toUpperCase());
     };
 
-    // Common pre-filter: flight-relevant + not-expired
     const prelude = [
       { $match: { isExpired: { $ne: true } } },
       {
@@ -521,8 +471,6 @@ app.get('/payment-options', async (req, res) => {
       { $match: { _bank: { $ne: "" } } }
     ];
 
-    // Buckets:
-    // 1) CreditCard / DebitCard / NetBanking / UPI / Wallet: from 'type'
     const baseBucket = [
       {
         $addFields: {
@@ -545,7 +493,6 @@ app.get('/payment-options', async (req, res) => {
       { $group: { _id: "$_id.bucket", banks: { $addToSet: "$_id.bank" } } }
     ];
 
-    // 2) EMI: detected by any of type/method/category/mode/title/rawText containing "emi"
     const emiBucket = [
       {
         $match: {
@@ -565,7 +512,6 @@ app.get('/payment-options', async (req, res) => {
     const rowsBase = await offersCol.aggregate([...prelude, ...baseBucket]).toArray();
     const rowsEmi  = await offersCol.aggregate([...prelude, ...emiBucket]).toArray();
 
-    // Assemble final structure
     const out = { CreditCard: [], DebitCard: [], Wallet: [], UPI: [], NetBanking: [], EMI: [] };
 
     for (const r of rowsBase) {
@@ -587,8 +533,6 @@ app.get('/payment-options', async (req, res) => {
   }
 });
 
-
-
 // Main search: one-way always; round-trip = 2 one-way calls (with retry on return leg)
 app.post('/search', async (req, res) => {
   try {
@@ -606,52 +550,46 @@ app.post('/search', async (req, res) => {
     const fromCode = (from || '').slice(0, 3).toUpperCase();
     const toCode   = (to   || '').slice(0, 3).toUpperCase();
 
-    // 1) outbound
-    // 1) outbound  (now with single retry + logging)
-const urlOut = buildOnewayUrl({
-  from: fromCode, to: toCode, date: departureDate,
-  adults: passengers, cabin: travelClass
-});
-
-let outResp = await fetchJson(urlOut);
-let outboundFlights = extractFlightsOneWay(outResp);
-
-// retry once if non-200 or empty itineraries
-if ((outResp?.status !== 200) || !Array.isArray(outboundFlights) || outboundFlights.length === 0) {
-  await sleep(650);
-  const retry = await fetchJson(urlOut);
-
-  // log first 400 chars of body to see why FlightAPI failed
-  if (retry?.status !== 200) {
-    console.error('FlightAPI outbound non-200', {
-      status: retry.status,
-      body: String(retry.raw || '').slice(0, 400)
+    // 1) outbound (single retry + logging)
+    const urlOut = buildOnewayUrl({
+      from: fromCode, to: toCode, date: departureDate,
+      adults: passengers, cabin: travelClass
     });
-  }
 
-  const again = extractFlightsOneWay(retry);
-  if (Array.isArray(again) && again.length > 0) {
-    outResp = retry;
-    outboundFlights = again;
-  }
-}
+    let outResp = await fetchJson(urlOut);
+    let outboundFlights = extractFlightsOneWay(outResp);
 
+    if ((outResp?.status !== 200) || !Array.isArray(outboundFlights) || outboundFlights.length === 0) {
+      await sleep(650);
+      const retry = await fetchJson(urlOut);
+
+      if (retry?.status !== 200) {
+        console.error('FlightAPI outbound non-200', {
+          status: retry.status,
+          body: String(retry.raw || '').slice(0, 400)
+        });
+      }
+
+      const again = extractFlightsOneWay(retry);
+      if (Array.isArray(again) && again.length > 0) {
+        outResp = retry;
+        outboundFlights = again;
+      }
+    }
 
     // 2) return (with single retry if empty)
     let returnFlights = [];
     let retResp = null;
-    let retStatus = null;
+
     if (tripType !== 'one-way' && returnDate) {
       const urlRet = buildOnewayUrl({ from: toCode, to: fromCode, date: returnDate, adults: passengers, cabin: travelClass });
-      await sleep(220); // brief gap for throttling
+      await sleep(220);
       retResp = await fetchJson(urlRet);
-      retStatus = retResp.status;
       returnFlights = extractFlightsOneWay(retResp);
 
-      if ((!Array.isArray(returnFlights) || returnFlights.length === 0) || retStatus !== 200) {
+      if ((!Array.isArray(returnFlights) || returnFlights.length === 0) || retResp?.status !== 200) {
         await sleep(650);
         const retry = await fetchJson(urlRet);
-        retStatus = retry.status;
         const again = extractFlightsOneWay(retry);
         if (Array.isArray(again) && again.length > 0) {
           returnFlights = again;
@@ -677,7 +615,6 @@ if ((outResp?.status !== 200) || !Array.isArray(outboundFlights) || outboundFlig
     const outboundDecorated = outboundFlights.map(decorate);
     const returnDecorated  = returnFlights.map(decorate);
 
-    // meta debug counts
     const meta = {
       source: 'flightapi',
       outStatus: outResp?.status ?? null,
