@@ -123,6 +123,96 @@ function isFlightOffer(ofr) {
   return false;
 }
 
+// --- booking day/dow helpers + platform normalization ---
+const DOW = ['sun','mon','tue','wed','thu','fri','sat'];
+
+function dowIdx(s) {
+  if (!s) return null;
+  const m = String(s).toLowerCase().slice(0,3);
+  return DOW.indexOf(m); // -1 if not found
+}
+
+function expandRange(a, b) {
+  // a..b over week, supports wrap (e.g., fri-sun)
+  const ai = dowIdx(a), bi = dowIdx(b);
+  if (ai < 0 || bi < 0) return [];
+  const out = [];
+  let i = ai;
+  for (;;) {
+    out.push(i);
+    if (i === bi) break;
+    i = (i + 1) % 7;
+  }
+  return out;
+}
+
+function parseDaysSpec(spec) {
+  // Accepts strings like "Mon-Fri", "Fri–Sun", "Sat,Sun", "Mon, Wed, Fri"
+  // or arrays of strings. Returns Set of allowed day indexes {0..6}
+  if (!spec) return null;
+  const add = (acc, i) => { if (i >= 0) acc.add(i); };
+
+  const set = new Set();
+  const str = Array.isArray(spec) ? spec.join(',') : String(spec);
+  const cleaned = str.replace(/[–—]/g, '-'); // normalize en-dash/em-dash to '-'
+  for (const token of cleaned.split(/[,/|]+/)) {
+    const t = token.trim();
+    if (!t) continue;
+    const m = t.match(/\b([A-Za-z]{3})\s*-\s*([A-Za-z]{3})\b/);
+    if (m) {
+      for (const i of expandRange(m[1], m[2])) add(set, i);
+    } else {
+      add(set, dowIdx(t));
+    }
+  }
+  return set.size ? set : null;
+}
+
+function isBookingDayAllowed(ofr, now = new Date()) {
+  // Try multiple common fields; treat missing as "no restriction"
+  const candidates = [
+    ofr?.bookingDayRule,
+    ofr?.bookingDays,
+    ofr?.validDays,
+    ofr?.validBookingDays,
+    ofr?.applicableDays,
+    ofr?.dayOfWeek,
+    ofr?.daysOfWeek,
+  ].filter(Boolean);
+
+  if (!candidates.length) return true;
+
+  // Combine all specs (logical OR: if any spec includes today, allow)
+  const today = now.getDay(); // 0..6
+  for (const c of candidates) {
+    const set = parseDaysSpec(c);
+    if (set && set.has(today)) return true;
+  }
+
+  // Last-chance: infer from raw text (loose). Example: "Valid Fri–Sun"
+  const raw = (ofr?.rawText || ofr?.title || '').toLowerCase();
+  const hint = raw.match(/\b(mon|tue|wed|thu|fri|sat|sun)\b(?:\s*[-–—]\s*\b(mon|tue|wed|thu|fri|sat|sun)\b)?/);
+  if (hint) {
+    const set = hint[2] ? new Set(expandRange(hint[1], hint[2])) : new Set([dowIdx(hint[1])]);
+    if (set.has(today)) return true;
+    return false;
+  }
+
+  // If there were explicit fields but none matched today, disallow
+  return false;
+}
+
+function normalizePortalName(s) {
+  const x = norm(s);
+  if (/^mmt|make ?my ?trip$/.test(x)) return 'MakeMyTrip';
+  if (/^goibibo$/.test(x)) return 'Goibibo';
+  if (/^emt|ease ?my ?trip$/.test(x)) return 'EaseMyTrip';
+  if (/^yatra$/.test(x)) return 'Yatra';
+  if (/^clear ?trip$/.test(x)) return 'Cleartrip';
+  // Keep original (title-cased) if unknown
+  return s && s.trim() ? s.trim() : null;
+}
+
 
 function pickApplicableOffers(allOffers, selectedLabels) {
   if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
@@ -132,10 +222,11 @@ function pickApplicableOffers(allOffers, selectedLabels) {
   for (const ofr of allOffers) {
     if (!isOfferCurrentlyValid(ofr)) continue;
     if (!isFlightOffer(ofr)) continue;
+    if (!isBookingDayAllowed(ofr)) continue; // NEW: enforce booking day / DOW constraints
 
+    // collect tags from paymentMethods + applicablePlatforms
     const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
     const tags = new Set();
-
     for (const pm of pms) {
       ['bank', 'type', 'method', 'category', 'mode', 'wallet'].forEach((k) => {
         if (pm?.[k]) tags.add(norm(pm[k]));
@@ -154,14 +245,13 @@ function pickApplicableOffers(allOffers, selectedLabels) {
   return res;
 }
 
-function computeDiscountedPrice(base, ofr) {
-  const b = Number(base) || 0;
-  // Respect minimum transaction value if present
-const minTxn = Number(ofr?.minTransactionValue);
-if (!Number.isNaN(minTxn) && minTxn > 0 && b < minTxn) {
-  // Not eligible for discount; return base unchanged
-  return Math.max(0, Math.round(b));
-}
+    // Guard: minimum transaction (booking) amount
+  const minTxn = Number(ofr?.minTransactionValue);
+  if (!Number.isNaN(minTxn) && minTxn > 0 && b < minTxn) {
+    // Not eligible — return base unchanged (no discount)
+    return Math.max(0, Math.round(b));
+  }
+
 
 
   const pct = Number(ofr?.discountPercent);
@@ -190,21 +280,28 @@ function applyOffersToPortals(base, applicableOffers) {
     return { portalPrices: portals, bestDeal: null };
   }
 
-  for (const ofr of applicableOffers) {
-    const targetedPortals =
-      (Array.isArray(ofr.parsedApplicablePlatforms) && ofr.parsedApplicablePlatforms.length > 0)
-        ? ofr.parsedApplicablePlatforms
-        : null;
+    for (const ofr of applicableOffers) {
+    // Normalize any platform targeting to our 5 known portals
+    let targeted = null;
+    if (Array.isArray(ofr.parsedApplicablePlatforms) && ofr.parsedApplicablePlatforms.length > 0) {
+      const set = new Set();
+      for (const p of ofr.parsedApplicablePlatforms) {
+        const normName = normalizePortalName(p);
+        if (normName) set.add(normName);
+      }
+      if (set.size) targeted = set;
+    }
 
-    if (targetedPortals) {
+    if (targeted) {
       for (const p of portals) {
-        if (targetedPortals.map(norm).includes(norm(p.portal))) {
+        if (targeted.has(p.portal)) {
           const discounted = computeDiscountedPrice(p.basePrice, ofr) + MARKUP;
           p.finalPrice = Math.min(p.finalPrice, discounted);
           p.source = 'carrier+offer+markup';
         }
       }
     } else {
+      // No specific platform targeting — apply to all portals
       for (const p of portals) {
         const discounted = computeDiscountedPrice(p.basePrice, ofr) + MARKUP;
         p.finalPrice = Math.min(p.finalPrice, discounted);
@@ -212,6 +309,7 @@ function applyOffersToPortals(base, applicableOffers) {
       }
     }
   }
+
 
   let best = portals[0];
   for (const p of portals) {
