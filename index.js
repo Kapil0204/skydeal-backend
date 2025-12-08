@@ -1,4 +1,4 @@
-// index.js — SkyDeal backend (with return-leg retry + flight-only offer filtering + meta counts)
+// index.js — SkyDeal backend (with return-leg retry + flight-only offer filtering + meta counts + TRAVEL DATE VALIDITY)
 // Node >=18 (uses global fetch). ESM module.
 import express from 'express';
 import cors from 'cors';
@@ -200,7 +200,78 @@ function normalizePortalName(s) {
   return s && s.trim() ? s.trim() : null;
 }
 
-function pickApplicableOffers(allOffers, selectedLabels) {
+/* -----------------------------
+   TRAVEL DATE VALIDITY (NEW)
+------------------------------*/
+
+// Parse 'YYYY-MM-DD' (or any ISO) as a Date at 00:00:00Z reliably.
+function parseISODateOnly(s) {
+  if (!s) return null;
+  // If already Date, return a date-only clone.
+  if (s instanceof Date) return new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()));
+  const str = String(s).trim();
+  if (!str) return null;
+  // If 'YYYY-MM-DD', pin to UTC midnight
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+    return new Date(Date.UTC(y, mo, d));
+  }
+  // Fallback: new Date(...) then zero time (UTC) for comparison
+  const d = new Date(str);
+  if (isNaN(d.getTime())) return null;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+// Pull a travel window from multiple possible shapes.
+function extractTravelWindow(ofr) {
+  // Preferred: ofr.travelPeriod
+  let tp = ofr?.travelPeriod || ofr?.validityPeriod?.travel || null;
+
+  // Allow nested alias e.g. validityPeriod.travelPeriod
+  if (!tp && ofr?.validityPeriod?.travelPeriod) tp = ofr.validityPeriod.travelPeriod;
+
+  if (!tp || typeof tp !== 'object') return { start: null, end: null };
+
+  const start =
+    tp.startDate || tp.from || tp.start || null;
+  const end =
+    tp.endDate || tp.to || tp.end || null;
+
+  return {
+    start: parseISODateOnly(start),
+    end: parseISODateOnly(end)
+  };
+}
+
+// true if dep (and ret if provided) lie within [start,end] inclusive (when present).
+function isTravelDateAllowed(ofr, depDateObj, retDateObj) {
+  const { start, end } = extractTravelWindow(ofr);
+
+  // If no travel window on the offer, it's valid for any travel date.
+  if (!start && !end) return true;
+
+  const inRange = (d) => {
+    if (!d) return true; // no date to check (one-way dep-only case handled separately)
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  };
+
+  // Require departure inside window
+  if (!inRange(depDateObj)) return false;
+
+  // If round trip, also require return inside window
+  if (retDateObj && !inRange(retDateObj)) return false;
+
+  return true;
+}
+
+/* -----------------------------
+   END TRAVEL DATE VALIDITY
+------------------------------*/
+
+function pickApplicableOffers(allOffers, selectedLabels, depDateObj, retDateObj) {
   if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) return [];
   const wanted = new Set(selectedLabels.map(norm));
 
@@ -209,6 +280,9 @@ function pickApplicableOffers(allOffers, selectedLabels) {
     if (!isOfferCurrentlyValid(ofr)) continue;
     if (!isFlightOffer(ofr)) continue;
     if (!isBookingDayAllowed(ofr)) continue;
+
+    // NEW: travel-date validity check
+    if (!isTravelDateAllowed(ofr, depDateObj, retDateObj)) continue;
 
     const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
     const tags = new Set();
@@ -550,6 +624,10 @@ app.post('/search', async (req, res) => {
     const fromCode = (from || '').slice(0, 3).toUpperCase();
     const toCode   = (to   || '').slice(0, 3).toUpperCase();
 
+    // Parse travel dates once for offer validity checks (NEW)
+    const depDateObj = parseISODateOnly(departureDate);
+    const retDateObj = returnDate ? parseISODateOnly(returnDate) : null;
+
     // 1) outbound (single retry + logging)
     const urlOut = buildOnewayUrl({
       from: fromCode, to: toCode, date: departureDate,
@@ -598,11 +676,11 @@ app.post('/search', async (req, res) => {
       }
     }
 
-    // 3) offers (active + flight-only)
+    // 3) offers (active + flight-only + TRAVEL-DATE-VALID)
     let applicable = [];
     if (Array.isArray(paymentMethods) && paymentMethods.length > 0 && offersCol) {
       const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
-      applicable = pickApplicableOffers(allActive, paymentMethods);
+      applicable = pickApplicableOffers(allActive, paymentMethods, depDateObj, retDateObj);
     }
 
     // 4) decorate with portal prices & bestDeal (always keep carrier base)
