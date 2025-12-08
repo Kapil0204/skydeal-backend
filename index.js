@@ -629,7 +629,7 @@ app.get('/payment-options', async (req, res) => {
       if (t === 'yes' || t === 'yes bank') return 'Yes Bank';
       if (t === 'idfc first' || t === 'idfc first bank') return 'IDFC First Bank';
       if (t === 'kotak' || t === 'kotak bank') return 'Kotak Bank';
-      if (t === 'au small' || t === 'au small bank') return 'AU Small Bank';
+      if (t === 'au small' || t === 'au small bank' || t === 'au small finance bank') return 'AU Small Finance Bank';
       return t.replace(/\b\w/g, c => c.toUpperCase());
     };
 
