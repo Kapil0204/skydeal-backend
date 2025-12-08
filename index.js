@@ -39,6 +39,53 @@ await connectDB().catch((e) => {
 });
 
 // ---------- helpers ----------
+// --- Booking window helpers (Milestone 2) ---
+function toDateSafe(v) {
+  if (!v) return null;
+  // Accept ISO or YYYY-MM-DD; ignore invalids
+  const d = new Date(String(v));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function pickFirstDate(obj, keys) {
+  if (!obj) return null;
+  for (const k of keys) {
+    const v = obj[k];
+    const d = toDateSafe(v);
+    if (d) return d;
+  }
+  return null;
+}
+
+/**
+ * Booking window checks current booking time ("now") against offer's booking window.
+ * We treat the "booking window" as:
+ * - validityPeriod.booking.{startDate|from|start}, validityPeriod.booking.{endDate|to|end}
+ * - or fall back to validityPeriod.{startDate|from} ... validityPeriod.{endDate|to}
+ * Rules:
+ * - If start exists, require now >= start
+ * - If end exists, require now <= end
+ * - If neither exists, treat as open (valid)
+ */
+function isWithinBookingWindow(ofr, now = new Date()) {
+  // Allow nested booking object first
+  const booking = ofr?.validityPeriod?.booking || null;
+
+  const start =
+    pickFirstDate(booking, ['startDate','from','start']) ||
+    pickFirstDate(ofr?.validityPeriod, ['startDate','from']) ||
+    null;
+
+  const end =
+    pickFirstDate(booking, ['endDate','to','end']) ||
+    pickFirstDate(ofr?.validityPeriod, ['endDate','to']) ||
+    null;
+
+  if (start && now < start) return false;
+  if (end && now > end) return false;
+  return true;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function toTime(t) {
@@ -280,6 +327,9 @@ function pickApplicableOffers(allOffers, selectedLabels, depDateObj, retDateObj)
     if (!isOfferCurrentlyValid(ofr)) continue;
     if (!isFlightOffer(ofr)) continue;
     if (!isBookingDayAllowed(ofr)) continue;
+        // Milestone 2: enforce booking window validity (now must be within start/end if provided)
+    if (!isWithinBookingWindow(ofr)) continue;
+
 
     // NEW: travel-date validity check
     if (!isTravelDateAllowed(ofr, depDateObj, retDateObj)) continue;
