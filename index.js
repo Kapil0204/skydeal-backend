@@ -85,6 +85,84 @@ function isWithinBookingWindow(ofr, now = new Date()) {
   if (end && now > end) return false;
   return true;
 }
+// --- Pick offers with reasons (Milestone 3) ---
+function pickApplicableOffersWithReasons(allOffers, selectedLabels, now = new Date()) {
+  const debug = {
+    checked: 0,
+    applied: 0,
+    skipped: { expired: 0, notFlight: 0, bookingDay: 0, bookingWindow: 0, paymentMismatch: 0 },
+    examples: { applied: [], expired: [], notFlight: [], bookingDay: [], bookingWindow: [], paymentMismatch: [] }
+  };
+
+  if (!Array.isArray(selectedLabels) || selectedLabels.length === 0) {
+    return { list: [], debug };
+  }
+  const wanted = new Set(selectedLabels.map(norm));
+  const res = [];
+
+  for (const ofr of (allOffers || [])) {
+    debug.checked++;
+
+    // 1) expired / global validity (endDate only)
+    if (!isOfferCurrentlyValid(ofr)) {
+      debug.skipped.expired++; if (debug.examples.expired.length < 5) debug.examples.expired.push(ofr.title || ofr._id);
+      continue;
+    }
+
+    // 2) flight-only
+    if (!isFlightOffer(ofr)) {
+      debug.skipped.notFlight++; if (debug.examples.notFlight.length < 5) debug.examples.notFlight.push(ofr.title || ofr._id);
+      continue;
+    }
+
+    // 3) day-of-week / booking day
+    if (!isBookingDayAllowed(ofr, now)) {
+      debug.skipped.bookingDay++; if (debug.examples.bookingDay.length < 5) debug.examples.bookingDay.push(ofr.title || ofr._id);
+      continue;
+    }
+
+    // 4) booking window (start/end)
+    if (!isWithinBookingWindow(ofr, now)) {
+      debug.skipped.bookingWindow++; if (debug.examples.bookingWindow.length < 5) debug.examples.bookingWindow.push(ofr.title || ofr._id);
+      continue;
+    }
+
+    // 5) payment/platform matching
+    const pms = Array.isArray(ofr.paymentMethods) ? ofr.paymentMethods : [];
+    const tags = new Set();
+    for (const pm of pms) {
+      ['bank', 'type', 'method', 'category', 'mode', 'wallet'].forEach((k) => {
+        if (pm?.[k]) tags.add(norm(pm[k]));
+      });
+    }
+    if (Array.isArray(ofr.parsedApplicablePlatforms)) {
+      for (const p of ofr.parsedApplicablePlatforms) tags.add(norm(p));
+    }
+
+    let matchedLabel = null;
+    for (const w of wanted) {
+      if (tags.has(w)) { matchedLabel = w; break; }
+    }
+    if (!matchedLabel) {
+      debug.skipped.paymentMismatch++; if (debug.examples.paymentMismatch.length < 5) debug.examples.paymentMismatch.push(ofr.title || ofr._id);
+      continue;
+    }
+
+    // mark as eligible + annotate minimal reason
+    const annotated = { ...ofr, __appliedReason: { matchedLabel } };
+    res.push(annotated);
+    debug.applied++; if (debug.examples.applied.length < 5) debug.examples.applied.push(ofr.title || ofr._id);
+  }
+
+  return { list: res, debug };
+}
+
+// Allow QA to simulate "now" via /search?now=YYYY-MM-DD
+function parseNowQuery(q) {
+  if (!q) return null;
+  const d = new Date(String(q));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -666,6 +744,10 @@ app.post('/search', async (req, res) => {
       tripType = 'round-trip',
       paymentMethods = [],
     } = req.body || {};
+        // Milestone 3: allow ?now=YYYY-MM-DD to simulate booking date for QA
+    const nowOverride = parseNowQuery(req.query?.now);
+    const nowForChecks = nowOverride || new Date();
+
 
     if (!FLIGHTAPI_KEY) {
       return res.json({ outboundFlights: [], returnFlights: [], meta: { source: 'flightapi', reason: 'no-key' } });
@@ -727,11 +809,15 @@ app.post('/search', async (req, res) => {
     }
 
     // 3) offers (active + flight-only + TRAVEL-DATE-VALID)
-    let applicable = [];
+        let applicable = [];
+    let offerDebug = { checked: 0, applied: 0, skipped: {}, examples: {} };
     if (Array.isArray(paymentMethods) && paymentMethods.length > 0 && offersCol) {
       const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
-      applicable = pickApplicableOffers(allActive, paymentMethods, depDateObj, retDateObj);
+      const out = pickApplicableOffersWithReasons(allActive, paymentMethods, nowForChecks);
+      applicable = out.list;
+      offerDebug = out.debug;
     }
+
 
     // 4) decorate with portal prices & bestDeal (always keep carrier base)
     function decorate(f) {
@@ -749,6 +835,8 @@ app.post('/search', async (req, res) => {
       outCount: Array.isArray(outboundFlights) ? outboundFlights.length : 0,
       retStatus: retResp?.status ?? null,
       retCount: Array.isArray(returnFlights) ? returnFlights.length : 0,
+      offerDebug,
+  nowUsed: nowForChecks.toISOString(),
     };
 
     return res.json({
