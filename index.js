@@ -12,6 +12,40 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+// ---- CORS & preflight (place near top) ----
+import cors from 'cors';
+import express from 'express';
+
+const app = express();
+
+const ALLOW = [
+  /\.vercel\.app$/,                    // Vercel preview/prod
+  /^http:\/\/localhost(:\d+)?$/,       // local dev
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // curl/postman
+    try {
+      const ok = ALLOW.some(rx => rx.test(origin));
+      return cb(ok ? null : new Error('CORS'), ok);
+    } catch {
+      return cb(new Error('CORS'), false);
+    }
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+  credentials: false,
+  maxAge: 86400,
+}));
+app.options('*', cors());
+
+// keep existing body parsing
+app.use(express.json());
+
+// Health endpoint (non-breaking; helpful for monitoring)
+app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+
 
 const PORT = process.env.PORT || 10000;
 const MONGO_URI = process.env.MONGO_URI;
