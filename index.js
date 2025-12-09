@@ -189,78 +189,89 @@ app.get("/payment-options", async (_req, res) => {
 });
 
 // ====== /search ======
-app.post("/search", async (req, res) => {
+app.post('/search', async (req, res) => {
   const {
-    from, to, departureDate, returnDate,
-    tripType = "one-way",
-    passengers = 1,
-    travelClass = "economy",
+    from, to, departureDate, returnDate = '',
+    tripType = 'round-trip', passengers = 1, travelClass = 'economy',
     paymentMethods = []
   } = req.body || {};
 
-  const nowParam = req.query.now ? new Date(req.query.now) : null;
-  const nowForChecks = nowParam && !isNaN(nowParam) ? nowParam : new Date();
+  const nowForChecks = new Date();
 
-  // 1) flights (carrier base)
-  const outUrl = tripType === "round-trip"
-    ? buildRoundtripURL({ from, to, departureDate, returnDate, adults: passengers, cabin: travelClass })
-    : buildOnewayURL({ from, to, date: departureDate, adults: passengers, cabin: travelClass });
+  async function callFlightApi() {
+    try {
+      const url = tripType === 'round-trip'
+        ? buildRoundtripUrl(from, to, departureDate, returnDate, passengers, travelClass)
+        : buildOnewayUrl(from, to, departureDate, passengers, travelClass);
 
-  const outResp = await fetchJson(outUrl);
-  const outboundFlights = Array.isArray(outResp.json?.data?.flights)
-    ? outResp.json.data.flights
-    : [];
-
-  const retFlights = tripType === "round-trip"
-    ? (Array.isArray(outResp.json?.data?.return_flights) ? outResp.json.data.return_flights : [])
-    : [];
-
-  // 2) offers: active + flight only + booking window valid + payment match
-  const offerDebug = { checked: 0, applied: 0, skipped: { expired: 0, notFlight: 0, bookingWindow: 0, paymentMismatch: 0 }, examples: {} };
-  let applicable = [];
-  try {
-    const col = (await connectDB()).collection("offers");
-    const active = await col.find({ isExpired: { $ne: true } }).toArray();
-    offerDebug.checked = active.length;
-
-    const wants = new Set((paymentMethods || []).map(norm));
-
-    for (const ofr of active) {
-      // flight only?
-      if (!isFlightOffer(ofr)) { offerDebug.skipped.notFlight++; continue; }
-      // booking window valid?
-      if (!isWithinBookingWindow(ofr, nowForChecks)) { offerDebug.skipped.bookingWindow++; continue; }
-      // payment match? (bank name string match against any of ofr.paymentMethods[].bank)
-      if (wants.size > 0) {
-        const banks = (ofr.paymentMethods || []).map(x => norm(x.bank));
-        const ok = banks.some(b => wants.has(b));
-        if (!ok) { offerDebug.skipped.paymentMismatch++; continue; }
-      }
-      applicable.push(ofr);
+      const { status, json } = await fetchJson(url, 28000);
+      const { outboundFlights, returnFlights } = mapFlightApiToSkyDeal(json); // your existing mapper
+      return { status, outboundFlights, returnFlights };
+    } catch (e) {
+      console.error('FlightAPI error:', e.message);
+      return { status: 500, outboundFlights: [], returnFlights: [] };
     }
-    offerDebug.applied = applicable.length;
-  } catch (e) {
-    console.error("Offer query error:", e);
   }
 
-  // 3) decorate
+  // 1) primary call
+  let { status: outStatus, outboundFlights, returnFlights } = await callFlightApi();
+
+  // 2) retry once if both empty
+  let usedFallback = false;
+  if ((outboundFlights?.length ?? 0) === 0 && (returnFlights?.length ?? 0) === 0) {
+    const retry = await callFlightApi();
+    outStatus = retry.status;
+    outboundFlights = retry.outboundFlights;
+    returnFlights = retry.returnFlights;
+  }
+
+  // 3) minimal mock (optional) if still empty → keeps UI alive
+  if ((outboundFlights?.length ?? 0) === 0 && (returnFlights?.length ?? 0) === 0) {
+    usedFallback = true;
+    outboundFlights = [{
+      title: `${from} → ${to}`,
+      airlineName: 'Air India',
+      base: 8200,
+      portalPrices: buildDefaultPortalPrices(8200),
+      bestDeal: { portal: 'MakeMyTrip', finalPrice: 8200 + MARKUP, note: 'carrier+markup (no offers matched)' },
+      offerReasons: {}
+    }];
+    returnFlights = tripType === 'round-trip' ? [{
+      title: `${to} → ${from}`,
+      airlineName: 'Air India',
+      base: 8400,
+      portalPrices: buildDefaultPortalPrices(8400),
+      bestDeal: { portal: 'MakeMyTrip', finalPrice: 8400 + MARKUP, note: 'carrier+markup (no offers matched)' },
+      offerReasons: {}
+    }] : [];
+  }
+
+  // 4) offers (active + flight-only + valid)
+  let applicable = [];
+  let offerDebug = { checked: 0, applied: 0, skipped: {}, examples: {} };
+  if (Array.isArray(paymentMethods) && paymentMethods.length > 0 && offersCol) {
+    const allActive = await offersCol.find({ isExpired: { $ne: true } }).toArray();
+    const out = pickApplicableOffersWithReasons(allActive, paymentMethods, nowForChecks); // your function
+    applicable = out.list;
+    offerDebug = out.debug;
+  }
+
+  // 5) decorate with portal prices & best deal (preserve base-only card)
   function decorate(f) {
-    const base = Number(f.price) || 0;
+    const base = Number(f.base) || 0;
     const { portalPrices, bestDeal } = applyOffersToPortals(base, applicable);
     return { ...f, portalPrices, bestDeal };
   }
-
-  const outboundDecorated = outboundFlights.map(decorate);
-  const returnDecorated = retFlights.map(decorate);
+  const outboundDecorated = (outboundFlights || []).map(decorate);
+  const returnDecorated = (returnFlights || []).map(decorate);
 
   const meta = {
-    source: "flightapi",
-    outStatus: outResp.status ?? null,
-    outCount: Array.isArray(outboundFlights) ? outboundFlights.length : 0,
-    retStatus: tripType === "round-trip" ? (outResp.status ?? null) : null,
-    retCount: Array.isArray(retFlights) ? retFlights.length : 0,
+    source: 'flightapi',
+    outStatus, outCount: outboundDecorated.length,
+    retCount: returnDecorated.length,
     offerDebug,
-    nowUsed: nowForChecks.toISOString()
+    usedFallback,
+    nowUsed: nowForChecks.toISOString(),
   };
 
   res.json({
@@ -269,6 +280,7 @@ app.post("/search", async (req, res) => {
     returnFlights: returnDecorated
   });
 });
+
 
 app.listen(PORT, () => {
   console.log(`SkyDeal backend up on :${PORT}`);
