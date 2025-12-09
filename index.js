@@ -3,7 +3,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
+// ❌ removed: import fetch from "node-fetch";  // Node 18+ has global fetch
 
 dotenv.config();
 
@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 10000;
 
 // ---- CORS (declare ONCE) ----
 app.use(cors({
-  origin: '*', // keep simple for now; Vercel + Render are fine
+  origin: '*',
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"]
 }));
@@ -27,7 +27,7 @@ const MARKUP   = 100;  // ₹ per-OTA markup
 function money(n) { return Math.max(0, Math.round(Number(n || 0))); }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
-// ---- Payment options (static, kept as-is) ----
+// ---- Payment options (kept as-is) ----
 const PAYMENT_DB = {
   "Credit Card": [
     "HDFC Bank", "ICICI Bank", "Axis Bank", "Kotak Bank",
@@ -40,28 +40,19 @@ const PAYMENT_DB = {
   "EMI":         ["HDFC Bank", "Axis Bank", "RBL Bank", "Yes Bank", "Federal Bank"]
 };
 
-// simple normalized map for quick matching
 const norm = s => String(s||"").toLowerCase().replace(/\s+/g,"").replace(/bank$/,"");
-const PAYMENT_SET = Object.fromEntries(
-  Object.entries(PAYMENT_DB).map(([k, arr]) => [k, new Set(arr.map(norm))])
-);
 
-// ---- Offers (example real logic retained) ----
-// * flat or percent; min txn; by portal; by payment method
+// ---- Offers ----
 const OFFERS = [
-  // percent discount examples
   { portal:"MakeMyTrip", label:"10% off on ICICI", type:"percent", value:10, min:3000, code:"SKYICICI10", applyTo:"Credit Card", banks:["ICICI Bank"] },
   { portal:"Goibibo",    label:"12% off on HDFC",  type:"percent", value:12, min:3000, code:"SKYHDFC12",  applyTo:"Credit Card", banks:["HDFC Bank"] },
   { portal:"EaseMyTrip", label:"15% off on Axis",  type:"percent", value:15, min:3000, code:"SKYAXIS15",  applyTo:"Credit Card", banks:["Axis Bank"] },
-  // flat discount examples
   { portal:"Yatra",      label:"₹400 off via UPI", type:"flat",    value:400, min:2500, code:"SKYUPI400",  applyTo:"UPI",         banks:["Any UPI"] },
   { portal:"Cleartrip",  label:"₹600 HDFC EMI",    type:"flat",    value:600, min:4000, code:"SKYEMIHDFC", applyTo:"EMI",         banks:["HDFC Bank"] },
 ];
 
-// OTA list
 const OTAS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
 
-// build default portal prices (carrier base + markup)
 function buildDefaultPortalPrices(base) {
   return OTAS.map(p => ({
     portal: p,
@@ -89,18 +80,11 @@ function applyOffersToPortals(base, selectedPayments, debugBag) {
   const applied = [];
 
   for (const p of portals) {
-    // find an offer matching: same portal + a selected payment method category + bank
     const candidate = OFFERS.find(ofr => {
       if (ofr.portal !== p.portal) return false;
-      // category must be selected (e.g., "Credit Card", "UPI")
       const catNorm = norm(ofr.applyTo);
       if (!selSet.has(catNorm)) return false;
-
-      // if user selected a bank (e.g., "HDFC Bank"), we treat presence of the bank in selected list as OK.
-      // We allow "Any UPI" as wildcard for UPI.
       const banksNorm = (ofr.banks || []).map(norm);
-      // if user passed *banks* (like "HDFC Bank") in the selection array, match those too
-      // selection may include categories + bank names; we match if ANY bank in offer exists in selection
       const bankMatched = banksNorm.some(b => selSet.has(b)) || banksNorm.includes("anyupi");
       return bankMatched;
     });
@@ -116,11 +100,7 @@ function applyOffersToPortals(base, selectedPayments, debugBag) {
         p.source = "carrier+offer+markup";
         p._why = `${candidate.label} (code ${candidate.code})`;
 
-        applied.push({
-          portal: p.portal,
-          why: p._why,
-          value: discount
-        });
+        applied.push({ portal: p.portal, why: p._why, value: discount });
       }
     }
   }
@@ -129,9 +109,8 @@ function applyOffersToPortals(base, selectedPayments, debugBag) {
   return { portalPrices: portals, bestDeal: bestDealFrom(portals) };
 }
 
-// ---- External flight search (optional; falls back if fails) ----
+// ---- Real flight fetch (uses global fetch). Falls back if fails. ----
 async function fetchFlightsReal({ from, to, departureDate, returnDate, adults = 1, cabin = "economy" }) {
-  // Try FlightAPI first if key is present, otherwise skip to fallback
   const KEY = process.env.FLIGHTAPI_KEY;
   if (!KEY) throw new Error("FLIGHTAPI_KEY missing");
 
@@ -146,7 +125,6 @@ async function fetchFlightsReal({ from, to, departureDate, returnDate, adults = 
     let json = null;
     try { json = await resp.json(); } catch {}
     if (status !== 200 || !json) throw new Error(`flightapi non-200 (${status})`);
-    // Map to simple list: take a handful of itineraries
     const items = (json.itineraries || []).slice(0, 6).map((it, i) => ({
       id: `F${i+1}`,
       airlineName: (json.carriers?.[0]?.name) || "Air India",
@@ -162,7 +140,6 @@ async function fetchFlightsReal({ from, to, departureDate, returnDate, adults = 
   }
 }
 
-// simple deterministic fallback so app always works
 function fallbackFlights() {
   const base = [6225, 5650, 9800, 10419, 11627];
   const names = [
@@ -185,21 +162,10 @@ function fallbackFlights() {
 }
 
 // ---- ROUTES ----
-
-// Payment methods
-app.get("/payment-options", (req, res) => {
-  const options = {
-    "Credit Card": PAYMENT_DB["Credit Card"],
-    "Debit Card": PAYMENT_DB["Debit Card"],
-    "Net Banking": PAYMENT_DB["Net Banking"],
-    "UPI":         PAYMENT_DB["UPI"],
-    "Wallet":      PAYMENT_DB["Wallet"],
-    "EMI":         PAYMENT_DB["EMI"],
-  };
-  res.json({ usedFallback:false, options });
+app.get("/payment-options", (_req, res) => {
+  res.json({ usedFallback:false, options: PAYMENT_DB });
 });
 
-// Search
 app.post("/search", async (req, res) => {
   const {
     from = "BOM",
@@ -216,7 +182,6 @@ app.post("/search", async (req, res) => {
     from, to, departureDate, returnDate, passengers, travelClass, tripType, paymentMethods
   });
 
-  // real -> fallback
   let real;
   try {
     real = await fetchFlightsReal({
@@ -230,7 +195,7 @@ app.post("/search", async (req, res) => {
   }
   const data = real || fallbackFlights();
 
-  const debug = { checked: 0, applied: [] };
+  const debug = { applied: [] };
   const decorate = (f) => {
     const base = money(f.basePrice);
     const { portalPrices, bestDeal } = applyOffersToPortals(base, paymentMethods, debug);
