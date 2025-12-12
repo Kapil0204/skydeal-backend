@@ -1,4 +1,4 @@
-// index.js — SkyDeal backend (Express, ESM, real data only)
+// SkyDeal backend — real FlightAPI + Mongo offers
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -9,261 +9,349 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// --- CORS (once) ---
-app.use(cors({
-  origin: "*",
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type"]
-}));
+// ---- CORS first
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"]
+  })
+);
 app.use(express.json());
 
-// --- env (accept both MONGO_URI and MONGODB_URI) ---
-const MONGO_URI   = (process.env.MONGO_URI || process.env.MONGODB_URI || "").trim();
-const MONGO_DB    = (process.env.MONGODB_DB || "skydeal").trim();
-const MONGO_COL   = (process.env.MONGO_COL   || "offers").trim();
-const FLIGHTAPI_KEY = (process.env.FLIGHTAPI_KEY || "").trim();
+// ---- ENV
+// Support either MONGO_URI or MONGODB_URI to avoid naming drift
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || "";
+const MONGODB_DB = process.env.MONGODB_DB || process.env.MONGO_DB || "skydeal";
+const MONGO_COL = process.env.MONGO_COL || "offers";
+const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 
-// --- constants ---
-const CURRENCY = "INR";
-const REGION   = "IN";      // for FlightAPI
-const PORTALS  = ["MakeMyTrip","Goibibo","EaseMyTrip","Yatra","Cleartrip"];
-const OTA_MARKUP = 100;     // +₹100 per portal (business rule)
-
-// --- mongo singleton ---
+// ---- Mongo client (lazy, cached)
 let mongoClient = null;
-let offersCol = null;
-
+let mongoDb = null;
 async function ensureMongo() {
+  if (mongoDb) return mongoDb;
   if (!MONGO_URI) throw new Error("MONGO_URI missing");
-  if (offersCol) return offersCol;
-  if (!mongoClient) {
-    mongoClient = new MongoClient(MONGO_URI, { ignoreUndefined: true });
-    await mongoClient.connect();
-  }
-  const db = mongoClient.db(MONGO_DB);
-  offersCol = db.collection(MONGO_COL);
-  return offersCol;
+  mongoClient = new MongoClient(MONGO_URI, { connectTimeoutMS: 10000 });
+  await mongoClient.connect();
+  mongoDb = mongoClient.db(MONGODB_DB);
+  return mongoDb;
 }
 
-// --- helpers ---
+// ---- Helpers
 const money = (n) => Math.max(0, Math.round(Number(n || 0)));
-const norm  = (s) => String(s || "").toLowerCase().replace(/\s+/g,"").replace(/bank$/,"");
+const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "").replace(/bank$/, "");
 
-// Build portal rows with markup first; discounts applied on top of that
-function buildPortalRows(base) {
-  return PORTALS.map(p => ({
-    portal: p,
+// ---- Pull ACTIVE (non-expired) offers from Mongo, shaped for quick matching
+async function fetchActiveOffers() {
+  try {
+    const db = await ensureMongo();
+    const col = db.collection(MONGO_COL);
+
+    // Be generous with field names based on your schema evolution.
+    const cursor = col.find({
+      $or: [{ isExpired: { $exists: false } }, { isExpired: false }]
+    });
+
+    const raw = await cursor.toArray();
+
+    // Normalize into a simple array the matcher understands
+    // Expected flexible fields: portal, paymentMethods[], discountPercent/flatAmount,
+    // minTransactionValue, coupon/code, etc.
+    const offers = raw.map((o) => {
+      const portal = o.portal || o.sourcePortal || "";
+      const pm = Array.isArray(o.paymentMethods) ? o.paymentMethods : [];
+      // Support both percent & flat (₹)
+      const percent =
+        o.discountPercent ??
+        o.parsedFields?.discountPercent ??
+        o.rawFields?.discountPercent ??
+        null;
+      const flat =
+        o.maxDiscountAmount ??
+        o.flatAmount ??
+        o.parsedFields?.maxDiscountAmount ??
+        null;
+
+      const valueType =
+        percent != null
+          ? "percent"
+          : flat != null
+          ? "flat"
+          : null;
+
+      const value = percent != null ? Number(percent) : flat != null ? Number(flat) : 0;
+
+      const min =
+        o.minTransactionValue ??
+        o.parsedFields?.minTransactionValue ??
+        o.rawFields?.minTransactionValue ??
+        0;
+
+      const code =
+        o.couponCode ??
+        o.code ??
+        o.parsedFields?.couponCode ??
+        o.rawFields?.couponCode ??
+        null;
+
+      // derive [ {type:'Credit Card', bank:'HDFC Bank'} ... ]
+      const pairs = pm
+        .map((p) => {
+          const type = p.type || p.category || p.method || "";
+          const bank = p.bank || p.issuer || p.provider || "";
+          if (!type || !bank) return null;
+          return { type, bank };
+        })
+        .filter(Boolean);
+
+      return {
+        portal,
+        pairs, // [{type, bank}]
+        valueType, // 'percent' | 'flat' | null
+        value: Number(value || 0),
+        min: Number(min || 0),
+        code: code || undefined,
+        label:
+          o.title ||
+          o.rawDiscount ||
+          o.parsedFields?.rawDiscount ||
+          "Offer applied"
+      };
+    });
+
+    return offers.filter((x) => x.portal && x.valueType && x.value > 0);
+  } catch (e) {
+    console.warn("[offers] fallback due to error:", e.message);
+    return []; // no throw — frontend will just see no options/offers
+  }
+}
+
+// Build payment-options from offers in Mongo
+function buildPaymentOptionsFromOffers(offers) {
+  // { 'Credit Card': Set('HDFC Bank', 'ICICI Bank'), 'UPI': Set('Any UPI') ...}
+  const byCat = new Map();
+  for (const ofr of offers) {
+    for (const pr of ofr.pairs) {
+      const cat = pr.type;
+      const bank = pr.bank;
+      if (!cat || !bank) continue;
+      if (!byCat.has(cat)) byCat.set(cat, new Set());
+      byCat.get(cat).add(bank);
+    }
+  }
+  const out = {};
+  for (const [cat, set] of byCat.entries()) {
+    out[cat] = Array.from(set).sort();
+  }
+  return out;
+}
+
+// Apply best offer per portal given selected categories/banks
+function applyOffersToPortals(base, portals, offers, selectedCats, selectedBanks) {
+  const catSet = new Set((selectedCats || []).map(norm));
+  const bankSet = new Set((selectedBanks || []).map(norm));
+
+  const priced = portals.map((p) => ({ ...p })); // clone
+  for (const p of priced) {
+    let bestFinal = p.finalPrice;
+    let bestWhy = null;
+
+    for (const ofr of offers) {
+      if (norm(ofr.portal) !== norm(p.portal)) continue;
+
+      // check any pair matches selected
+      const matches = ofr.pairs.some(
+        ({ type, bank }) => catSet.has(norm(type)) && bankSet.has(norm(bank))
+      );
+      if (!matches) continue;
+
+      if (base < ofr.min) continue;
+
+      const discount =
+        ofr.valueType === "percent"
+          ? Math.round((Number(ofr.value) / 100) * base)
+          : Number(ofr.value);
+
+      const candidate = Math.max(0, base + p.markup - discount);
+      if (candidate < bestFinal) {
+        bestFinal = candidate;
+        const codeStr = ofr.code ? ` (code ${ofr.code})` : "";
+        bestWhy = `${ofr.label}${codeStr}`;
+      }
+    }
+
+    p.finalPrice = bestFinal;
+    if (bestWhy) {
+      p.source = "carrier+offer+markup";
+      p._why = bestWhy;
+    }
+  }
+
+  // best deal
+  let best = priced[0];
+  for (const q of priced) if (q.finalPrice < best.finalPrice) best = q;
+
+  return {
+    portalPrices: priced,
+    bestDeal: {
+      portal: best.portal,
+      finalPrice: best.finalPrice,
+      note: best._why || "Best price after applicable offers (if any)"
+    }
+  };
+}
+
+// Portals list + markup policy
+const OTAS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
+const MARKUP = 100;
+function defaultPortalRows(base) {
+  return OTAS.map((portal) => ({
+    portal,
     basePrice: base,
-    finalPrice: base + OTA_MARKUP,
+    markup: MARKUP,
+    finalPrice: base + MARKUP,
     source: "carrier+markup"
   }));
 }
 
-// Compute best deal
-function bestDealFrom(portals) {
-  let best = portals[0];
-  for (const p of portals) if (p.finalPrice < best.finalPrice) best = p;
-  return {
-    portal: best.portal,
-    finalPrice: best.finalPrice,
-    note: best._why || "Best price after applicable offers (if any)"
-  };
-}
+// ---- FlightAPI: roundtrip call
+async function fetchFlightsFlightAPI({ from, to, departureDate, returnDate, adults, cabin }) {
+  if (!FLIGHTAPI_KEY) {
+    return { items: [], meta: { used: "flightapi", outStatus: 500 } };
+  }
 
-// Apply real Mongo offers to portal rows
-function applyOffersFromMongo({ base, offers, selectedBanks, debugBag }) {
-  const selectedNorm = new Set(selectedBanks.map(norm));
-  const rows = buildPortalRows(base);
-  const applied = [];
+  // cabin should be economy/business/premium_economy/first
+  const url = `https://api.flightapi.io/roundtrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${returnDate || departureDate}/${adults}/0/0/${cabin}/INR`;
 
-  for (const row of rows) {
-    // Pick the best single offer for this portal that matches any selected bank/method
-    const candidates = (offers || []).filter(o => {
-      if (o.portal !== row.portal) return false;
-      // normalize applicability
-      const applyTo = Array.isArray(o.applyTo) ? o.applyTo : (o.applyTo ? [o.applyTo] : []);
-      const banks   = Array.isArray(o.banks) ? o.banks : (o.banks ? [o.banks] : []);
-      const catHit  = applyTo.some(a => selectedNorm.has(norm(a)));
-      const bankHit = banks.length === 0 ? false : banks.some(b => selectedNorm.has(norm(b)) || norm(b) === "anyupi");
-      return catHit && bankHit && !o.isExpired;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 25000);
+  try {
+    const r = await fetch(url, { signal: controller.signal });
+    const status = r.status;
+    let data = null;
+    try {
+      data = await r.json();
+    } catch {}
+    if (status !== 200 || !data) {
+      return { items: [], meta: { used: "flightapi", outStatus: status } };
+    }
+
+    const carriers = (data.carriers || []).reduce((acc, c) => {
+      acc[String(c.id)] = c.name;
+      return acc;
+    }, {});
+
+    // Build items from itineraries, keep up to 25, sort by price asc
+    const itemsRaw = (data.itineraries || []).map((it, i) => {
+      const price = money(it?.price || it?.pricing_options?.[0]?.price?.amount || 0);
+      // naive pick of first leg/segment for display
+      const legIds = it.leg_ids || [];
+      const leg = (data.legs || []).find((L) => String(L.id) === String(legIds[0]));
+      const segId = leg?.segment_ids?.[0];
+      const seg = (data.segments || []).find((S) => String(S.id) === String(segId));
+
+      const airline = carriers[String(seg?.marketing_carrier_id)] || "Airline";
+      const fn = seg?.marketing_carrier_flight_number
+        ? `${airline.split(" ")[0]} ${seg.marketing_carrier_flight_number}`
+        : "—";
+
+      return {
+        id: `I${i + 1}`,
+        airlineName: airline,
+        flightNumber: fn,
+        departure: leg?.departure_time || "",
+        arrival: leg?.arrival_time || "",
+        basePrice: price,
+        stops: (leg?.stop_count ?? 0)
+      };
     });
 
-    if (!candidates.length) continue;
-
-    // pick the best (max discount) that meets min txn
-    let best = null;
-    for (const c of candidates) {
-      const min = Number(c.minTransactionValue || c.min || 0);
-      if (base < min) continue;
-
-      let discount = 0;
-      if (String(c.type).toLowerCase() === "percent") {
-        discount = Math.round((Number(c.value || c.discountPercent || 0) / 100) * base);
-      } else {
-        discount = Number(c.value || c.maxDiscountAmount || c.flat || 0);
-      }
-      // respect max cap if provided
-      const cap = Number(c.maxDiscountAmount || c.max || 0);
-      if (cap > 0) discount = Math.min(discount, cap);
-
-      if (!best || discount > best.discount) {
-        best = {
-          discount,
-          label: c.label || c.title || "",
-          code: c.code || c.coupon || "",
-          raw: c
-        };
-      }
-    }
-
-    if (best && best.discount > 0) {
-      row.finalPrice = Math.max(0, row.basePrice + OTA_MARKUP - best.discount);
-      row.source = "carrier+offer+markup";
-      row._why = `${best.label}${best.code ? ` (code ${best.code})` : ""}`;
-      applied.push({ portal: row.portal, why: row._why, discount: best.discount });
-    }
-  }
-
-  if (debugBag) debugBag.applied = applied;
-  return { portalPrices: rows, bestDeal: bestDealFrom(rows) };
-}
-
-// --- FlightAPI (real only, no fallback) ---
-async function fetchFlightsReal({ from, to, departureDate, returnDate, adults, cabin }) {
-  if (!FLIGHTAPI_KEY) {
-    const err = new Error("FLIGHTAPI_KEY missing");
-    err.status = 500;
-    throw err;
-  }
-
-  const url = `https://api.flightapi.io/roundtrip/${FLIGHTAPI_KEY}/${from}/${to}/${departureDate}/${returnDate}/${adults}/0/0/${cabin}/${CURRENCY}?region=${REGION}`;
-
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 25000);
-
-  try {
-    const resp = await fetch(url, { signal: ctrl.signal });
-    const status = resp.status;
-    const data = await resp.json().catch(() => null);
-
-    if (status !== 200 || !data) {
-      const e = new Error(`FlightAPI non-200 (${status})`);
-      e.status = status || 502;
-      throw e;
-    }
-
-    // Map + sort by price asc + cap at 25
-    const items = (data.itineraries || [])
-      .map((it, i) => ({
-        id: `R${i+1}`,
-        airlineName: (data.carriers?.find(c => c.id === data?.segments?.find(s => s.id === data?.legs?.find(l => l.id === it.leg_ids?.[0])?.segment_ids?.[0])?.marketing_carrier_id)?.name) || "Airline",
-        flightNumber: it.id || `F${1000+i}`,
-        departure: "—",
-        arrival: "—",
-        basePrice: money(it.price),
-        stops: 0
-      }))
-      .filter(x => x.basePrice > 0)
-      .sort((a,b) => a.basePrice - b.basePrice)
+    const items = itemsRaw
+      .filter((x) => x.basePrice > 0)
+      .sort((a, b) => a.basePrice - b.basePrice)
       .slice(0, 25);
 
-    return { items, meta: { outStatus: 200, used: "flightapi" } };
+    return { items, meta: { used: "flightapi", outStatus: status } };
+  } catch (e) {
+    return { items: [], meta: { used: "flightapi", outStatus: 500 } };
   } finally {
     clearTimeout(t);
   }
 }
 
-// --- routes ---
+// ---- Routes
 
-// Payment options are derived from real offers present in Mongo
+// Payment options from Mongo
 app.get("/payment-options", async (_req, res) => {
   try {
-    const col = await ensureMongo();
-    // Only active, payment-method-related offers
-    const offers = await col.find({ isExpired: { $ne: true } }, { projection: {
-      portal: 1, applyTo: 1, banks: 1
-    }}).toArray();
-
-    // Build catalog by category using only names found in offers
-    const catalog = {};
-    for (const o of offers) {
-      const cats = Array.isArray(o.applyTo) ? o.applyTo : (o.applyTo ? [o.applyTo] : []);
-      const banks = Array.isArray(o.banks) ? o.banks : (o.banks ? [o.banks] : []);
-      for (const cat of cats) {
-        if (!catalog[cat]) catalog[cat] = new Set();
-        banks.forEach(b => catalog[cat].add(b));
-      }
-    }
-    const out = {};
-    Object.entries(catalog).forEach(([k, set]) => out[k] = Array.from(set));
-
-    res.json({ usedFallback: false, options: out });
+    const offers = await fetchActiveOffers();
+    const options = buildPaymentOptionsFromOffers(offers);
+    res.json({ usedFallback: false, options, counts: { offers: offers.length } });
   } catch (e) {
-    console.error("[/payment-options] error:", e.message);
-    // Return 200 with empty options so UI shows "No options"
-    res.json({ usedFallback: false, options: {} });
+    // Never throw to client; show empty set
+    res.json({ usedFallback: true, options: {}, error: e.message });
   }
 });
 
+// Main search
 app.post("/search", async (req, res) => {
   const {
     from = "BOM",
-    to   = "DEL",
+    to = "DEL",
     departureDate,
     returnDate,
     tripType = "one-way",
     passengers = 1,
     travelClass = "economy",
-    paymentMethods = []          // array of human strings from UI
+    // expect from frontend:
+    paymentCategories = [],
+    paymentBanks = []
   } = req.body || {};
 
-  const retDate = (tripType === "round-trip" ? (returnDate || departureDate) : departureDate);
+  // flights
+  const real = await fetchFlightsFlightAPI({
+    from,
+    to,
+    departureDate,
+    returnDate: tripType === "round-trip" ? (returnDate || departureDate) : "",
+    adults: passengers,
+    cabin: travelClass
+  });
 
-  // Fetch active offers once
-  let activeOffers = [];
-  let offerDebug = {};
-  try {
-    const col = await ensureMongo();
-    activeOffers = await col.find({ isExpired: { $ne: true } }).toArray();
-  } catch (e) {
-    console.error("[/search] offers error:", e.message);
-  }
+  // offers + decorate (no throw if Mongo absent)
+  const offers = await fetchActiveOffers();
 
-  try {
-    const real = await fetchFlightsReal({
-      from, to, departureDate, returnDate: retDate,
-      adults: passengers, cabin: travelClass
-    });
-
-    const decorate = (f) => {
-      const { portalPrices, bestDeal } = applyOffersFromMongo({
-        base: money(f.basePrice),
-        offers: activeOffers,
-        selectedBanks: paymentMethods,
-        debugBag: offerDebug
-      });
+  const outboundFlights = real.items
+    .map((f) => {
+      const base = money(f.basePrice);
+      const defaultRows = defaultPortalRows(base);
+      const { portalPrices, bestDeal } = applyOffersToPortals(
+        base,
+        defaultRows,
+        offers,
+        paymentCategories,
+        paymentBanks
+      );
       return { ...f, portalPrices, bestDeal };
-    };
+    })
+    .sort((a, b) => a.bestDeal.finalPrice - b.bestDeal.finalPrice);
 
-    // Outbound and (optionally) return; (for now use same list for both)
-    const outboundFlights = real.items.map(decorate);
-    const returnFlights   = tripType === "round-trip" ? real.items.map(decorate) : [];
+  const returnFlights =
+    tripType === "round-trip"
+      ? outboundFlights.slice(0, 25) // mirror list for now; if you fetch separate returns, apply here
+      : [];
 
-    return res.json({
-      meta: {
-        source: "flightapi",
-        outStatus: real.meta.outStatus,
-        outCount: outboundFlights.length,
-        retCount: returnFlights.length,
-        offerDebug
-      },
-      outboundFlights,
-      returnFlights
-    });
-  } catch (e) {
-    const status = e.status || 502;
-    return res.status(status).json({ error: e.message || "flight search failed" });
-  }
+  res.json({
+    meta: {
+      source: real.meta.used,
+      outStatus: real.meta.outStatus,
+      outCount: outboundFlights.length,
+      retCount: returnFlights.length
+    },
+    outboundFlights,
+    returnFlights
+  });
 });
 
 app.get("/", (_req, res) => res.send("SkyDeal backend OK"));
