@@ -1,351 +1,336 @@
-// index.js
+// index.js — SkyDeal backend (lock: two one-way calls + real offer application)
+// DO NOT change your index.html — this file fixes the backend only.
+
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
 
-const {
-  PORT = 10000,
-  MONGO_URI,
-  MONGODB_DB = "skydeal",
-  MONGO_COL = "offers",
-  FLIGHTAPI_KEY,
-} = process.env;
-
-if (!MONGO_URI) throw new Error("MONGO_URI missing");
-if (!FLIGHTAPI_KEY) console.warn("[warn] FLIGHTAPI_KEY is not set");
+dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
+// --------- ENV you must have set on Render -----------
+const MONGO_URI       = process.env.MONGO_URI || process.env.MONGODB_URI; // allow either name
+const MONGODB_DB      = process.env.MONGODB_DB || "skydeal";
+const MONGO_COL       = process.env.MONGO_COL || "offers";
+
+const FLIGHTAPI_KEY   = process.env.FLIGHTAPI_KEY;
+// If your working URL format differs, keep it in FLIGHTAPI_ONEWAY_TEMPLATE.
+// Example template below matches typical flightapi.io one-way style.
+// Replace only the template if your working URL is different.
+const FLIGHTAPI_ONEWAY_TEMPLATE =
+  process.env.FLIGHTAPI_ONEWAY_TEMPLATE ||
+  "https://api.flightapi.io/oneway/{KEY}/{FROM}/{TO}/{DATE}/{ADULTS}/INR?cabinClass={CABIN}";
+// -----------------------------------------------------
+
+app.use(cors());               // allow your Vercel UI
 app.use(express.json());
 
-// CORS: allow your Vercel frontend and local dev
-const allowlist = [
-  "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
-  "http://localhost:5500",
-  "http://localhost:5173",
-];
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (allowlist.includes(origin)) return cb(null, true);
-      return cb(null, true); // keep permissive during bring-up
-    },
-  })
-);
-
-// ---------- Mongo bootstrap ----------
-let db, offersCol, mongoClient;
+// ---------- Mongo (single connection, reused) ----------
+let mongoClient;
 async function ensureMongo() {
-  if (db) return;
-  mongoClient = new MongoClient(MONGO_URI, { maxPoolSize: 5 });
-  await mongoClient.connect();
-  db = mongoClient.db(MONGODB_DB);
-  offersCol = db.collection(MONGO_COL);
-  console.log(`[mongo] connected -> ${MONGODB_DB}.${MONGO_COL}`);
-}
-ensureMongo().catch((e) => {
-  console.error("[mongo] connect error:", e.message);
-  process.exit(1);
-});
-
-// ---------- Helpers ----------
-const TYPE_MAP = {
-  credit_card: "Credit Card",
-  "Credit Card": "Credit Card",
-  debit_card: "Debit Card",
-  "Debit Card": "Debit Card",
-  net_banking: "Net Banking",
-  "Net Banking": "Net Banking",
-  upi: "UPI",
-  UPI: "UPI",
-  wallet: "Wallet",
-  Wallet: "Wallet",
-};
-
-function normType(t) {
-  if (!t) return null;
-  const k = String(t).trim();
-  return TYPE_MAP[k] || null;
-}
-
-function cleanBankName(name) {
-  if (!name) return null;
-  return String(name).trim().replace(/\s+bank$/i, " Bank");
-}
-
-// Build “best deal” for a base price and chosen payment filters
-function pickBestDeal(priceINR, offers = []) {
-  if (!Array.isArray(offers) || !offers.length) {
-    return { portal: "MakeMyTrip", finalPrice: priceINR, note: "No eligible offer" };
+  if (!MONGO_URI) throw new Error("MONGO_URI missing");
+  if (!mongoClient) {
+    mongoClient = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 10000 });
+    await mongoClient.connect();
   }
-
-  // Example evaluator:
-  // Prefer percentage if available else flat, cap by maxDiscountAmount.
-  let best = { portal: "MakeMyTrip", finalPrice: priceINR, note: "No eligible offer" };
-
-  for (const off of offers) {
-    const portal = off.portal || "MakeMyTrip";
-    const pct = Number(off.discountPercent ?? 0);
-    const flat = Number(off.flatDiscountAmount ?? 0);
-    const cap = Number(off.maxDiscountAmount ?? 0) || Infinity;
-
-    let discount = 0;
-    if (pct > 0) discount = Math.min((priceINR * pct) / 100, cap);
-    else if (flat > 0) discount = Math.min(flat, cap);
-
-    const candidate = Math.max(0, Math.round(priceINR - discount));
-    if (candidate < best.finalPrice) {
-      best = {
-        portal,
-        finalPrice: candidate,
-        note:
-          pct > 0
-            ? `-${pct}% (${discount.toFixed(0)})`
-            : flat > 0
-            ? `-₹${discount.toFixed(0)}`
-            : "No eligible offer",
-      };
-    }
-  }
-  return best;
+  return mongoClient.db(MONGODB_DB).collection(MONGO_COL);
 }
 
-// Find applicable offers for filters + price
-async function findApplicableOffers({ paymentFilters, basePrice }) {
-  await ensureMongo();
-
-  // Normalize filters: [{type:'Credit Card', bank:'HDFC Bank'}...]
-  const wants = Array.isArray(paymentFilters) ? paymentFilters : [];
-
-  if (!wants.length) return []; // user didn’t pick any payment methods
-
-  const bankRegexes = [];
-  const typeRegexes = [];
-
-  for (const w of wants) {
-    if (w.bank) bankRegexes.push(new RegExp(`^${w.bank}$`, "i"));
-    if (w.type) {
-      const t = normType(w.type);
-      if (t) typeRegexes.push(new RegExp(`^${t}$`, "i"));
-    }
-  }
-
-  const match = {
-    $and: [
-      { $or: [{ isExpired: { $exists: false } }, { isExpired: false }] },
-      {
-        $or: [
-          { "paymentMethods.bank": { $in: bankRegexes } },
-          { "parsedFields.paymentMethods.bank": { $in: bankRegexes } },
-        ],
-      },
-      {
-        $or: [
-          { "paymentMethods.type": { $in: typeRegexes } },
-          { "parsedFields.paymentMethods.type": { $in: typeRegexes } },
-        ],
-      },
-      {
-        $or: [
-          { minTransactionValue: { $exists: false } },
-          { minTransactionValue: { $lte: basePrice } },
-        ],
-      },
-      {
-        $or: [
-          { offerCategories: { $exists: false } },
-          { offerCategories: { $size: 0 } },
-          { offerCategories: /flight/i }, // prefer flight-related
-        ],
-      },
-    ],
-  };
-
-  const projection = {
-    portal: 1,
-    title: 1,
-    discountPercent: 1,
-    maxDiscountAmount: 1,
-    flatDiscountAmount: 1,
-    minTransactionValue: 1,
-  };
-
-  const found = await offersCol.find(match).project(projection).limit(50).toArray();
-  return found;
-}
-
-// ---------- Payment options endpoint ----------
+// ---------- Payment options (deduped) ----------
 app.get("/payment-options", async (req, res) => {
   try {
-    await ensureMongo();
+    const col = await ensureMongo();
 
-    const cursor = offersCol.find(
-      { $or: [{ isExpired: { $exists: false } }, { isExpired: false }] },
-      { projection: { paymentMethods: 1, parsedFields: 1 } }
-    );
+    // Gather from both legacy `paymentMethods` and `parsedFields.paymentMethods`
+    const cursor = col.aggregate([
+      { $match: { $or: [ { isExpired: { $exists: false } }, { isExpired: false } ] } },
+      {
+        $project: {
+          _id: 0,
+          pmA: "$paymentMethods",
+          pmB: "$parsedFields.paymentMethods"
+        }
+      }
+    ]);
 
-    const buckets = {
+    const seen = {
       "Credit Card": new Set(),
       "Debit Card": new Set(),
       "Net Banking": new Set(),
-      UPI: new Set(),
-      Wallet: new Set(),
+      "UPI": new Set(),
+      "Wallet": new Set()
     };
 
-    const push = (t, b) => {
-      const T = normType(t);
-      const B = cleanBankName(b);
-      if (T && B && buckets[T]) buckets[T].add(B);
+    const normalizeType = (t = "") => {
+      const s = String(t).toLowerCase();
+      if (s.includes("credit")) return "Credit Card";
+      if (s.includes("debit"))  return "Debit Card";
+      if (s.includes("net"))    return "Net Banking";
+      if (s.includes("upi"))    return "UPI";
+      if (s.includes("wallet")) return "Wallet";
+      if (s.includes("internet")) return "Net Banking";
+      return null;
     };
 
-    while (await cursor.hasNext()) {
-      const doc = await cursor.next();
-      for (const arrName of ["paymentMethods", "parsedFields.paymentMethods"]) {
-        const arr =
-          arrName === "paymentMethods"
-            ? doc.paymentMethods
-            : doc?.parsedFields?.paymentMethods;
-        if (!Array.isArray(arr)) continue;
-        for (const pm of arr) {
-          push(pm.type, pm.bank);
+    const add = (arr = []) => {
+      for (const pm of arr) {
+        const type = normalizeType(pm.type);
+        const bank = (pm.bank || pm.raw || "").toString().trim();
+        if (!type || !bank) continue;
+        // Keep only bank names (no duplicates, case-insensitive)
+        const key = bank.toLowerCase();
+        if (![...seen[type]].some(x => x.toLowerCase() === key)) {
+          seen[type].add(bank);
         }
       }
+    };
+
+    // Collect banks
+    // eslint-disable-next-line no-await-in-loop
+    for await (const doc of cursor) {
+      add(Array.isArray(doc.pmA) ? doc.pmA : []);
+      add(Array.isArray(doc.pmB) ? doc.pmB : []);
     }
 
-    const out = Object.fromEntries(
-      Object.entries(buckets).map(([k, set]) => [k, Array.from(set).sort()])
+    // Convert sets to arrays
+    const options = Object.fromEntries(
+      Object.entries(seen).map(([k, set]) => [k, [...set].sort()])
     );
 
-    return res.json({ usedFallback: false, options: out });
-  } catch (e) {
-    console.error("[/payment-options] error:", e.message);
-    return res.status(500).json({ error: "payment options failed" });
+    res.json({ usedFallback: false, options });
+  } catch (err) {
+    console.error("[/payment-options] error:", err.message);
+    // Minimal safe fallback (keeps modal alive even if Mongo hiccups)
+    res.json({
+      usedFallback: true,
+      options: { "Credit Card": [], "Debit Card": [], "Net Banking": [], "UPI": [], "Wallet": [] }
+    });
   }
 });
 
-// ---------- Flight search (FlightAPI.io) ----------
-async function flightapiSearch({ from, to, dateFrom, dateTo, tripType, passengers, cabin }) {
-  if (!FLIGHTAPI_KEY) return { meta: { outStatus: 500, retStatus: 0 }, outbound: [], ret: [] };
-
-  // FlightAPI.io expects ISO dates. You’ve already picked ISO at the frontend now.
-  // Replace with your real endpoint + params that worked previously.
-  // Below is a generic round-trip pattern; if one-way, skip the return leg.
-  const base = "https://api.flightapi.io/roundtrip";
-
-  const qs = new URLSearchParams({
-    cabinClass: cabin || "economy",
-    passengers: String(passengers || 1),
-    from,
-    to,
-    date: dateFrom, // yyyy-mm-dd
-    ...(tripType === "round-trip" ? { returnDate: dateTo } : {}),
-    currency: "INR",
-    apiKey: FLIGHTAPI_KEY,
-  });
-
-  const url = `${base}?${qs.toString()}`;
-
-  try {
-    const { data } = await axios.get(url, { timeout: 18000 });
-
-    // You may adapt mapping according to your actual payload
-    const mapLeg = (item) => {
-      const airlineName =
-        item?.legs?.[0]?.segments?.[0]?.operatingCarrier?.name ||
-        item?.legs?.[0]?.segments?.[0]?.marketingCarrier?.name ||
-        "Unknown";
-      const dep = item?.legs?.[0]?.departure?.time || "";
-      const arr = item?.legs?.[0]?.arrival?.time || "";
-      const nonStop = (item?.legs?.[0]?.segments?.length || 1) === 1;
-      const stops = nonStop ? 0 : (item?.legs?.[0]?.segments?.length || 2) - 1;
-
-      return {
-        airlineName,
-        departure: dep.slice(11, 16),
-        arrival: arr.slice(11, 16),
-        stops,
-        price: Math.round(Number(item?.price?.total || 0)),
-        raw: item,
-      };
-    };
-
-    const outbound = Array.isArray(data?.outbound) ? data.outbound.map(mapLeg) : [];
-    const ret = Array.isArray(data?.return) ? data.return.map(mapLeg) : [];
-
-    return {
-      meta: {
-        outStatus: 200,
-        retStatus: 200,
-        outCount: outbound.length,
-        retCount: ret.length,
-        source: "flightapi",
-      },
-      outbound,
-      ret,
-    };
-  } catch (e) {
-    console.error("[flightapi] error:", e.message);
-    return {
-      meta: { outStatus: 500, retStatus: 0, source: "flightapi", error: e.message },
-      outbound: [],
-      ret: [],
-    };
-  }
+// ---------- FlightAPI helpers (two one-way calls) ----------
+function buildOneWayUrl({ from, to, date, adults, cabin }) {
+  // Replace placeholders in template
+  return FLIGHTAPI_ONEWAY_TEMPLATE
+    .replace("{KEY}", encodeURIComponent(FLIGHTAPI_KEY))
+    .replace("{FROM}", encodeURIComponent(from))
+    .replace("{TO}", encodeURIComponent(to))
+    .replace("{DATE}", encodeURIComponent(date))
+    .replace("{ADULTS}", String(adults))
+    .replace("{CABIN}", encodeURIComponent(cabin || "economy"));
 }
 
+async function fetchOneWay({ from, to, date, passengers, cabin }) {
+  if (!FLIGHTAPI_KEY) throw new Error("FLIGHTAPI_KEY missing");
+  const url = buildOneWayUrl({
+    from,
+    to,
+    date,                   // YYYY-MM-DD expected by your working endpoint/template
+    adults: passengers || 1,
+    cabin: (cabin || "economy").toLowerCase()
+  });
+
+  const resp = await axios.get(url, { timeout: 20000 });
+  return resp.data; // We'll map to a uniform structure below
+}
+
+// Normalize FlightAPI response to {flights:[{airlineName, flightNumber, depart, arrive, price, stops}]}
+function mapFlightApi(data) {
+  // This mapper is intentionally forgiving. Adjust ONLY if needed.
+  // Try common shapes:
+  const flights = [];
+  if (!data) return flights;
+
+  // Pattern 1: data.data[] style
+  if (Array.isArray(data.data)) {
+    for (const it of data.data) {
+      flights.push({
+        airlineName: it.airline || it.airlineName || it.validating_airline || it.carrier || "Airline",
+        flightNumber: it.flight_number || it.number || it.id || "",
+        depart: it.departure_time || it.departure || it.depart || "",
+        arrive: it.arrival_time || it.arrival || it.arrive || "",
+        price: Math.round(Number(it.price || it.total || it.amount || 0)),
+        stops: it.stops ?? (Array.isArray(it.segments) ? Math.max(0, it.segments.length - 1) : 0)
+      });
+    }
+  }
+
+  // Pattern 2: data.flights[]
+  if (Array.isArray(data.flights) && flights.length === 0) {
+    for (const f of data.flights) {
+      flights.push({
+        airlineName: f.airlineName || f.airline || "Airline",
+        flightNumber: f.flightNumber || f.number || "",
+        depart: f.departure || f.depart || "",
+        arrive: f.arrival || f.arrive || "",
+        price: Math.round(Number(f.price || 0)),
+        stops: f.stops ?? 0
+      });
+    }
+  }
+
+  return flights.filter(f => Number.isFinite(f.price) && f.price > 0);
+}
+
+// ---------- Offer engine ----------
+function calcDiscount({ price, offer }) {
+  // Inputs may come from either parsedFields.* or root fields
+  const pct  = offer.discountPercent ?? offer.parsedFields?.discountPercent ?? null;
+  const flat = offer.flatAmount ?? offer.parsedFields?.flatAmount ?? null;
+  const max  = offer.maxDiscountAmount ?? offer.parsedFields?.maxDiscountAmount ?? null;
+
+  let disc = 0;
+  if (typeof flat === "number" && flat > 0) {
+    disc = flat;
+  } else if (typeof pct === "number" && pct > 0) {
+    disc = price * (pct / 100);
+  }
+  if (typeof max === "number" && max > 0) {
+    disc = Math.min(disc, max);
+  }
+  disc = Math.floor(Math.max(0, disc));
+  const finalPrice = Math.max(0, Math.floor(price - disc));
+  return { discount: disc, finalPrice };
+}
+
+function normalizeType(t = "") {
+  const s = String(t).toLowerCase();
+  if (s.includes("credit")) return "Credit Card";
+  if (s.includes("debit"))  return "Debit Card";
+  if (s.includes("net"))    return "Net Banking";
+  if (s.includes("upi"))    return "UPI";
+  if (s.includes("wallet")) return "Wallet";
+  if (s.includes("internet")) return "Net Banking";
+  return null;
+}
+
+function pmMatches(offerPM, selected) {
+  // selected: [{type:"Credit Card", bank:"HDFC Bank"}, ...]
+  const type = normalizeType(offerPM.type);
+  const bank = (offerPM.bank || offerPM.raw || "").toString().trim();
+  if (!type || !bank) return false;
+  return selected.some(s =>
+    normalizeType(s.type) === type &&
+    bank.toLowerCase() === s.bank.toLowerCase()
+  );
+}
+
+async function findBestDealForPrice({ price, selectedPM }) {
+  const col = await ensureMongo();
+
+  // Pull candidate offers once (avoid N:1 per flight)
+  const candidates = await col
+    .find({
+      $and: [
+        { $or: [ { isExpired: { $exists: false } }, { isExpired: false } ] },
+        { $or: [
+            { "paymentMethods.0": { $exists: true } },
+            { "parsedFields.paymentMethods.0": { $exists: true } }
+          ]
+        },
+        { $or: [
+            { minTransactionValue: { $exists: false } },
+            { minTransactionValue: { $lte: price } }
+          ]
+        }
+      ]
+    })
+    .project({
+      portal: 1,
+      title: 1,
+      discountPercent: 1,
+      flatAmount: 1,
+      maxDiscountAmount: 1,
+      minTransactionValue: 1,
+      "paymentMethods": 1,
+      "parsedFields.paymentMethods": 1
+    })
+    .limit(500) // safety
+    .toArray();
+
+  let best = { portal: null, finalPrice: price, note: "No eligible offer" };
+
+  for (const off of candidates) {
+    const pmList = [
+      ...(Array.isArray(off.paymentMethods) ? off.paymentMethods : []),
+      ...(off.parsedFields?.paymentMethods ?? [])
+    ];
+
+    // must match at least one selected payment filter
+    if (!pmList.some(pm => pmMatches(pm, selectedPM))) continue;
+
+    const { finalPrice } = calcDiscount({ price, offer: off });
+    if (finalPrice < best.finalPrice) {
+      best = {
+        portal: off.portal || "Portal",
+        finalPrice,
+        note: off.title || "Best offer"
+      };
+    }
+  }
+
+  return best;
+}
+
+// ---------- /search ----------
 app.post("/search", async (req, res) => {
+  const {
+    from, to,
+    departureDate, returnDate,
+    passengers = 1,
+    travelClass = "economy",
+    tripType = "round-trip",
+    paymentFilters = []   // [{type:"Credit Card", bank:"HDFC Bank"}, ...]
+  } = req.body || {};
+
+  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, error: null, offerDebug: {} };
+
   try {
-    const {
-      from,
-      to,
-      departureDate, // yyyy-mm-dd
-      returnDate, // yyyy-mm-dd or empty
-      tripType = "one-way",
-      passengers = 1,
-      travelClass = "economy",
-      paymentFilters = [], // [{type:'Credit Card', bank:'HDFC Bank'}, ...]
-    } = req.body || {};
-
-    // 1) flights
-    const r = await flightapiSearch({
-      from,
-      to,
-      dateFrom: departureDate,
-      dateTo: returnDate,
-      tripType,
-      passengers,
-      cabin: travelClass,
+    // Outbound (one-way)
+    const outRaw = await fetchOneWay({
+      from, to, date: departureDate, passengers, cabin: travelClass
     });
+    meta.outStatus = 200;
+    const outFlights = mapFlightApi(outRaw);
 
-    // 2) apply offers per flight
-    const apply = async (arr) => {
-      const out = [];
-      for (const f of arr) {
-        const offers = await findApplicableOffers({
-          paymentFilters,
-          basePrice: Number(f.price || 0),
-        });
-        const bestDeal = pickBestDeal(Number(f.price || 0), offers);
-        out.push({
-          ...f,
-          bestDeal,
-        });
+    // Return (one-way) — only if round-trip
+    let retFlights = [];
+    if (tripType === "round-trip" && returnDate) {
+      const retRaw = await fetchOneWay({
+        from: to, to: from, date: returnDate, passengers, cabin: travelClass
+      });
+      meta.retStatus = 200;
+      retFlights = mapFlightApi(retRaw);
+    }
+
+    // Apply offers per flight (only when user selected any paymentFilter)
+    const withDeals = async (list) => {
+      if (!Array.isArray(list) || list.length === 0) return [];
+      if (!Array.isArray(paymentFilters) || paymentFilters.length === 0) {
+        // No selection => show note but do not compute discounts
+        return list.map(f => ({ ...f, bestDeal: { portal: null, finalPrice: f.price, note: "No payment method selected" } }));
       }
-      return out;
+      const result = [];
+      for (const f of list) {
+        const best = await findBestDealForPrice({ price: f.price, selectedPM: paymentFilters });
+        result.push({ ...f, bestDeal: best });
+      }
+      return result;
     };
 
-    const outboundFlights = await apply(r.outbound || []);
-    const returnFlights = tripType === "round-trip" ? await apply(r.ret || []) : [];
+    const outboundFlights = await withDeals(outFlights);
+    const returnFlights  = await withDeals(retFlights);
 
-    return res.json({
-      meta: r.meta,
-      outboundFlights,
-      returnFlights,
-    });
+    return res.json({ meta, outboundFlights, returnFlights });
   } catch (e) {
     console.error("[/search] error:", e.message);
-    return res.status(500).json({ error: "search failed" });
+    meta.error = e.message || "Search failed";
+    if (!meta.outStatus) meta.outStatus = 500;
+    return res.status(200).json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
 
