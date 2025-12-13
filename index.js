@@ -1,330 +1,353 @@
-// index.js (SkyDeal backend) — FULL FILE
+// index.js
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 import { MongoClient } from "mongodb";
 
+const {
+  PORT = 10000,
+  MONGO_URI,
+  MONGODB_DB = "skydeal",
+  MONGO_COL = "offers",
+  FLIGHTAPI_KEY,
+} = process.env;
+
+if (!MONGO_URI) throw new Error("MONGO_URI missing");
+if (!FLIGHTAPI_KEY) console.warn("[warn] FLIGHTAPI_KEY is not set");
+
 const app = express();
-app.use(cors({ origin: "*"}));
 app.use(express.json());
 
-/* ====== ENV ====== */
-const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI; // support either key
-const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
-const MONGO_COL  = process.env.MONGO_COL  || "offers";
-
-/* ====== MONGO ====== */
-let _mongo = { client: null, col: null };
-
-async function ensureMongo() {
-  if (_mongo.col) return _mongo;
-  if (!MONGO_URI) throw new Error("MONGO_URI missing");
-  const client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 8000 });
-  await client.connect();
-  const db  = client.db(MONGODB_DB);
-  const col = db.collection(MONGO_COL);
-  _mongo = { client, col };
-  return _mongo;
-}
-
-/* ====== NORMALIZERS ====== */
-function cleanBankName(name = "") {
-  let s = String(name || "").trim();
-  if (!s) return "";
-  s = s.replace(/\b(bank|ltd|limited)\b\.?/gi, "").trim();
-  s = s.replace(/\s+/g, " ");
-  return s
-    .split(" ")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
-}
-
-const PORTAL_SYNONYMS = [
-  { match: /make\s*my\s*trip|mmt/i, canonical: "MakeMyTrip" },
-  { match: /go\s*ibibo|goibibo/i, canonical: "Goibibo" },
-  { match: /ease\s*my\s*trip/i, canonical: "EaseMyTrip" },
-  { match: /yatra/i, canonical: "Yatra" },
-  { match: /clear\s*trip/i, canonical: "Cleartrip" },
+// CORS: allow your Vercel frontend and local dev
+const allowlist = [
+  "https://skydeal-frontend-git-main-kapils-projects-0b446913.vercel.app",
+  "http://localhost:5500",
+  "http://localhost:5173",
 ];
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowlist.includes(origin)) return cb(null, true);
+      return cb(null, true); // keep permissive during bring-up
+    },
+  })
+);
 
-function mapPortalName(s = "") {
-  for (const p of PORTAL_SYNONYMS) if (p.match.test(s || "")) return p.canonical;
-  return "";
+// ---------- Mongo bootstrap ----------
+let db, offersCol, mongoClient;
+async function ensureMongo() {
+  if (db) return;
+  mongoClient = new MongoClient(MONGO_URI, { maxPoolSize: 5 });
+  await mongoClient.connect();
+  db = mongoClient.db(MONGODB_DB);
+  offersCol = db.collection(MONGO_COL);
+  console.log(`[mongo] connected -> ${MONGODB_DB}.${MONGO_COL}`);
+}
+ensureMongo().catch((e) => {
+  console.error("[mongo] connect error:", e.message);
+  process.exit(1);
+});
+
+// ---------- Helpers ----------
+const TYPE_MAP = {
+  credit_card: "Credit Card",
+  "Credit Card": "Credit Card",
+  debit_card: "Debit Card",
+  "Debit Card": "Debit Card",
+  net_banking: "Net Banking",
+  "Net Banking": "Net Banking",
+  upi: "UPI",
+  UPI: "UPI",
+  wallet: "Wallet",
+  Wallet: "Wallet",
+};
+
+function normType(t) {
+  if (!t) return null;
+  const k = String(t).trim();
+  return TYPE_MAP[k] || null;
 }
 
-/* ====== LOAD PAYMENT CATALOG (5 categories, dedup) ====== */
-let _catalogCache = null;
-async function loadPaymentCatalog() {
-  if (_catalogCache) return _catalogCache;
+function cleanBankName(name) {
+  if (!name) return null;
+  return String(name).trim().replace(/\s+bank$/i, " Bank");
+}
 
-  const { col } = await ensureMongo();
-  // only non-expired (or missing flag)
-  const cur = col.find({
-    $or: [{ isExpired: { $exists: false } }, { isExpired: false }],
-  });
-
-  const cat = {
-    "Credit Card": new Set(),
-    "Debit Card": new Set(),
-    "Net Banking": new Set(),
-    "UPI": new Set(),
-    "Wallet": new Set(),
-  };
-
-  const pushBank = (type, bank) => {
-    const b = cleanBankName(bank);
-    if (!b) return;
-    switch (String(type || "").toLowerCase()) {
-      case "credit card":
-      case "credit_card":
-      case "credit":
-        cat["Credit Card"].add(b);
-        break;
-      case "debit card":
-      case "debit_card":
-      case "debit":
-        cat["Debit Card"].add(b);
-        break;
-      case "internet banking":
-      case "net_banking":
-      case "net banking":
-      case "netbanking":
-      case "internet":
-        cat["Net Banking"].add(b);
-        break;
-      case "upi":
-        cat["UPI"].add(b || "Any");
-        break;
-      case "wallet":
-        cat["Wallet"].add(b || "Any");
-        break;
-      default:
-        // try to guess from raw text
-        if (/credit/i.test(type)) cat["Credit Card"].add(b);
-        else if (/debit/i.test(type)) cat["Debit Card"].add(b);
-        else if (/net|internet/i.test(type)) cat["Net Banking"].add(b);
-        else if (/upi/i.test(type)) cat["UPI"].add(b || "Any");
-        else if (/wallet/i.test(type)) cat["Wallet"].add(b || "Any");
-        break;
-    }
-  };
-
-  // scan both parsedFields.paymentMethods and paymentMethods
-  for await (const doc of cur) {
-    const a = doc?.parsedFields?.paymentMethods || [];
-    for (const pm of a) pushBank(pm.type, pm.bank);
-
-    const b = doc?.paymentMethods || [];
-    for (const pm of b) pushBank(pm.type, pm.bank);
+// Build “best deal” for a base price and chosen payment filters
+function pickBestDeal(priceINR, offers = []) {
+  if (!Array.isArray(offers) || !offers.length) {
+    return { portal: "MakeMyTrip", finalPrice: priceINR, note: "No eligible offer" };
   }
 
-  _catalogCache = {
-    usedFallback: false,
-    options: Object.fromEntries(
-      Object.entries(cat).map(([k, set]) => [k, Array.from(set).sort()])
-    ),
-  };
-  return _catalogCache;
-}
+  // Example evaluator:
+  // Prefer percentage if available else flat, cap by maxDiscountAmount.
+  let best = { portal: "MakeMyTrip", finalPrice: priceINR, note: "No eligible offer" };
 
-/* ====== OFFER APPLICATION ====== */
-const OTAS = ["MakeMyTrip", "Goibibo", "EaseMyTrip", "Yatra", "Cleartrip"];
+  for (const off of offers) {
+    const portal = off.portal || "MakeMyTrip";
+    const pct = Number(off.discountPercent ?? 0);
+    const flat = Number(off.flatDiscountAmount ?? 0);
+    const cap = Number(off.maxDiscountAmount ?? 0) || Infinity;
 
-function computeDiscount(price, off) {
-  const pct = Number(off.discountPercent || 0) || 0;
-  const cap = Number(off.maxDiscountAmount || 0) || 0;
-  const flat = Number(off.flatAmount || 0) || 0;
+    let discount = 0;
+    if (pct > 0) discount = Math.min((priceINR * pct) / 100, cap);
+    else if (flat > 0) discount = Math.min(flat, cap);
 
-  let d = 0;
-  if (pct > 0) d = (price * pct) / 100;
-  if (flat > 0) d = d + flat; // if both exist, allow both; adjust if needed
-
-  if (cap > 0 && d > cap) d = cap;
-  d = Math.max(0, Math.floor(d));
-
-  return d;
-}
-
-function normalizeOffer(doc) {
-  const o = {
-    portal: mapPortalName(doc.portal || ""),
-    discountPercent: doc.discountPercent ?? doc.parsedFields?.discountPercent ?? null,
-    maxDiscountAmount: doc.maxDiscountAmount ?? doc.parsedFields?.maxDiscountAmount ?? null,
-    flatAmount: doc.flatAmount ?? doc.parsedFields?.flatAmount ?? null,
-    minTransactionValue: doc.minTransactionValue ?? doc.parsedFields?.minTransactionValue ?? null,
-    banks: [],
-    title: doc.title || "",
-    raw: doc,
-  };
-
-  const pm = [
-    ...(doc.paymentMethods || []),
-    ...(doc.parsedFields?.paymentMethods || []),
-  ];
-  for (const p of pm) {
-    const bank = cleanBankName(p.bank || "");
-    if (bank) o.banks.push(bank);
-    else if (/any|all/i.test(p.bank || p.raw || "")) o.banks.push("Any");
-  }
-
-  // If portal missing in DB, treat as "ANY portal" for now
-  if (!o.portal) o.portal = "ANY";
-
-  return o;
-}
-
-async function applyMongoOffers(basePrice, selectedBanks, forPortal /* canonical or one of OTAS */) {
-  const { col } = await ensureMongo();
-
-  const wanted = new Set((selectedBanks || []).map(cleanBankName));
-
-  const docs = await col
-    .find({ $or: [{ isExpired: { $exists: false } }, { isExpired: false }] })
-    .limit(2000)
-    .toArray();
-
-  let best = null;
-
-  for (const doc of docs) {
-    const off = normalizeOffer(doc);
-
-    // PORTAL FILTER:
-    // - If offer portal is canonical OTA, require match.
-    // - If offer portal is "ANY", allow it for all OTAs.
-    if (off.portal !== "ANY" && forPortal && off.portal !== forPortal) continue;
-
-    // BANK FILTER (if user selected any)
-    if (wanted.size) {
-      const banksClean = (off.banks || []).map(cleanBankName);
-      const ok =
-        banksClean.some((b) => wanted.has(b)) ||
-        banksClean.map((x) => x.toLowerCase()).includes("any");
-      if (!ok) continue;
-    }
-
-    // MIN TXN FILTER
-    const min = Number(off.minTransactionValue || 0) || 0;
-    if (min > 0 && basePrice < min) continue;
-
-    const discount = computeDiscount(basePrice, off);
-    if (discount <= 0) continue;
-
-    const finalPrice = Math.max(0, basePrice - discount);
-    if (!best || finalPrice < best.finalPrice) {
+    const candidate = Math.max(0, Math.round(priceINR - discount));
+    if (candidate < best.finalPrice) {
       best = {
-        portal: forPortal || "Unknown",
-        sourceOfferTitle: off.title || "Offer",
-        discount,
-        finalPrice,
+        portal,
+        finalPrice: candidate,
+        note:
+          pct > 0
+            ? `-${pct}% (${discount.toFixed(0)})`
+            : flat > 0
+            ? `-₹${discount.toFixed(0)}`
+            : "No eligible offer",
       };
     }
   }
-
-  if (!best) return { portal: forPortal || "Unknown", finalPrice: basePrice, note: "No eligible offer" };
   return best;
 }
 
-/* ====== PAYMENT OPTIONS ENDPOINT ====== */
+// Find applicable offers for filters + price
+async function findApplicableOffers({ paymentFilters, basePrice }) {
+  await ensureMongo();
+
+  // Normalize filters: [{type:'Credit Card', bank:'HDFC Bank'}...]
+  const wants = Array.isArray(paymentFilters) ? paymentFilters : [];
+
+  if (!wants.length) return []; // user didn’t pick any payment methods
+
+  const bankRegexes = [];
+  const typeRegexes = [];
+
+  for (const w of wants) {
+    if (w.bank) bankRegexes.push(new RegExp(`^${w.bank}$`, "i"));
+    if (w.type) {
+      const t = normType(w.type);
+      if (t) typeRegexes.push(new RegExp(`^${t}$`, "i"));
+    }
+  }
+
+  const match = {
+    $and: [
+      { $or: [{ isExpired: { $exists: false } }, { isExpired: false }] },
+      {
+        $or: [
+          { "paymentMethods.bank": { $in: bankRegexes } },
+          { "parsedFields.paymentMethods.bank": { $in: bankRegexes } },
+        ],
+      },
+      {
+        $or: [
+          { "paymentMethods.type": { $in: typeRegexes } },
+          { "parsedFields.paymentMethods.type": { $in: typeRegexes } },
+        ],
+      },
+      {
+        $or: [
+          { minTransactionValue: { $exists: false } },
+          { minTransactionValue: { $lte: basePrice } },
+        ],
+      },
+      {
+        $or: [
+          { offerCategories: { $exists: false } },
+          { offerCategories: { $size: 0 } },
+          { offerCategories: /flight/i }, // prefer flight-related
+        ],
+      },
+    ],
+  };
+
+  const projection = {
+    portal: 1,
+    title: 1,
+    discountPercent: 1,
+    maxDiscountAmount: 1,
+    flatDiscountAmount: 1,
+    minTransactionValue: 1,
+  };
+
+  const found = await offersCol.find(match).project(projection).limit(50).toArray();
+  return found;
+}
+
+// ---------- Payment options endpoint ----------
 app.get("/payment-options", async (req, res) => {
   try {
-    const out = await loadPaymentCatalog();
-    res.json(out);
+    await ensureMongo();
+
+    const cursor = offersCol.find(
+      { $or: [{ isExpired: { $exists: false } }, { isExpired: false }] },
+      { projection: { paymentMethods: 1, parsedFields: 1 } }
+    );
+
+    const buckets = {
+      "Credit Card": new Set(),
+      "Debit Card": new Set(),
+      "Net Banking": new Set(),
+      UPI: new Set(),
+      Wallet: new Set(),
+    };
+
+    const push = (t, b) => {
+      const T = normType(t);
+      const B = cleanBankName(b);
+      if (T && B && buckets[T]) buckets[T].add(B);
+    };
+
+    while (await cursor.hasNext()) {
+      const doc = await cursor.next();
+      for (const arrName of ["paymentMethods", "parsedFields.paymentMethods"]) {
+        const arr =
+          arrName === "paymentMethods"
+            ? doc.paymentMethods
+            : doc?.parsedFields?.paymentMethods;
+        if (!Array.isArray(arr)) continue;
+        for (const pm of arr) {
+          push(pm.type, pm.bank);
+        }
+      }
+    }
+
+    const out = Object.fromEntries(
+      Object.entries(buckets).map(([k, set]) => [k, Array.from(set).sort()])
+    );
+
+    return res.json({ usedFallback: false, options: out });
   } catch (e) {
     console.error("[/payment-options] error:", e.message);
-    res.status(500).json({ usedFallback: true, options: {
-      "Credit Card": [],
-      "Debit Card": [],
-      "Net Banking": [],
-      "UPI": [],
-      "Wallet": [],
-    }});
+    return res.status(500).json({ error: "payment options failed" });
   }
 });
 
-/* ====== FLIGHT SEARCH BLOCK ======
-   IMPORTANT: Keep your working FlightAPI.io code here. 
-   Return { outbound: [...], returns: [...] } with each item at least:
-   {
-     id, airlineName, depTime, arrTime, price, stops, portalBasePrices?: {
-       MakeMyTrip, Goibibo, EaseMyTrip, Yatra, Cleartrip
-     }
-   }
+// ---------- Flight search (FlightAPI.io) ----------
+async function flightapiSearch({ from, to, dateFrom, dateTo, tripType, passengers, cabin }) {
+  if (!FLIGHTAPI_KEY) return { meta: { outStatus: 500, retStatus: 0 }, outbound: [], ret: [] };
 
-   If you already have a working function, paste it here and call it from /search.
-*/
-async function searchFlightsFlightAPI(payload) {
-  // 🔴 REPLACE THIS WITH YOUR CURRENT WORKING FLIGHTAPI.IO CALL
-  // For continuity, we’ll return an empty list if not replaced.
-  return { outbound: [], returns: [] };
+  // FlightAPI.io expects ISO dates. You’ve already picked ISO at the frontend now.
+  // Replace with your real endpoint + params that worked previously.
+  // Below is a generic round-trip pattern; if one-way, skip the return leg.
+  const base = "https://api.flightapi.io/roundtrip";
+
+  const qs = new URLSearchParams({
+    cabinClass: cabin || "economy",
+    passengers: String(passengers || 1),
+    from,
+    to,
+    date: dateFrom, // yyyy-mm-dd
+    ...(tripType === "round-trip" ? { returnDate: dateTo } : {}),
+    currency: "INR",
+    apiKey: FLIGHTAPI_KEY,
+  });
+
+  const url = `${base}?${qs.toString()}`;
+
+  try {
+    const { data } = await axios.get(url, { timeout: 18000 });
+
+    // You may adapt mapping according to your actual payload
+    const mapLeg = (item) => {
+      const airlineName =
+        item?.legs?.[0]?.segments?.[0]?.operatingCarrier?.name ||
+        item?.legs?.[0]?.segments?.[0]?.marketingCarrier?.name ||
+        "Unknown";
+      const dep = item?.legs?.[0]?.departure?.time || "";
+      const arr = item?.legs?.[0]?.arrival?.time || "";
+      const nonStop = (item?.legs?.[0]?.segments?.length || 1) === 1;
+      const stops = nonStop ? 0 : (item?.legs?.[0]?.segments?.length || 2) - 1;
+
+      return {
+        airlineName,
+        departure: dep.slice(11, 16),
+        arrival: arr.slice(11, 16),
+        stops,
+        price: Math.round(Number(item?.price?.total || 0)),
+        raw: item,
+      };
+    };
+
+    const outbound = Array.isArray(data?.outbound) ? data.outbound.map(mapLeg) : [];
+    const ret = Array.isArray(data?.return) ? data.return.map(mapLeg) : [];
+
+    return {
+      meta: {
+        outStatus: 200,
+        retStatus: 200,
+        outCount: outbound.length,
+        retCount: ret.length,
+        source: "flightapi",
+      },
+      outbound,
+      ret,
+    };
+  } catch (e) {
+    console.error("[flightapi] error:", e.message);
+    return {
+      meta: { outStatus: 500, retStatus: 0, source: "flightapi", error: e.message },
+      outbound: [],
+      ret: [],
+    };
+  }
 }
 
-/* ====== /search ====== */
 app.post("/search", async (req, res) => {
-  const t0 = Date.now();
   try {
     const {
-      from, to, departureDate, returnDate,
-      tripType, passengers, travelClass,
-      paymentMethods = []
+      from,
+      to,
+      departureDate, // yyyy-mm-dd
+      returnDate, // yyyy-mm-dd or empty
+      tripType = "one-way",
+      passengers = 1,
+      travelClass = "economy",
+      paymentFilters = [], // [{type:'Credit Card', bank:'HDFC Bank'}, ...]
     } = req.body || {};
 
-    // 1) Get real flights from your existing FlightAPI code
-    const { outbound, returns } = await searchFlightsFlightAPI({
-      from, to, departureDate, returnDate, tripType, passengers, travelClass
+    // 1) flights
+    const r = await flightapiSearch({
+      from,
+      to,
+      dateFrom: departureDate,
+      dateTo: returnDate,
+      tripType,
+      passengers,
+      cabin: travelClass,
     });
 
-    // 2) Apply offers per OTA on each flight (if you have base prices per portal)
-    const otas = OTAS;
-    const decorate = async (list) => {
+    // 2) apply offers per flight
+    const apply = async (arr) => {
       const out = [];
-      for (const f of list) {
-        const basePrice = Number(f.price || 0) || 0;
-
-        // if you already compute per-portal base prices, use them; else one base for all
-        const perPortalBase = f.portalBasePrices || Object.fromEntries(otas.map(p => [p, basePrice]));
-        const portalPrices = {};
-        let best = { portal: otas[0], finalPrice: basePrice, note: "No eligible offer" };
-
-        for (const p of otas) {
-          const base = Number(perPortalBase[p] || basePrice) || basePrice;
-          const deal = await applyMongoOffers(base, paymentMethods, p);
-          portalPrices[p] = { base, final: deal.finalPrice, note: deal.note };
-          if (deal.finalPrice < best.finalPrice) best = { ...deal, portal: p };
-        }
-
-        out.push({ ...f, bestDeal: best, portalPrices });
+      for (const f of arr) {
+        const offers = await findApplicableOffers({
+          paymentFilters,
+          basePrice: Number(f.price || 0),
+        });
+        const bestDeal = pickBestDeal(Number(f.price || 0), offers);
+        out.push({
+          ...f,
+          bestDeal,
+        });
       }
       return out;
     };
 
-    const outboundFlights = await decorate(outbound);
-    const returnFlights  = await decorate(returns);
+    const outboundFlights = await apply(r.outbound || []);
+    const returnFlights = tripType === "round-trip" ? await apply(r.ret || []) : [];
 
-    res.json({
-      meta: {
-        source: "flightapi",
-        outStatus: 200,
-        outCount: outboundFlights.length,
-        retCount: returnFlights.length,
-        offerDebug: {}
-      },
+    return res.json({
+      meta: r.meta,
       outboundFlights,
-      returnFlights
+      returnFlights,
     });
   } catch (e) {
-    console.error("[/search] error:", e);
-    res.status(502).json({
-      meta: { source: "flightapi", outStatus: 502, outCount: 0, retCount: 0, offerDebug: { err: e.message } },
-      outboundFlights: [],
-      returnFlights: []
-    });
-  } finally {
-    if (Date.now() - t0 > 12000) console.warn("[/search] slow", Date.now() - t0, "ms");
+    console.error("[/search] error:", e.message);
+    return res.status(500).json({ error: "search failed" });
   }
 });
 
-/* ====== START ====== */
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`SkyDeal backend listening on ${PORT}`);
-});
+app.get("/", (_req, res) => res.send("SkyDeal backend OK"));
+app.listen(PORT, () => console.log(`SkyDeal backend listening on ${PORT}`));
