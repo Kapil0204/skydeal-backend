@@ -1,164 +1,214 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import axios from 'axios';
-import { MongoClient } from 'mongodb';
+// index.js (ESM)
+// Run on Render port 10000
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import dotenv from "dotenv";
+import { MongoClient } from "mongodb";
 
 dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-
-// ---- Mongo bootstrap (lazy) ----
-let mongo, offersCol;
-const MONGO_URI  = process.env.MONGO_URI || process.env.MONGODB_URI || '';
-const MONGO_DB   = process.env.MONGODB_DB || process.env.MONGODB_DBNAME || 'skydeal';
-const MONGO_COL  = process.env.MONGO_COL || process.env.MONGODB_COL || 'offers';
+// ---------- Mongo helpers ----------
+let mongoClient;
+let offersCol;
 
 async function ensureMongo() {
-  if (offersCol) return;
-  if (!MONGO_URI) {
-    throw new Error('MONGO_URI missing');
+  const uri = process.env.MONGO_URI;
+  const dbName = process.env.MONGODB_DB || "skydeal";
+  const colName = process.env.MONGO_COL || "offers";
+
+  if (!uri) throw new Error("MONGO_URI missing");
+
+  if (!mongoClient) {
+    mongoClient = new MongoClient(uri, { ignoreUndefined: true });
+    await mongoClient.connect();
   }
-  mongo = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 8000 });
-  await mongo.connect();
-  offersCol = mongo.db(MONGO_DB).collection(MONGO_COL);
+  const db = mongoClient.db(dbName);
+  offersCol = db.collection(colName);
 }
 
-// ---- Utils ----
-const noise = /(offer is not applicable|payments (made|not applicable)|wallet|gift\s*card|pay\s*pal)/i;
-const titleFix = s => s
-  .replace(/\s+/g,' ')
-  .replace(/\b ltd\b/i,' LTD')
-  .replace(/\b idfc\b/i,'IDFC')
-  .replace(/\b hsbc bank\b/i,'HSBC Bank')
-  .replace(/\b hdfc\b/i,'HDFC')
-  .trim();
+// small helpers for display/normalization
+const titleFix = (s) =>
+  (s || "")
+    .replace(/\s+/g, " ")
+    .replace(/^\s+|\s+$/g, "");
 
-function dedupeClean(list = []) {
-  const seen = new Set();
+const dedupeClean = (arr) => {
   const out = [];
-  for (const raw of list) {
-    if (!raw || typeof raw !== 'string') continue;
-    if (noise.test(raw)) continue;
-    const k = titleFix(raw).toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(titleFix(raw));
+  const seen = new Set();
+  for (const x of arr || []) {
+    const v = titleFix(x);
+    if (!v) continue;
+    const k = v.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(v);
+    }
   }
-  return out.sort((a,b)=>a.localeCompare(b));
-}
+  return out;
+};
 
-// ---- /payment-options ----
-app.get('/payment-options', async (req, res) => {
+// ---------- /payment-options ----------
+app.get("/payment-options", async (req, res) => {
   try {
     await ensureMongo();
 
-    const pipeline = [
-      { $match: { $or: [ { isExpired: { $exists: false } }, { isExpired: false } ] } },
+    // pull payment data from both paymentMethods and parsedFields.paymentMethods
+    const cursor = offersCol.aggregate([
+      {
+        $match: {
+          $or: [{ isExpired: { $exists: false } }, { isExpired: false }],
+        },
+      },
       {
         $project: {
-          pmA: "$paymentMethods",
-          pmB: "$parsedFields.paymentMethods"
-        }
-      }
-    ];
-    const cur = offersCol.aggregate(pipeline);
+          pm1: "$paymentMethods",
+          pm2: "$parsedFields.paymentMethods",
+        },
+      },
+      {
+        $project: {
+          merged: {
+            $concatArrays: [
+              { $ifNull: ["$pm1", []] },
+              { $ifNull: ["$pm2", []] },
+            ],
+          },
+        },
+      },
+    ]);
+
     const buckets = {
-      'Credit Card': new Set(),
-      'Debit Card': new Set(),
-      'Net Banking': new Set(),
-      'UPI': new Set(),
-      'Wallet': new Set()
+      "Credit Card": [],
+      "Debit Card": [],
+      "Net Banking": [],
+      UPI: [],
+      Wallet: [],
     };
 
-    for await (const doc of cur) {
-      const all = []
-        .concat(Array.isArray(doc.pmA) ? doc.pmA : [])
-        .concat(Array.isArray(doc.pmB) ? doc.pmB : []);
-      for (const pm of all) {
-        const type = (pm?.type || '').toString();
-        const bank = (pm?.bank || pm?.raw || '').toString();
-        if (!type || !bank) continue;
+    const isBanky = (s) =>
+      /bank|card|visa|master|rupay|amex|axis|hdfc|icici|kotak|idfc|hsbc|rbl|bob|au/i.test(
+        s || ""
+      ) && !/payments?|\bwallet\b.+not applicable|3rd party|gift card/i.test(s);
 
-        // Map synonyms
-        let cat = type.toLowerCase();
-        if (/credit/.test(cat)) cat = 'Credit Card';
-        else if (/debit/.test(cat)) cat = 'Debit Card';
-        else if (/net.?bank/i.test(cat) || /internet bank/i.test(cat)) cat = 'Net Banking';
-        else if (/upi/i.test(cat)) cat = 'UPI';
-        else if (/wallet/i.test(cat)) cat = 'Wallet';
-        else continue;
+    for await (const doc of cursor) {
+      for (const pm of doc.merged || []) {
+        const type = titleFix(pm?.type || "");
+        const bank = titleFix(pm?.bank || pm?.raw || "");
+        if (!type) continue;
 
-        const cleaned = titleFix(bank);
-        if (!noise.test(cleaned)) buckets[cat]?.add(cleaned);
+        if (/credit/i.test(type)) {
+          if (isBanky(bank)) buckets["Credit Card"].push(bank || "Credit Card");
+        } else if (/debit/i.test(type)) {
+          if (isBanky(bank)) buckets["Debit Card"].push(bank || "Debit Card");
+        } else if (/net.*bank/i.test(type) || /internet.*bank/i.test(type)) {
+          if (isBanky(bank)) buckets["Net Banking"].push(bank || "Net Banking");
+        } else if (/upi/i.test(type)) {
+          buckets["UPI"].push(bank || "UPI");
+        } else if (/wallet/i.test(type)) {
+          buckets["Wallet"].push(bank || "Wallet");
+        }
       }
     }
 
-    const options = {};
-    for (const [k,set] of Object.entries(buckets)) {
-      options[k] = dedupeClean([...set]);
-    }
+    const options = Object.fromEntries(
+      Object.entries(buckets).map(([k, v]) => [k, dedupeClean(v)])
+    );
 
-    return res.json({ usedFallback:false, options });
-
-  } catch (err) {
-    console.error('[payment-options] error:', err.message);
-    // Fallback minimal set
-    return res.json({
-      usedFallback:true,
-      options:{
-        'Credit Card':['HDFC Bank','ICICI Bank','Axis Bank','HSBC','Kotak Bank'],
-        'Debit Card':['HDFC Bank','ICICI Bank'],
-        'Net Banking':['ICICI Bank'],
-        'UPI':['CRED UPI','Mobikwik'],
-        'Wallet':['Paytm Wallet']
-      }
+    res.json({ usedFallback: false, options });
+  } catch (e) {
+    // conservative fallback if Mongo is unavailable
+    res.json({
+      usedFallback: true,
+      options: {
+        "Credit Card": ["HDFC Bank", "ICICI Bank", "Axis Bank", "Kotak Bank"],
+        "Debit Card": ["HDFC Bank"],
+        "Net Banking": ["ICICI Bank"],
+        UPI: ["CRED UPI", "Mobikwik"],
+        Wallet: [],
+      },
+      error: e.message || String(e),
     });
   }
 });
 
-// ---- /search ----
-// NOTE: We keep your existing FlightAPI approach. If returnDate is set,
-// we still call your /search once. If the upstream returns 404, we just
-// return meta and empty arrays so the frontend never breaks.
-app.post('/search', async (req, res) => {
+// ---------- /search ----------
+/**
+ * Calls FlightAPI twice (two one-way searches):
+ *  1) out: from -> to on departureDate
+ *  2) ret: to -> from on returnDate (only if round-trip)
+ *
+ * We only return raw lists here. Offer application can happen
+ * in a separate step or on the frontend selection.
+ */
+app.post("/search", async (req, res) => {
   const body = req.body || {};
-  const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
+  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, offerDebug: {} };
 
+  try {
+    const {
+      from,
+      to,
+      departureDate,
+      returnDate,
+      tripType,
+      passengers,
+      travelClass,
+    } = body;
 
- try {
-  const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
+    if (!process.env.FLIGHTAPI_KEY) {
+      throw new Error("FLIGHTAPI_KEY missing");
+    }
 
-  const base = 'https://api.flightapi.io/oneway'; // or whatever endpoint you used
-  const headers = { 'Content-Type': 'application/json', 'apikey': process.env.FLIGHTAPI_KEY };
+    const base = "https://api.flightapi.io/oneway";
+    const headers = {
+      "Content-Type": "application/json",
+      apikey: process.env.FLIGHTAPI_KEY,
+    };
 
-  // one-way call
-  const outRes = await axios.get(`${base}?from=${from}&to=${to}&date=${departureDate}&adults=${passengers}&travelClass=${travelClass}`, { headers });
-  meta.outStatus = outRes.status;
+    // OUTBOUND one-way
+    const outUrl = `${base}?from=${encodeURIComponent(
+      from
+    )}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(
+      departureDate
+    )}&adults=${encodeURIComponent(
+      passengers ?? 1
+    )}&travelClass=${encodeURIComponent(travelClass ?? "economy")}`;
 
-  // return call (only if round-trip)
-  let retFlights = [];
-  if (tripType === 'round-trip' && returnDate) {
-    const retRes = await axios.get(`${base}?from=${to}&to=${from}&date=${returnDate}&adults=${passengers}&travelClass=${travelClass}`, { headers });
-    meta.retStatus = retRes.status;
-    retFlights = retRes.data.flights || [];
+    const outRes = await axios.get(outUrl, { headers });
+    meta.outStatus = outRes.status;
+    const outboundFlights = outRes.data?.flights || [];
+
+    // RETURN one-way (if round-trip)
+    let returnFlights = [];
+    if (tripType === "round-trip" && returnDate) {
+      const retUrl = `${base}?from=${encodeURIComponent(
+        to
+      )}&to=${encodeURIComponent(from)}&date=${encodeURIComponent(
+        returnDate
+      )}&adults=${encodeURIComponent(
+        passengers ?? 1
+      )}&travelClass=${encodeURIComponent(travelClass ?? "economy")}`;
+      const retRes = await axios.get(retUrl, { headers });
+      meta.retStatus = retRes.status;
+      returnFlights = retRes.data?.flights || [];
+    }
+
+    return res.json({ meta, outboundFlights, returnFlights });
+  } catch (e) {
+    meta.outStatus = e?.response?.status || 500;
+    meta.error = e?.message || "Search failed";
+    return res.json({ meta, outboundFlights: [], returnFlights: [] });
   }
+});
 
-  const outFlights = outRes.data.flights || [];
-  return res.json({ meta, outboundFlights: outFlights, returnFlights: retFlights });
-} catch (e) {
-  meta.outStatus = e.response?.status || 500;
-  meta.error = e.message || 'Search failed';
-  return res.json({ meta, outboundFlights: [], returnFlights: [] });
-}
-
-
-
-// ---- Start ----
+// ---------- start ----------
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
