@@ -149,100 +149,49 @@ async function fetchOneWaySmart(params) {
 }
 
 // ---- /search ----
+// /search
 app.post('/search', async (req, res) => {
   const body = req.body || {};
-  const meta = {
-    source: 'flightapi',
-    outStatus: 0,
-    retStatus: 0,
-    error: '',
-    offerDebug: {},
-    request: { outTried: [], retTried: [] }
-  };
-
+  const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, request: {} };
   try {
-    let { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
+    const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
 
-    // 1) Normalize dates to YYYY-MM-DD (supports DD/MM/YYYY)
-    const norm = (d) => {
-      if (!d) return '';
-      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-      const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-      return m ? `${m[3]}-${m[2]}-${m[1]}` : d;
-    };
-    departureDate = norm(departureDate);
-    returnDate   = norm(returnDate);
+    // Map cabin to FlightAPI format
+    const cabin = (travelClass || 'economy').toLowerCase() === 'premium economy'
+      ? 'Premium_Economy'
+      : (travelClass || 'economy')[0].toUpperCase() + (travelClass || 'economy').slice(1).toLowerCase();
 
-    // 2) Basic params
-    from = (from || '').toUpperCase().slice(0,3);
-    to   = (to   || '').toUpperCase().slice(0,3);
-    passengers  = Number(passengers || 1);
-    travelClass = (travelClass || 'economy').toLowerCase();
+    const base = 'https://api.flightapi.io/onewaytrip';
+    const key  = process.env.FLIGHTAPI_KEY;
+    const currency = 'INR';            // adjust if you prefer
+    const children = 0, infants = 0;   // we’re not collecting these yet
 
-    // 3) Guard: API key
-    const APIKEY = process.env.FLIGHTAPI_KEY;
-    if (!APIKEY) {
-      meta.error = 'FLIGHTAPI_KEY missing on backend';
-      return res.json({ meta, outboundFlights: [], returnFlights: [] });
+    // Outbound
+    const outUrl = `${base}/${key}/${from}/${to}/${departureDate}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+    const outRes = await axios.get(outUrl);
+    meta.outStatus = outRes.status;
+
+    // Return (if round trip)
+    let retFlights = [];
+    if (tripType === 'round-trip' && returnDate) {
+      const retUrl = `${base}/${key}/${to}/${from}/${returnDate}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+      const retRes = await axios.get(retUrl);
+      meta.retStatus = retRes.status;
+      retFlights = retRes.data.flights || retRes.data.itineraries || [];
+      meta.request.retTried = [{ url: retUrl, status: meta.retStatus }];
     }
 
-    // 4) Build variant URLs
-    const oneWayUrls = [
-      // path-style
-      `https://api.flightapi.io/oneway/${APIKEY}/${from}/${to}/${departureDate}/${passengers}/${travelClass}`,
-      // query apikey
-      `https://api.flightapi.io/oneway?apikey=${APIKEY}&from=${from}&to=${to}&date=${departureDate}&adults=${passengers}&travelClass=${travelClass}`,
-      // query api_key (some accounts use this param)
-      `https://api.flightapi.io/oneway?api_key=${APIKEY}&from=${from}&to=${to}&date=${departureDate}&adults=${passengers}&travelClass=${travelClass}`,
-    ];
+    const outFlights = outRes.data.flights || outRes.data.itineraries || [];
+    meta.request.outTried = [{ url: outUrl, status: meta.outStatus }];
 
-    const retUrls = returnDate ? [
-      `https://api.flightapi.io/oneway/${APIKEY}/${to}/${from}/${returnDate}/${passengers}/${travelClass}`,
-      `https://api.flightapi.io/oneway?apikey=${APIKEY}&from=${to}&to=${from}&date=${returnDate}&adults=${passengers}&travelClass=${travelClass}`,
-      `https://api.flightapi.io/oneway?api_key=${APIKEY}&from=${to}&to=${from}&date=${returnDate}&adults=${passengers}&travelClass=${travelClass}`,
-    ] : [];
-
-    // helper to attempt a list of URLs and record tries
-    const tryUrls = async (urls, bucketName) => {
-      for (const url of urls) {
-        try {
-          const r = await axios.get(url, { headers: { 'Content-Type': 'application/json' }, timeout: 20000 });
-          meta[bucketName === 'out' ? 'outStatus' : 'retStatus'] = r.status;
-          meta.request[bucketName === 'out' ? 'outTried' : 'retTried'].push({
-            url, status: r.status, body: String(r.data).slice(0, 180)
-          });
-          return r.data; // success
-        } catch (e) {
-          const status = e.response?.status || 0;
-          const body   = e.response?.data ? String(e.response.data).slice(0, 180) : (e.message || '').slice(0,180);
-          meta.request[bucketName === 'out' ? 'outTried' : 'retTried'].push({ url, status, body });
-          // continue to next URL
-        }
-      }
-      return null;
-    };
-
-    // 5) Do calls
-    const outData = await tryUrls(oneWayUrls, 'out');
-    const retData = (tripType === 'round-trip' && returnDate) ? await tryUrls(retUrls, 'ret') : null;
-
-    const outboundFlights = outData?.data?.flights || outData?.flights || [];
-    const returnFlights   = retData?.data?.flights || retData?.flights || [];
-
-    if (!outboundFlights.length && meta.outStatus === 0) meta.outStatus = 404;
-    if (tripType === 'round-trip' && !returnFlights.length && meta.retStatus === 0) meta.retStatus = 404;
-
-    if (!outboundFlights.length && (tripType !== 'round-trip' || !returnFlights.length)) {
-      meta.error = 'All FlightAPI variants failed';
-    }
-
-    return res.json({ meta, outboundFlights, returnFlights });
+    return res.json({ meta, outboundFlights: outFlights, returnFlights: retFlights });
   } catch (e) {
-    meta.error = e.message || 'search failed';
-    meta.outStatus ||= 500;
+    meta.error = e.message || 'Search failed';
+    meta.outStatus = meta.outStatus || (e.response?.status || 500);
     return res.json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
+
 
 
 // ---------- start ----------
