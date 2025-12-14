@@ -13,15 +13,13 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// ---------------- Mongo helpers ----------------
-let mongoClient;
-let offersCol;
-
+// ---------- Mongo helpers ----------
+let mongoClient, offersCol;
 async function ensureMongo() {
   const uri = process.env.MONGO_URI;
+  if (!uri) throw new Error("MONGO_URI missing");
   const dbName = process.env.MONGODB_DB || "skydeal";
   const colName = process.env.MONGO_COL || "offers";
-  if (!uri) throw new Error("MONGO_URI missing");
   if (!mongoClient) {
     mongoClient = new MongoClient(uri, { ignoreUndefined: true });
     await mongoClient.connect();
@@ -41,21 +39,17 @@ const dedupeClean = (arr) => {
   return out;
 };
 
-// ---------------- /payment-options ----------------
+// ---------- /payment-options ----------
 app.get("/payment-options", async (_req, res) => {
   try {
     await ensureMongo();
-
     const cursor = offersCol.aggregate([
       { $match: { $or: [ {isExpired: {$exists:false}}, {isExpired:false} ] } },
-      { $project: { pm1:"$paymentMethods", pm2:"$parsedFields.paymentMethods" } },
+      { $project: { pm1: "$paymentMethods", pm2: "$parsedFields.paymentMethods" } },
       { $project: { merged: { $concatArrays: [ {$ifNull:["$pm1",[]]}, {$ifNull:["$pm2",[]]} ] } } }
     ]);
 
-    const buckets = {
-      "Credit Card": [], "Debit Card": [], "Net Banking": [], "UPI": [], "Wallet": []
-    };
-
+    const buckets = { "Credit Card": [], "Debit Card": [], "Net Banking": [], "UPI": [], "Wallet": [] };
     const isBanky = (s) =>
       /bank|card|visa|master|rupay|amex|axis|hdfc|icici|kotak|idfc|hsbc|rbl|bob|au/i.test(s||"") &&
       !/not applicable|3rd party|gift card/i.test(s||"");
@@ -65,14 +59,13 @@ app.get("/payment-options", async (_req, res) => {
         const type = titleFix(pm?.type || "");
         const bank = titleFix(pm?.bank || pm?.raw || "");
         if (!type) continue;
-
-        if (/credit/i.test(type))       { if (isBanky(bank)) buckets["Credit Card"].push(bank || "Credit Card"); }
-        else if (/debit/i.test(type))   { if (isBanky(bank)) buckets["Debit Card"].push(bank || "Debit Card"); }
+        if (/credit/i.test(type))        { if (isBanky(bank)) buckets["Credit Card"].push(bank || "Credit Card"); }
+        else if (/debit/i.test(type))    { if (isBanky(bank)) buckets["Debit Card"].push(bank || "Debit Card"); }
         else if (/net.*bank|internet.*bank/i.test(type)) {
           if (isBanky(bank)) buckets["Net Banking"].push(bank || "Net Banking");
         }
-        else if (/upi/i.test(type))     { buckets["UPI"].push(bank || "UPI"); }
-        else if (/wallet/i.test(type))  { buckets["Wallet"].push(bank || "Wallet"); }
+        else if (/upi/i.test(type))      { buckets["UPI"].push(bank || "UPI"); }
+        else if (/wallet/i.test(type))   { buckets["Wallet"].push(bank || "Wallet"); }
       }
     }
 
@@ -93,37 +86,54 @@ app.get("/payment-options", async (_req, res) => {
   }
 });
 
-// ---------------- FlightAPI helpers ----------------
+// ---------- FlightAPI helpers ----------
 function toYYYYMMDD(s) {
   if (!s) return s;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;           // already normalized
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);       // DD/MM/YYYY
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;         // already normalized
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);     // DD/MM/YYYY
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-  return s; // as-is
+  return s;
 }
 
-// Two supported styles:
-// 1) query:  https://api.flightapi.io/oneway?apikey=KEY&from=BOM&to=DEL&date=YYYY-MM-DD&adults=1&travelClass=economy
-// 2) path:   https://api.flightapi.io/oneway/KEY/BOM/DEL/YYYY-MM-DD/1/economy
-function buildOneWayUrl({ from, to, date, adults=1, travelClass="economy" }) {
+// Build all common URL variants (path + query with apikey/api_key)
+function buildCandidates({ from, to, date, adults=1, travelClass="economy" }) {
   const key = process.env.FLIGHTAPI_KEY;
   if (!key) throw new Error("FLIGHTAPI_KEY missing");
-  const style = (process.env.FLIGHTAPI_STYLE || "query").toLowerCase();
+  const host = process.env.FLIGHTAPI_HOST || "https://api.flightapi.io";
 
-  if (style === "path") {
-    // common public docs format
-    return `https://api.flightapi.io/oneway/${encodeURIComponent(key)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(date)}/${encodeURIComponent(adults)}/${encodeURIComponent(travelClass)}`;
-  }
+  const path = `${host}/oneway/${encodeURIComponent(key)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(date)}/${encodeURIComponent(adults)}/${encodeURIComponent(travelClass)}`;
 
-  // default to query style
-  const base = "https://api.flightapi.io/oneway";
-  return `${base}?apikey=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
+  const query_apikey = `${host}/oneway?apikey=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
+
+  const query_api_key = `${host}/oneway?api_key=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
+
+  return [path, query_apikey, query_api_key];
 }
 
-// ---------------- /search (two one-way calls) ----------------
+async function fetchOneWaySmart(params) {
+  const tried = [];
+  const candidates = buildCandidates(params);
+  for (const url of candidates) {
+    try {
+      const r = await axios.get(url);
+      tried.push({ url, status: r.status });
+      return { data: r.data, status: r.status, tried };
+    } catch (e) {
+      const st = e?.response?.status || 0;
+      tried.push({ url, status: st, error: e?.message });
+      // try next variant
+    }
+  }
+  // if all failed, throw with trace
+  const err = new Error("All FlightAPI variants failed");
+  err.tried = tried;
+  throw err;
+}
+
+// ---------- /search (two one-way calls) ----------
 app.post("/search", async (req, res) => {
   const body = req.body || {};
-  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, offerDebug: {}, request:{} };
+  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, offerDebug: {}, request: {} };
 
   try {
     const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
@@ -131,36 +141,35 @@ app.post("/search", async (req, res) => {
     const dep = toYYYYMMDD(departureDate);
     const ret = toYYYYMMDD(returnDate);
 
-    const outUrl = buildOneWayUrl({
+    // outbound
+    const out = await fetchOneWaySmart({
       from, to, date: dep, adults: passengers ?? 1, travelClass: travelClass ?? "economy"
     });
-    meta.request.outUrl = outUrl;
+    meta.outStatus = out.status;
+    meta.request.outTried = out.tried;
+    const outboundFlights = out.data?.flights || [];
 
-    const outRes = await axios.get(outUrl);
-    meta.outStatus = outRes.status;
-    const outboundFlights = outRes.data?.flights || [];
-
+    // return (if round trip)
     let returnFlights = [];
     if (tripType === "round-trip" && ret) {
-      const retUrl = buildOneWayUrl({
+      const rt = await fetchOneWaySmart({
         from: to, to: from, date: ret, adults: passengers ?? 1, travelClass: travelClass ?? "economy"
       });
-      meta.request.retUrl = retUrl;
-
-      const retRes = await axios.get(retUrl);
-      meta.retStatus = retRes.status;
-      returnFlights = retRes.data?.flights || [];
+      meta.retStatus = rt.status;
+      meta.request.retTried = rt.tried;
+      returnFlights = rt.data?.flights || [];
     }
 
     return res.json({ meta, outboundFlights, returnFlights });
   } catch (e) {
-    meta.outStatus = e?.response?.status || 500;
+    meta.outStatus = e?.response?.status || 404;
     meta.error = e?.message || "Search failed";
+    if (e?.tried) meta.request.tried = e.tried;
     return res.json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
 
-// ---------------- start ----------------
+// ---------- start ----------
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
