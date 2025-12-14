@@ -89,61 +89,82 @@ app.get("/payment-options", async (_req, res) => {
 // ---------- FlightAPI helpers ----------
 function toYYYYMMDD(s) {
   if (!s) return s;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;         // already normalized
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);     // DD/MM/YYYY
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;           // already normalized
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);       // DD/MM/YYYY
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   return s;
 }
+function normIata(x) { return titleFix(x).toUpperCase(); }
+function normCabin(x) {
+  const t = (x || "").toString().toLowerCase();
+  if (t.startsWith("eco")) return "ECONOMY";
+  if (t.startsWith("pre")) return "PREMIUM_ECONOMY";
+  if (t.startsWith("bus")) return "BUSINESS";
+  if (t.startsWith("fir")) return "FIRST";
+  return "ECONOMY";
+}
 
-// Build all common URL variants (path + query with apikey/api_key)
-function buildCandidates({ from, to, date, adults=1, travelClass="economy" }) {
+// Build an expanded set of URL candidates (covers both common hosts and param styles).
+function buildCandidates({ from, to, date, adults=1, travelClass="ECONOMY", currency="INR" }) {
   const key = process.env.FLIGHTAPI_KEY;
   if (!key) throw new Error("FLIGHTAPI_KEY missing");
-  const host = process.env.FLIGHTAPI_HOST || "https://api.flightapi.io";
 
-  const path = `${host}/oneway/${encodeURIComponent(key)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(date)}/${encodeURIComponent(adults)}/${encodeURIComponent(travelClass)}`;
+  const hosts = [
+    process.env.FLIGHTAPI_HOST || "https://api.flightapi.io",
+    "https://flightapi.io" // some accounts are mapped here
+  ];
 
-  const query_apikey = `${host}/oneway?apikey=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
+  const qs = (obj) =>
+    Object.entries(obj).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
 
-  const query_api_key = `${host}/oneway?api_key=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
-
-  return [path, query_apikey, query_api_key];
+  const make = [];
+  for (const h of hosts) {
+    // path style
+    make.push(`${h}/oneway/${encodeURIComponent(key)}/${from}/${to}/${date}/${adults}/${travelClass}?currency=${currency}`);
+    // query apikey
+    make.push(`${h}/oneway?${qs({ apikey:key, from, to, date, adults, travelClass, currency })}`);
+    // query api_key
+    make.push(`${h}/oneway?${qs({ api_key:key, from, to, date, adults, travelClass, currency })}`);
+  }
+  return make;
 }
 
 async function fetchOneWaySmart(params) {
   const tried = [];
-  const candidates = buildCandidates(params);
-  for (const url of candidates) {
+  for (const url of buildCandidates(params)) {
     try {
       const r = await axios.get(url);
       tried.push({ url, status: r.status });
       return { data: r.data, status: r.status, tried };
     } catch (e) {
       const st = e?.response?.status || 0;
-      tried.push({ url, status: st, error: e?.message });
-      // try next variant
+      const body = (typeof e?.response?.data === "string") ? e.response.data
+                 : (e?.response?.data ? JSON.stringify(e.response.data) : "");
+      tried.push({ url, status: st, error: e?.message, body });
     }
   }
-  // if all failed, throw with trace
   const err = new Error("All FlightAPI variants failed");
   err.tried = tried;
   throw err;
 }
 
-// ---------- /search (two one-way calls) ----------
+// ---------- /search (two one-way calls; never break the UI) ----------
 app.post("/search", async (req, res) => {
   const body = req.body || {};
   const meta = { source: "flightapi", outStatus: 0, retStatus: 0, offerDebug: {}, request: {} };
 
   try {
-    const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
-
-    const dep = toYYYYMMDD(departureDate);
-    const ret = toYYYYMMDD(returnDate);
+    const from = normIata(body.from);
+    const to = normIata(body.to);
+    const dep = toYYYYMMDD(body.departureDate);
+    const ret = toYYYYMMDD(body.returnDate);
+    const tripType = body.tripType || "one-way";
+    const adults = Number(body.passengers || 1);
+    const cabin = normCabin(body.travelClass);
 
     // outbound
     const out = await fetchOneWaySmart({
-      from, to, date: dep, adults: passengers ?? 1, travelClass: travelClass ?? "economy"
+      from, to, date: dep, adults, travelClass: cabin, currency: "INR"
     });
     meta.outStatus = out.status;
     meta.request.outTried = out.tried;
@@ -153,7 +174,7 @@ app.post("/search", async (req, res) => {
     let returnFlights = [];
     if (tripType === "round-trip" && ret) {
       const rt = await fetchOneWaySmart({
-        from: to, to: from, date: ret, adults: passengers ?? 1, travelClass: travelClass ?? "economy"
+        from: to, to: from, date: ret, adults, travelClass: cabin, currency: "INR"
       });
       meta.retStatus = rt.status;
       meta.request.retTried = rt.tried;
