@@ -13,6 +13,25 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
+// add near top
+function toISO(d) {
+  if (!d) return '';
+  // already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  // dd/mm/yyyy -> yyyy-mm-dd
+  const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  // fallback: let Date try, then format
+  const t = new Date(d);
+  if (!isNaN(t)) {
+    const mm = String(t.getMonth()+1).padStart(2,'0');
+    const dd = String(t.getDate()).padStart(2,'0');
+    return `${t.getFullYear()}-${mm}-${dd}`;
+  }
+  return d;
+}
+
+
 // ---------- Mongo helpers ----------
 let mongoClient, offersCol;
 async function ensureMongo() {
@@ -155,6 +174,11 @@ app.post('/search', async (req, res) => {
   const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, request: {} };
   try {
     const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
+    let { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
+
+departureDate = toISO(departureDate);
+returnDate   = toISO(returnDate);
+
 
     // Map cabin to FlightAPI format
     const cabin = (travelClass || 'economy').toLowerCase() === 'premium economy'
