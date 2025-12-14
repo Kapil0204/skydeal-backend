@@ -134,17 +134,32 @@ app.post('/search', async (req, res) => {
   const body = req.body || {};
   const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
 
-  try {
-    // forward to your existing FlightAPI logic / adapter:
-    const apiUrl = process.env.FLIGHTAPI_URL; // optional override
-    const url = apiUrl || 'https://flightapi.io/ROUNDTRIP_PLACEHOLDER'; // placeholder
-    await Promise.reject(new Error('Use your existing FlightAPI adapter here (frontend now handles 404s cleanly).'));
-  } catch (e) {
-    meta.outStatus = 500;
-    meta.error = e.message || 'Search failed';
-    return res.json({ meta, outboundFlights: [], returnFlights: [] });
+ try {
+  const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
+
+  const base = 'https://api.flightapi.io/oneway'; // or whatever endpoint you used
+  const headers = { 'Content-Type': 'application/json', 'apikey': process.env.FLIGHTAPI_KEY };
+
+  // one-way call
+  const outRes = await axios.get(`${base}?from=${from}&to=${to}&date=${departureDate}&adults=${passengers}&travelClass=${travelClass}`, { headers });
+  meta.outStatus = outRes.status;
+
+  // return call (only if round-trip)
+  let retFlights = [];
+  if (tripType === 'round-trip' && returnDate) {
+    const retRes = await axios.get(`${base}?from=${to}&to=${from}&date=${returnDate}&adults=${passengers}&travelClass=${travelClass}`, { headers });
+    meta.retStatus = retRes.status;
+    retFlights = retRes.data.flights || [];
   }
-});
+
+  const outFlights = outRes.data.flights || [];
+  return res.json({ meta, outboundFlights: outFlights, returnFlights: retFlights });
+} catch (e) {
+  meta.outStatus = e.response?.status || 500;
+  meta.error = e.message || 'Search failed';
+  return res.json({ meta, outboundFlights: [], returnFlights: [] });
+}
+
 
 
 // ---- Start ----
