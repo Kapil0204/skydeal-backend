@@ -42,14 +42,14 @@ const dedupeClean = (arr) => {
 };
 
 // ---------------- /payment-options ----------------
-app.get("/payment-options", async (req, res) => {
+app.get("/payment-options", async (_req, res) => {
   try {
     await ensureMongo();
 
     const cursor = offersCol.aggregate([
-      {$match: {$or:[{isExpired:{$exists:false}}, {isExpired:false}] }},
-      {$project:{ pm1:"$paymentMethods", pm2:"$parsedFields.paymentMethods" }},
-      {$project:{ merged: {$concatArrays:[{$ifNull:["$pm1",[]]}, {$ifNull:["$pm2",[]]}]} }}
+      { $match: { $or: [ {isExpired: {$exists:false}}, {isExpired:false} ] } },
+      { $project: { pm1:"$paymentMethods", pm2:"$parsedFields.paymentMethods" } },
+      { $project: { merged: { $concatArrays: [ {$ifNull:["$pm1",[]]}, {$ifNull:["$pm2",[]]} ] } } }
     ]);
 
     const buckets = {
@@ -93,19 +93,29 @@ app.get("/payment-options", async (req, res) => {
   }
 });
 
-// ---------------- utilities for FlightAPI ----------------
+// ---------------- FlightAPI helpers ----------------
 function toYYYYMMDD(s) {
   if (!s) return s;
-  // Accept both DD/MM/YYYY and YYYY-MM-DD; pass through if already normalized
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;           // already normalized
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);       // DD/MM/YYYY
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-  return s; // as-is (curl tests may already send YYYY-MM-DD)
+  return s; // as-is
 }
 
+// Two supported styles:
+// 1) query:  https://api.flightapi.io/oneway?apikey=KEY&from=BOM&to=DEL&date=YYYY-MM-DD&adults=1&travelClass=economy
+// 2) path:   https://api.flightapi.io/oneway/KEY/BOM/DEL/YYYY-MM-DD/1/economy
 function buildOneWayUrl({ from, to, date, adults=1, travelClass="economy" }) {
-  // Keep your known-good FlightAPI style. Many accounts require key in *query* not header.
   const key = process.env.FLIGHTAPI_KEY;
+  if (!key) throw new Error("FLIGHTAPI_KEY missing");
+  const style = (process.env.FLIGHTAPI_STYLE || "query").toLowerCase();
+
+  if (style === "path") {
+    // common public docs format
+    return `https://api.flightapi.io/oneway/${encodeURIComponent(key)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(date)}/${encodeURIComponent(adults)}/${encodeURIComponent(travelClass)}`;
+  }
+
+  // default to query style
   const base = "https://api.flightapi.io/oneway";
   return `${base}?apikey=${encodeURIComponent(key)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&date=${encodeURIComponent(date)}&adults=${encodeURIComponent(adults)}&travelClass=${encodeURIComponent(travelClass)}`;
 }
@@ -117,7 +127,6 @@ app.post("/search", async (req, res) => {
 
   try {
     const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
-    if (!process.env.FLIGHTAPI_KEY) throw new Error("FLIGHTAPI_KEY missing");
 
     const dep = toYYYYMMDD(departureDate);
     const ret = toYYYYMMDD(returnDate);
