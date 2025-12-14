@@ -129,12 +129,15 @@ app.post('/search', async (req, res) => {
   const body = req.body || {};
   const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
 
+  // ---- /search ----
+app.post('/search', async (req, res) => {
+  const body = req.body || {};
+  const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
+
   try {
     // forward to your existing FlightAPI logic / adapter:
     const apiUrl = process.env.FLIGHTAPI_URL; // optional override
-    const url = apiUrl || 'https://flightapi.io/ROUNDTRIP_PLACEHOLDER'; // placeholder; your real code can ignore this
-    // This is just a placeholder fetch to keep the shape; replace with your working call if you already have it.
-    // We expect your Render service already has the working code; if not, meta.outStatus becomes 404/500.
+    const url = apiUrl || 'https://flightapi.io/ROUNDTRIP_PLACEHOLDER'; // placeholder
     await Promise.reject(new Error('Use your existing FlightAPI adapter here (frontend now handles 404s cleanly).'));
   } catch (e) {
     meta.outStatus = 500;
@@ -142,6 +145,7 @@ app.post('/search', async (req, res) => {
     return res.json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
+
 
 // ---- Start ----
 app.listen(PORT, () => {
