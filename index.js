@@ -129,10 +129,6 @@ app.post('/search', async (req, res) => {
   const body = req.body || {};
   const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
 
-  // ---- /search ----
-app.post('/search', async (req, res) => {
-  const body = req.body || {};
-  const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, offerDebug: {} };
 
  try {
   const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
