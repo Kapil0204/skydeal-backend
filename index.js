@@ -168,53 +168,67 @@ async function fetchOneWaySmart(params) {
 }
 
 // ---- /search ----
-// /search
+// ----- /search -----
 app.post('/search', async (req, res) => {
   const body = req.body || {};
   const meta = { source: 'flightapi', outStatus: 0, retStatus: 0, request: {} };
+
   try {
+    // single destructure (do not redeclare these)
     const { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
-    let { from, to, departureDate, returnDate, tripType, passengers, travelClass } = body;
 
-departureDate = toISO(departureDate);
-returnDate   = toISO(returnDate);
+    // dates -> yyyy-mm-dd
+    const depISO = toISO(departureDate);
+    const retISO = toISO(returnDate);
 
-
-    // Map cabin to FlightAPI format
-    const cabin = (travelClass || 'economy').toLowerCase() === 'premium economy'
-      ? 'Premium_Economy'
-      : (travelClass || 'economy')[0].toUpperCase() + (travelClass || 'economy').slice(1).toLowerCase();
+    // map cabin to FlightAPI casing
+    const cabin =
+      (travelClass || 'economy').toLowerCase() === 'premium economy'
+        ? 'Premium_Economy'
+        : (travelClass || 'economy')[0].toUpperCase() + (travelClass || 'economy').slice(1).toLowerCase();
 
     const base = 'https://api.flightapi.io/onewaytrip';
-    const key  = process.env.FLIGHTAPI_KEY;
-    const currency = 'INR';            // adjust if you prefer
-    const children = 0, infants = 0;   // we’re not collecting these yet
+    const key = process.env.FLIGHTAPI_KEY;
+    const currency = 'INR';
+    const children = 0, infants = 0;
 
-    // Outbound
-    const outUrl = `${base}/${key}/${from}/${to}/${departureDate}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+    // ----- outbound -----
+    const outUrl = `${base}/${key}/${from}/${to}/${depISO}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+    meta.request.outUrl = outUrl;
+
     const outRes = await axios.get(outUrl);
     meta.outStatus = outRes.status;
 
-    // Return (if round trip)
+    // FlightAPI commonly returns data under data.itineraries; fallbacks added
+    const outFlights =
+      outRes.data?.data?.itineraries ??
+      outRes.data?.data ??
+      outRes.data ??
+      [];
+
+    // ----- return (if round-trip) -----
     let retFlights = [];
-    if (tripType === 'round-trip' && returnDate) {
-      const retUrl = `${base}/${key}/${to}/${from}/${returnDate}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+    if (tripType === 'round-trip' && retISO) {
+      const retUrl = `${base}/${key}/${to}/${from}/${retISO}/${passengers}/${children}/${infants}/${cabin}/${currency}`;
+      meta.request.retUrl = retUrl;
+
       const retRes = await axios.get(retUrl);
       meta.retStatus = retRes.status;
-      retFlights = retRes.data.flights || retRes.data.itineraries || [];
-      meta.request.retTried = [{ url: retUrl, status: meta.retStatus }];
-    }
 
-    const outFlights = outRes.data.flights || outRes.data.itineraries || [];
-    meta.request.outTried = [{ url: outUrl, status: meta.outStatus }];
+      retFlights =
+        retRes.data?.data?.itineraries ??
+        retRes.data?.data ??
+        retRes.data ??
+        [];
+    }
 
     return res.json({ meta, outboundFlights: outFlights, returnFlights: retFlights });
   } catch (e) {
     meta.error = e.message || 'Search failed';
-    meta.outStatus = meta.outStatus || (e.response?.status || 500);
     return res.json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
+
 
 
 
