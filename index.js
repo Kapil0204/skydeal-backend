@@ -147,6 +147,16 @@ function buildCandidates({ from, to, date, adults=1, travelClass="ECONOMY", curr
   }
   return make;
 }
+// right before fetch('/search', { ... })
+const payload = {
+  from, to,
+  departureDate: departInput.value,   // UI value (dd/mm/yyyy)
+  returnDate: returnInput.value,
+  tripType: roundTripRadio.checked ? 'round-trip' : 'one-way',
+  passengers: Number(passengersSelect.value),
+  travelClass: cabinSelect.value
+};
+console.log('[SkyDeal] /search payload →', payload);
 
 async function fetchOneWaySmart(params) {
   const tried = [];
