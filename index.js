@@ -4,63 +4,51 @@ import cors from "cors";
 import axios from "axios";
 import { MongoClient } from "mongodb";
 
-// ---------- setup ----------
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
 
-// ---------- config ----------
-const MONGO_URI = process.env.MONGO_URI;
-const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
-const MONGO_COL = process.env.MONGO_COL || "offers";
+// --------------------
+// Config
+// --------------------
+const PORTALS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
+const OTA_MARKUP = Number(process.env.OTA_MARKUP || 250); // your current requirement: +₹250
 
-// Your 5 OTAs (names used in UI)
-const OTAS = ["MakeMyTrip", "Goibibo", "Cleartrip", "Yatra", "EaseMyTrip"];
-const OTA_MARKUP = 250; // ₹250 markup per OTA (your requirement)
-
-// ---------- mongo (single cached client) ----------
-let _client;
-async function getOffersCol() {
-  if (!_client) {
-    if (!MONGO_URI) throw new Error("MONGO_URI missing");
-    _client = new MongoClient(MONGO_URI, { maxPoolSize: 5 });
-    await _client.connect();
-  }
-  return _client.db(MONGODB_DB).collection(MONGO_COL);
-}
-
-// ---------- helpers ----------
+// --------------------
+// Date helpers
+// --------------------
 function toISO(d) {
   if (!d) return "";
   if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
   const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   const t = new Date(d);
-  if (!isNaN(t)) return t.toISOString().slice(0, 10);
+  if (!isNaN(t)) {
+    const mm = String(t.getMonth() + 1).padStart(2, "0");
+    const dd = String(t.getDate()).padStart(2, "0");
+    return `${t.getFullYear()}-${mm}-${dd}`;
+  }
   return "";
 }
 
 function safeNum(x, def = 0) {
-  const n = Number(x);
+  const n = typeof x === "number" ? x : Number(String(x || "").replace(/[^0-9.]/g, ""));
   return Number.isFinite(n) ? n : def;
 }
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
-
 // --------------------
-// FlightAPI fetching
+// FlightAPI helpers
 // --------------------
 function buildCandidates({ from, to, date, adults = 1, travelClass = "ECONOMY", currency = "INR" }) {
   const key = process.env.FLIGHTAPI_KEY;
-  if (!key) throw new Error("FLIGHTAPI_KEY missing");
+  if (!key) throw new Error("Missing FLIGHTAPI_KEY env var");
 
   const base = "https://api.flightapi.io";
   const encKey = encodeURIComponent(key);
-  const cls = travelClass.toUpperCase(); // ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
+  const cls = String(travelClass || "ECONOMY").toUpperCase();
+  const style = String(process.env.FLIGHTAPI_STYLE || "path").toLowerCase(); // "path" or "query"
 
   const Q = new URLSearchParams({
     from,
@@ -71,11 +59,17 @@ function buildCandidates({ from, to, date, adults = 1, travelClass = "ECONOMY", 
     currency,
   }).toString();
 
-  return [
+  const pathUrls = [
     `${base}/oneway/${encKey}/${from}/${to}/${date}/${adults}/${cls}?currency=${currency}`,
+  ];
+
+  const queryUrls = [
     `${base}/oneway?apikey=${encKey}&${Q}`,
     `${base}/oneway?api_key=${encKey}&${Q}`,
   ];
+
+  // prefer order by style
+  return style === "query" ? [...queryUrls, ...pathUrls] : [...pathUrls, ...queryUrls];
 }
 
 async function fetchOneWaySmart(params) {
@@ -87,12 +81,9 @@ async function fetchOneWaySmart(params) {
       return { data: r.data, status: r.status, tried };
     } catch (e) {
       const st = e?.response?.status || 0;
-      const body =
-        typeof e?.response?.data === "string"
-          ? e.response.data
-          : e?.response?.data
-          ? JSON.stringify(e.response.data)
-          : "";
+      const body = typeof e?.response?.data === "string"
+        ? e.response.data
+        : (e?.response?.data ? JSON.stringify(e.response.data) : "");
       tried.push({ url, status: st, body: body?.slice(0, 400) });
     }
   }
@@ -101,346 +92,405 @@ async function fetchOneWaySmart(params) {
   throw err;
 }
 
-// Minimal mapper so frontend gets consistent shape
 function mapFlights(raw) {
-  const items = raw?.data?.flights || raw?.flights || raw?.data || [];
-  const arr = Array.isArray(items) ? items : [];
-  return arr.map((f) => ({
-    airlineName: f.airlineName || f.airline || f.carrier || "-",
-    flightNumber: f.flightNumber || f.number || f.code || "-",
-    departureTime: f.departureTime || f.departure || f.dep_time || null,
-    arrivalTime: f.arrivalTime || f.arrival || f.arr_time || null,
-    stops:
-      typeof f.stops === "number"
-        ? f.stops
-        : Array.isArray(f.legs)
-        ? Math.max(0, f.legs.length - 1)
-        : 0,
-    price: safeNum(f.price || f.totalPrice || f.amount, 0),
-    raw: f,
-  }));
+  const items =
+    raw?.data?.flights ||
+    raw?.flights ||
+    raw?.data ||
+    raw?.results ||
+    [];
+
+  return (Array.isArray(items) ? items : []).map((f) => {
+    const price = safeNum(f.price ?? f.totalPrice ?? f.amount ?? f.fare ?? 0, 0);
+
+    return {
+      airlineName: f.airlineName || f.airline || f.carrier || f.marketingCarrier || "-",
+      flightNumber: f.flightNumber || f.number || f.code || f.flight_code || "-",
+      departureTime: f.departureTime || f.departure || f.dep_time || f.departure_time || null,
+      arrivalTime: f.arrivalTime || f.arrival || f.arr_time || f.arrival_time || null,
+      stops:
+        typeof f.stops === "number"
+          ? f.stops
+          : (Array.isArray(f.legs) ? Math.max(0, f.legs.length - 1) : 0),
+      price,
+      raw: f,
+    };
+  });
 }
 
 // --------------------
-// Offer logic
+// Mongo (cached client)
 // --------------------
-function normalizeType(t) {
-  const s = String(t || "").toLowerCase();
-  if (s.includes("credit")) return "Credit Card";
-  if (s.includes("debit")) return "Debit Card";
-  if (s.includes("net")) return "Net Banking";
-  if (s.includes("upi")) return "UPI";
-  if (s.includes("emi")) return "EMI";
-  if (s.includes("wallet")) return "Wallet";
-  return null;
-}
+let _mongoClient = null;
+let _mongoClientPromise = null;
 
-function parseAmountToNumber(x) {
-  // supports "₹4,000", "4000", "Rs. 4,000"
-  const s = String(x || "").replace(/,/g, "").replace(/[^\d.]/g, "").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
+async function getOffersCollection() {
+  const uri = process.env.MONGO_URI;
+  const dbName = process.env.MONGODB_DB || "skydeal";
+  const colName = process.env.MONGO_COL || "offers";
 
-function isOfferExpired(offer) {
-  // We only use validityPeriod for expiry (your rule).
-  // If schema has parsedFields.validityPeriodEnd or validityPeriod.endDate, handle both.
-  const end =
-    offer?.parsedFields?.validityPeriodEnd ||
-    offer?.parsedFields?.validityPeriod?.endDate ||
-    offer?.validityPeriodEnd ||
-    offer?.validityPeriod?.endDate ||
-    "";
-  const endISO = end ? toISO(end) : "";
-  if (!endISO) return false; // unknown => treat as not expired (conservative)
-  return endISO < todayISO();
-}
+  if (!uri) throw new Error("Missing MONGO_URI env var");
 
-function offerMinAmount(offer) {
-  return (
-    offer?.parsedFields?.minTransactionValue ??
-    offer?.minTransactionValue ??
-    parseAmountToNumber(offer?.parsedFields?.rawMinTransactionAmount) ??
-    parseAmountToNumber(offer?.rawMinTransactionAmount) ??
-    0
-  );
-}
-
-function offerDiscount(offer, basePrice) {
-  // supports percent + max cap AND flat amount
-  const pct =
-    safeNum(offer?.parsedFields?.discountPercent ?? offer?.discountPercent, 0) || 0;
-
-  const maxCap =
-    offer?.parsedFields?.maxDiscountAmount != null
-      ? safeNum(offer.parsedFields.maxDiscountAmount, 0)
-      : offer?.maxDiscountAmount != null
-      ? safeNum(offer.maxDiscountAmount, 0)
-      : null;
-
-  const flat =
-    offer?.parsedFields?.flatDiscountAmount != null
-      ? safeNum(offer.parsedFields.flatDiscountAmount, 0)
-      : offer?.flatDiscountAmount != null
-      ? safeNum(offer.flatDiscountAmount, 0)
-      : 0;
-
-  let pctDiscount = 0;
-  if (pct > 0) {
-    pctDiscount = (basePrice * pct) / 100;
-    if (maxCap != null && maxCap > 0) pctDiscount = Math.min(pctDiscount, maxCap);
+  if (_mongoClient) {
+    return _mongoClient.db(dbName).collection(colName);
   }
 
-  const flatDiscount = flat > 0 ? flat : 0;
+  if (!_mongoClientPromise) {
+    _mongoClientPromise = MongoClient.connect(uri, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 15000,
+    });
+  }
 
-  // take the better of percent-based vs flat (simple rule)
-  return Math.max(pctDiscount, flatDiscount, 0);
+  _mongoClient = await _mongoClientPromise;
+  return _mongoClient.db(dbName).collection(colName);
 }
 
-function offerCouponCode(offer) {
-  return (
-    offer?.parsedFields?.couponCode ||
-    offer?.couponCode ||
-    offer?.parsedFields?.code ||
-    offer?.code ||
+// --------------------
+// Offer extraction (robust to schema differences)
+// --------------------
+function normStr(s) {
+  return String(s || "").trim();
+}
+
+function normalizePortal(p) {
+  const x = normStr(p).toLowerCase();
+  if (!x) return "";
+  if (x.includes("make") && x.includes("trip")) return "MakeMyTrip";
+  if (x.includes("goibibo") || x === "go ibibo" || x === "go-ibibo") return "Goibibo";
+  if (x.includes("cleartrip") || x.includes("clear trip")) return "Cleartrip";
+  if (x.includes("yatra")) return "Yatra";
+  if (x.includes("ease") && x.includes("trip")) return "EaseMyTrip";
+  // fallback: TitleCase-ish
+  return x.replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function normalizePayType(t) {
+  const x = normStr(t).toLowerCase();
+  if (!x) return "";
+  if (x.includes("credit")) return "Credit Card";
+  if (x.includes("debit")) return "Debit Card";
+  if (x.includes("net") || x.includes("banking")) return "Net Banking";
+  if (x === "upi" || x.includes("upi")) return "UPI";
+  if (x.includes("emi")) return "EMI";
+  if (x.includes("wallet")) return "Wallet";
+  return x.replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function extractPaymentMethodsFromDoc(doc) {
+  // possible locations
+  const pm =
+    doc?.paymentMethods ||
+    doc?.parsedFields?.paymentMethods ||
+    doc?.rawFields?.paymentMethods ||
+    doc?.parsed?.paymentMethods ||
+    [];
+
+  const arr = Array.isArray(pm) ? pm : [];
+
+  const out = [];
+  for (const item of arr) {
+    if (!item) continue;
+
+    if (typeof item === "string") {
+      // e.g. "ICICI Bank credit card"
+      out.push({ type: "", name: normStr(item) });
+      continue;
+    }
+
+    const type = normalizePayType(item.type || item.methodType || item.paymentType || "");
+    const bank = normStr(item.bank || item.name || item.provider || item.brand || "");
+    const network = normStr(item.network || item.cardNetwork || "");
+    const name = bank || network || normStr(item.label || "");
+    if (name) out.push({ type, name });
+  }
+
+  return out;
+}
+
+function getOfferIsExpired(doc) {
+  // prefer explicit field if present
+  const direct = doc?.isExpired;
+  const parsed = doc?.parsedFields?.isExpired;
+  if (typeof direct === "boolean") return direct;
+  if (typeof parsed === "boolean") return parsed;
+
+  // try validityPeriod end date if present
+  const end =
+    doc?.validityPeriod?.endDate ||
+    doc?.parsedFields?.validityPeriod?.endDate ||
+    doc?.parsedFields?.validityPeriod?.end ||
+    "";
+
+  if (end) {
+    const dt = new Date(end);
+    if (!isNaN(dt)) return dt.getTime() < Date.now();
+  }
+
+  return false; // default: treat as active (we’ll still validate min txn etc.)
+}
+
+function extractOfferCore(doc) {
+  const title = normStr(doc?.title || doc?.parsedFields?.title || doc?.rawFields?.title || "");
+  const code = normStr(
+    doc?.couponCode ||
+    doc?.code ||
+    doc?.parsedFields?.couponCode ||
+    doc?.parsedFields?.code ||
+    doc?.rawFields?.couponCode ||
     ""
   );
+
+  const discountPercent = safeNum(
+    doc?.discountPercent ??
+    doc?.parsedFields?.discountPercent ??
+    doc?.parsedFields?.percentOff ??
+    0,
+    0
+  );
+
+  // Flat discount could be stored in different places/labels
+  const flatDiscountAmount = safeNum(
+    doc?.flatDiscountAmount ??
+    doc?.discountAmount ??
+    doc?.parsedFields?.flatDiscountAmount ??
+    doc?.parsedFields?.discountAmount ??
+    0,
+    0
+  );
+
+  const maxDiscountAmount = safeNum(
+    doc?.maxDiscountAmount ??
+    doc?.parsedFields?.maxDiscountAmount ??
+    doc?.parsedFields?.maxDiscount ??
+    0,
+    0
+  );
+
+  const minTransactionValue = safeNum(
+    doc?.minTransactionValue ??
+    doc?.minAmount ??
+    doc?.parsedFields?.minTransactionValue ??
+    doc?.parsedFields?.minAmount ??
+    0,
+    0
+  );
+
+  const sourcePortal = normalizePortal(
+    doc?.sourcePortal ||
+    doc?.sourceMetadata?.sourcePortal ||
+    doc?.parsedFields?.sourcePortal ||
+    doc?.portal ||
+    ""
+  );
+
+  const offerText =
+    normStr(doc?.rawDiscount || doc?.parsedFields?.rawDiscount || doc?.discount || "") ||
+    (discountPercent ? `${discountPercent}% off` : (flatDiscountAmount ? `₹${flatDiscountAmount} off` : ""));
+
+  return {
+    title,
+    code,
+    discountPercent,
+    flatDiscountAmount,
+    maxDiscountAmount,
+    minTransactionValue,
+    sourcePortal,
+    offerText,
+    isExpired: getOfferIsExpired(doc),
+    paymentMethods: extractPaymentMethodsFromDoc(doc),
+    raw: doc,
+  };
 }
 
-function offerTitle(offer) {
-  return offer?.title || offer?.parsedFields?.title || "";
-}
+function matchOfferToSelectedPayments(offer, selected) {
+  // selected: [{type, name}] from frontend
+  if (!Array.isArray(selected) || selected.length === 0) return false;
 
-function offerPlatforms(offer) {
-  // expected array like ["MakeMyTrip"] etc
-  const p =
-    offer?.parsedFields?.parsedApplicablePlatforms ||
-    offer?.parsedApplicablePlatforms ||
-    offer?.applicablePlatforms ||
-    [];
-  return Array.isArray(p) ? p : [];
-}
+  const offerPM = Array.isArray(offer.paymentMethods) ? offer.paymentMethods : [];
+  if (offerPM.length === 0) {
+    // Some offers may not have structured PM list; treat as non-match
+    return false;
+  }
 
-function offerPaymentMethods(offer) {
-  // expected array of objects like { type, bank, network, conditions }
-  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
-  return Array.isArray(pm) ? pm : [];
-}
-
-function matchesSelection(offer, selected) {
-  // selected = [{type:"Credit Card", bank:"ICICI Bank"}, ...]
-  const offerPMs = offerPaymentMethods(offer).map((x) => ({
-    type: normalizeType(x.type) || x.type || "",
-    bank: x.bank || x.issuer || "",
+  const sel = selected.map((s) => ({
+    type: normalizePayType(s.type || ""),
+    name: normStr(s.name || s.bank || s.label || "").toLowerCase(),
   }));
 
-  for (const s of selected) {
-    const st = normalizeType(s.type) || s.type;
-    const sb = String(s.bank || "").trim();
-    const hit = offerPMs.some(
-      (op) =>
-        String(op.type || "").trim() === String(st || "").trim() &&
-        String(op.bank || "").trim().toLowerCase() === sb.toLowerCase()
-    );
-    if (hit) return true;
+  for (const opm of offerPM) {
+    const ot = normalizePayType(opm.type || "");
+    const on = normStr(opm.name || opm.bank || "").toLowerCase();
+    if (!on) continue;
+
+    for (const s of sel) {
+      const typeOk = !ot || !s.type || ot === s.type;
+      const nameOk = on === s.name || on.includes(s.name) || s.name.includes(on);
+      if (typeOk && nameOk) return true;
+    }
   }
+
   return false;
 }
 
-async function findBestDealsForFlight({ basePrice, selectedPaymentMethods }) {
-  const col = await getOffersCol();
+function computeSavings(price, offer) {
+  if (price <= 0) return 0;
 
-  // If user didn’t select anything, we return plain portal pricing (no discounts)
-  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-
-  let offers = [];
-  if (selected.length > 0) {
-    // We pull a reasonable number and filter in Node (schema variations across portals).
-    // NOTE: If you later standardize fields further, we can push more of this into Mongo queries.
-    offers = await col
-      .find({}, { projection: { parsedFields: 1, title: 1, sourceMetadata: 1, offerCategories: 1 } })
-      .limit(2000)
-      .toArray();
-  }
-
-  const portalPrices = [];
-  let bestDeal = null;
-
-  for (const portal of OTAS) {
-    const withMarkup = basePrice + OTA_MARKUP;
-
-    let bestForPortal = {
-      portal,
-      basePrice: withMarkup,
-      discount: 0,
-      finalPrice: withMarkup,
-      couponCode: "",
-      offerTitle: "",
-      reason: "No eligible offer",
-    };
-
-    if (selected.length > 0 && offers.length > 0) {
-      for (const offer of offers) {
-        // expired?
-        if (isOfferExpired(offer)) continue;
-
-        // platform match (if platforms present)
-        const platforms = offerPlatforms(offer);
-        if (platforms.length > 0 && !platforms.includes(portal)) continue;
-
-        // payment match
-        if (!matchesSelection(offer, selected)) continue;
-
-        // min amount check
-        const minAmt = offerMinAmount(offer);
-        if (minAmt && withMarkup < minAmt) continue;
-
-        // discount compute
-        const disc = offerDiscount(offer, withMarkup);
-        if (disc <= 0) continue;
-
-        const finalPrice = Math.max(0, Math.round(withMarkup - disc));
-
-        if (finalPrice < bestForPortal.finalPrice) {
-          bestForPortal = {
-            portal,
-            basePrice: withMarkup,
-            discount: Math.round(disc),
-            finalPrice,
-            couponCode: offerCouponCode(offer),
-            offerTitle: offerTitle(offer),
-            reason: "Eligible offer found",
-          };
-        }
-      }
-    }
-
-    portalPrices.push(bestForPortal);
-
-    if (!bestDeal || bestForPortal.finalPrice < bestDeal.finalPrice) {
-      bestDeal = bestForPortal;
+  // % based
+  let percentSaving = 0;
+  if (offer.discountPercent > 0) {
+    percentSaving = (price * offer.discountPercent) / 100;
+    if (offer.maxDiscountAmount > 0) {
+      percentSaving = Math.min(percentSaving, offer.maxDiscountAmount);
     }
   }
 
-  return { bestDeal, portalPrices };
+  // flat amount
+  let flatSaving = 0;
+  if (offer.flatDiscountAmount > 0) {
+    flatSaving = offer.flatDiscountAmount;
+  }
+
+  return Math.max(percentSaving, flatSaving, 0);
 }
 
 // --------------------
-// routes
+// Caches
 // --------------------
-app.get("/health", (req, res) => res.json({ ok: true }));
+let paymentOptionsCache = { at: 0, data: null };
+let offersCache = { at: 0, data: null };
+const CACHE_MS = 10 * 60 * 1000;
 
-// Payment options: built from MongoDB offers
+async function getAllOffersCached() {
+  const now = Date.now();
+  if (offersCache.data && now - offersCache.at < CACHE_MS) return offersCache.data;
+
+  const col = await getOffersCollection();
+
+  // Keep projection small-ish; schema can be large
+  const docs = await col
+    .find({}, {
+      projection: {
+        title: 1,
+        couponCode: 1,
+        code: 1,
+        discountPercent: 1,
+        discountAmount: 1,
+        flatDiscountAmount: 1,
+        maxDiscountAmount: 1,
+        minTransactionValue: 1,
+        minAmount: 1,
+        isExpired: 1,
+        validityPeriod: 1,
+        sourcePortal: 1,
+        sourceMetadata: 1,
+        rawDiscount: 1,
+        paymentMethods: 1,
+        parsedFields: 1,
+        rawFields: 1,
+      }
+    })
+    .limit(50000)
+    .toArray();
+
+  const offers = docs.map(extractOfferCore).filter((o) => o.sourcePortal);
+  offersCache = { at: now, data: offers };
+  return offers;
+}
+
+// --------------------
+// Routes
+// --------------------
+
+// REAL payment options from Mongo (NO static fallback)
 app.get("/payment-options", async (req, res) => {
   try {
-    const col = await getOffersCol();
+    const now = Date.now();
+    if (paymentOptionsCache.data && now - paymentOptionsCache.at < CACHE_MS) {
+      return res.json({ usedFallback: false, options: paymentOptionsCache.data });
+    }
 
-    // Pull only paymentMethods from offers (schema tolerant)
-    const docs = await col
-      .find(
-        {},
-        {
-          projection: {
-            paymentMethods: 1,
-            parsedFields: 1,
-          },
-        }
-      )
-      .limit(5000)
-      .toArray();
+    const offers = await getAllOffersCached();
 
-    const groups = new Map(); // type -> Set(banks)
+    const grouped = {
+      "Credit Card": new Set(),
+      "Debit Card": new Set(),
+      "EMI": new Set(),
+      "Net Banking": new Set(),
+      "UPI": new Set(),
+      "Wallet": new Set(),
+    };
 
-    for (const d of docs) {
-      const pm =
-        (Array.isArray(d?.parsedFields?.paymentMethods) && d.parsedFields.paymentMethods) ||
-        (Array.isArray(d?.paymentMethods) && d.paymentMethods) ||
-        [];
+    for (const o of offers) {
+      if (o.isExpired) continue;
 
-      for (const p of pm) {
-        const type = normalizeType(p?.type);
-        const bank = String(p?.bank || p?.issuer || "").trim();
-        if (!type || !bank) continue;
+      for (const pm of o.paymentMethods || []) {
+        const type = normalizePayType(pm.type || "");
+        const name = normStr(pm.name || "");
+        if (!name) continue;
 
-        if (!groups.has(type)) groups.set(type, new Set());
-        groups.get(type).add(bank);
+        if (grouped[type]) grouped[type].add(name);
       }
     }
 
-    // Build final output with stable ordering
-    const orderedTypes = ["Credit Card", "Debit Card", "EMI", "Net Banking", "Wallet", "UPI"];
+    // convert sets -> sorted arrays
     const options = {};
-    for (const t of orderedTypes) {
-      const set = groups.get(t) || new Set();
-      options[t] = Array.from(set).sort((a, b) => a.localeCompare(b));
+    for (const [k, v] of Object.entries(grouped)) {
+      options[k] = Array.from(v).sort((a, b) => a.localeCompare(b));
     }
 
-    res.json({ usedFallback: false, options });
+    paymentOptionsCache = { at: now, data: options };
+    return res.json({ usedFallback: false, options });
   } catch (e) {
-    res.status(500).json({
+    return res.status(500).json({
       usedFallback: false,
-      error: "Failed to load payment options from MongoDB",
-      details: e.message,
+      options: { "Credit Card": [], "Debit Card": [], "EMI": [], "Net Banking": [], "UPI": [], "Wallet": [] },
+      error: e?.message || "Failed to load payment options",
     });
   }
 });
 
-// Search: FlightAPI real flights + offers applied
+// Search flights + apply best offers
 app.post("/search", async (req, res) => {
   const body = req.body || {};
-  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {} };
+  const meta = {
+    source: "flightapi",
+    outStatus: 0,
+    retStatus: 0,
+    request: {},
+    offerEngine: { markup: OTA_MARKUP, portals: PORTALS },
+  };
 
   try {
-    let {
-      from,
-      to,
-      departureDate,
-      returnDate,
-      tripType,
-      passengers,
-      travelClass,
-      selectedPaymentMethods,
-    } = body;
+    let { from, to, departureDate, returnDate, tripType, passengers, travelClass, paymentMethods } = body;
 
     const outDate = toISO(departureDate);
     const retDate = toISO(returnDate);
 
-    const clsRaw = String(travelClass || "economy").toLowerCase();
+    // normalize class for FlightAPI
+    const clsRaw = normStr(travelClass || "economy").toLowerCase();
     const cls =
-      clsRaw === "premium economy" || clsRaw === "premium_economy"
-        ? "PREMIUM_ECONOMY"
-        : clsRaw === "business"
-        ? "BUSINESS"
-        : clsRaw === "first"
-        ? "FIRST"
-        : "ECONOMY";
+      clsRaw.includes("premium") ? "PREMIUM_ECONOMY"
+      : clsRaw.includes("business") ? "BUSINESS"
+      : clsRaw.includes("first") ? "FIRST"
+      : "ECONOMY";
 
     const adults = Number(passengers) || 1;
     const currency = "INR";
 
-    // Outbound
-    const outRes = await fetchOneWaySmart({
-      from,
-      to,
-      date: outDate,
-      adults,
-      travelClass: cls,
-      currency,
-    });
+    if (!from || !to || !outDate) {
+      return res.status(400).json({ meta: { ...meta, error: "Missing from/to/departureDate" }, outboundFlights: [], returnFlights: [] });
+    }
+
+    // fetch outbound
+    const outRes = await fetchOneWaySmart({ from, to, date: outDate, adults, travelClass: cls, currency });
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
-    // Return (if round-trip)
+    // fetch return if needed
     let retFlights = [];
     if (tripType === "round-trip" && retDate) {
-      const retRes = await fetchOneWaySmart({
-        from: to,
-        to: from,
-        date: retDate,
-        adults,
-        travelClass: cls,
-        currency,
-      });
+      const retRes = await fetchOneWaySmart({ from: to, to: from, date: retDate, adults, travelClass: cls, currency });
       meta.retStatus = retRes.status;
       meta.request.retTried = retRes.tried;
       retFlights = mapFlights(retRes.data);
@@ -448,52 +498,89 @@ app.post("/search", async (req, res) => {
 
     const outFlights = mapFlights(outRes.data);
 
-    // Apply offer engine to each flight (keep it light: first 30 each side)
-    const applyToList = async (flights) => {
-      const limited = flights.slice(0, 30);
-      const out = [];
-      for (const f of limited) {
-        const basePrice = safeNum(f.price, 0);
-        const deals = await findBestDealsForFlight({
-          basePrice,
-          selectedPaymentMethods,
-        });
+    // Apply offers
+    const offers = await getAllOffersCached();
+    const selected = Array.isArray(paymentMethods) ? paymentMethods : [];
 
-        out.push({
-          ...f,
-          bestDeal: deals.bestDeal,
-          portalPrices: deals.portalPrices,
+    function applyOffersToFlight(f) {
+      const base = safeNum(f.price, 0);
+      const portalPrices = [];
+
+      for (const portal of PORTALS) {
+        const portalBase = base + OTA_MARKUP;
+
+        // offers only for this portal + active + matches selected payments
+        const candidates = offers.filter((o) =>
+          o.sourcePortal === portal &&
+          !o.isExpired &&
+          matchOfferToSelectedPayments(o, selected) &&
+          (o.minTransactionValue <= 0 || portalBase >= o.minTransactionValue)
+        );
+
+        let bestOffer = null;
+        let bestFinal = portalBase;
+
+        for (const o of candidates) {
+          const saving = computeSavings(portalBase, o);
+          const final = Math.max(0, portalBase - saving);
+          if (final < bestFinal) {
+            bestFinal = final;
+            bestOffer = o;
+          }
+        }
+
+        portalPrices.push({
+          portal,
+          basePrice: portalBase,
+          finalPrice: bestFinal,
+          savings: Math.max(0, portalBase - bestFinal),
+          offer: bestOffer
+            ? {
+                title: bestOffer.title,
+                offerText: bestOffer.offerText,
+                code: bestOffer.code,
+                minTransactionValue: bestOffer.minTransactionValue,
+              }
+            : null,
         });
       }
-      return out;
-    };
 
-    const outWithDeals = await applyToList(outFlights);
-    const retWithDeals = await applyToList(retFlights);
+      // best deal across portals
+      const sorted = portalPrices.slice().sort((a, b) => a.finalPrice - b.finalPrice);
+      const best = sorted[0] || null;
 
-    return res.json({
-      meta,
-      outboundFlights: outWithDeals,
-      returnFlights: retWithDeals,
-    });
+      return {
+        ...f,
+        price: base,
+        bestDeal: best
+          ? {
+              portal: best.portal,
+              finalPrice: best.finalPrice,
+              savings: best.savings,
+              offerText: best.offer?.offerText || "",
+              code: best.offer?.code || "",
+            }
+          : null,
+        portalPrices,
+      };
+    }
+
+    const outFinal = outFlights.map(applyOffersToFlight);
+    const retFinal = retFlights.map(applyOffersToFlight);
+
+    return res.json({ meta, outboundFlights: outFinal, returnFlights: retFinal });
   } catch (e) {
     const st = e?.response?.status || 500;
-    const bodyStr =
-      typeof e?.response?.data === "string"
-        ? e.response.data
-        : e?.response?.data
-        ? JSON.stringify(e.response.data)
-        : "";
-
-    meta.error = e.message || "Search failed";
+    const bodyStr = typeof e?.response?.data === "string"
+      ? e.response.data
+      : (e?.response?.data ? JSON.stringify(e.response.data) : "");
+    meta.error = e?.message || "Search failed";
     meta.outStatus ||= st;
     meta.request.errorBody = bodyStr?.slice(0, 600);
-
-    return res.json({ meta, outboundFlights: [], returnFlights: [] });
+    return res.status(500).json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
 
-// ---------- start ----------
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
