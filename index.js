@@ -176,6 +176,41 @@ function mapFlightsFromFlightAPI(raw) {
 
   return flights;
 }
+// --------------------
+// FIX #4: Limit results (Indian carriers + non-stop first)
+// --------------------
+const MAX_RESULTS_PER_DIRECTION = 25;
+
+const INDIAN_CARRIERS = [
+  "air india express",
+  "air india",
+  "indigo",
+  "akasa",
+  "spicejet",
+  "fly91",
+  "star air",
+  "alliance air",
+  "trujet",
+  "vistara",
+  "go first"
+];
+
+function isIndianCarrier(airlineName) {
+  const n = String(airlineName || "").toLowerCase();
+  return INDIAN_CARRIERS.some(c => n.includes(c));
+}
+
+function limitAndSortFlights(flights) {
+  // 1. Keep Indian carriers only (if available)
+  const indian = flights.filter(f => isIndianCarrier(f.airlineName));
+  const pool = indian.length > 0 ? indian : flights;
+
+  // 2. Non-stop first
+  pool.sort((a, b) => (a.stops || 0) - (b.stops || 0));
+
+  // 3. Limit
+  return pool.slice(0, MAX_RESULTS_PER_DIRECTION);
+}
 
 // --------------------
 // Offer matching + pricing
@@ -506,10 +541,12 @@ app.post("/search", async (req, res) => {
     meta.request.outTried = outRes.tried;
 
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
+    const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
+
 
     // Apply offers per flight
     const outboundFlights = [];
-    for (const f of outFlightsRaw) {
+    for (const f of outFlightsLimited) {
       outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods));
     }
 
@@ -521,9 +558,11 @@ app.post("/search", async (req, res) => {
       meta.request.retTried = retRes.tried;
 
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
+      const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
+
 
       const enriched = [];
-      for (const f of retFlightsRaw) {
+      for (const f of retFlightsLimited) {
         enriched.push(await applyOffersToFlight(f, selectedPaymentMethods));
       }
       returnFlights = enriched;
