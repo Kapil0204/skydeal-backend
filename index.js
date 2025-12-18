@@ -525,9 +525,10 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       code: bestDeal?.code || null,
       title: bestDeal?.title || null,
       rawDiscount: bestDeal?.rawDiscount || null,
+      terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
         paymentLabel: matchedPaymentLabel,
-        terms: best?.offer?.terms || null,
+    
 
 
     };
