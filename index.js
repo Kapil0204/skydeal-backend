@@ -227,6 +227,16 @@ function normalizePaymentType(t) {
 }
 
 // Extract (type,name) from offer documents with different shapes
+function extractOfferConstraints(offer) {
+  const text = String(offer?.terms || "").toLowerCase();
+  return {
+    requiresEligibleBIN: text.includes("bin"),
+    appOnly: text.includes("mobile app"),
+    websiteOnly: text.includes("website bookings"),
+    onePerUser: text.includes("once per"),
+  };
+}
+
 function extractOfferPaymentMethods(offer) {
   const out = [];
   const pm = offer?.paymentMethods;
@@ -314,8 +324,24 @@ function minTxnOK(offer, amount) {
 
   return true; // if unknown, do not block
 }
+function detectDomesticInternationalCap(offer, isDomestic) {
+  const text = String(offer?.rawDiscount || "").toLowerCase();
 
-function computeDiscountedPrice(offer, baseAmount) {
+  // Look for explicit dual-scope wording
+  if (text.includes("domestic") && text.includes("international")) {
+    if (isDomestic) {
+      const m = text.match(/domestic.*?rs\.?\s*([\d,]+)/i);
+      if (m) return Number(m[1].replace(/,/g, ""));
+    } else {
+      const m = text.match(/international.*?rs\.?\s*([\d,]+)/i);
+      if (m) return Number(m[1].replace(/,/g, ""));
+    }
+  }
+  return null;
+}
+
+
+function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   // Support percent discount AND flat discount (you explicitly need flat-amount support)
   const percent =
     offer?.discountPercent ??
@@ -339,10 +365,17 @@ function computeDiscountedPrice(offer, baseAmount) {
   }
 
   // cap by maxDiscountAmount if present (if percent was used)
-  const maxAmt =
-    offer?.maxDiscountAmount ??
-    offer?.parsedFields?.maxDiscountAmount ??
-    null;
+  let maxAmt =
+  offer?.maxDiscountAmount ??
+  offer?.parsedFields?.maxDiscountAmount ??
+  null;
+
+// 🔒 STEP 2: Domestic / International override (only if detected)
+const scopedCap = detectDomesticInternationalCap(offer, isDomestic);
+if (typeof scopedCap === "number") {
+  maxAmt = scopedCap;
+}
+
 
   if (typeof percent === "number" && percent > 0 && maxAmt != null) {
     const maxN = Number(String(maxAmt).replace(/[^\d.]/g, ""));
@@ -384,14 +417,22 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
     if (!minTxnOK(offer, baseAmount)) continue;
 
-    const discounted = computeDiscountedPrice(offer, baseAmount);
+    const isDomestic = true; // current searches are domestic only (safe default)
+const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
 
-    if (!best || discounted < best.finalPrice) {
-      best = {
-        finalPrice: discounted,
-        offer,
-      };
-    }
+
+// 🔒 STEP 1 SAFETY RULE:
+// Ignore offers that do not reduce price
+if (discounted >= baseAmount) {
+  continue;
+}
+
+if (!best || discounted < best.finalPrice) {
+  best = {
+    finalPrice: discounted,
+    offer,
+  };
+}
   }
 
   return best;
@@ -546,6 +587,7 @@ const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
 
     // Apply offers per flight
+    constraints: extractOfferConstraints(best.offer),
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
       outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
