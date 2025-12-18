@@ -527,6 +527,8 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       rawDiscount: bestDeal?.rawDiscount || null,
       constraints: bestDeal?.constraints || null,
         paymentLabel: matchedPaymentLabel,
+        terms: best?.offer?.terms || null,
+
 
     };
   });
