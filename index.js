@@ -397,13 +397,8 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
   return best;
 }
 
-async function applyOffersToFlight(flight, selectedPaymentMethods) {
-  const col = await getOffersCollection();
-
-  // Pull a reasonable set (you can tighten query later)
-  const offers = await col
-    .find({}, { projection: { _id: 0 } })
-    .toArray();
+async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
+  
 
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -541,13 +536,19 @@ app.post("/search", async (req, res) => {
     meta.request.outTried = outRes.tried;
 
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
+    // --------------------
+// FIX #1: Load offers ONCE per search request
+// --------------------
+const col = await getOffersCollection();
+const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
 
     // Apply offers per flight
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
-      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods));
+      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
     }
 
     // Return (if round-trip)
@@ -563,7 +564,7 @@ app.post("/search", async (req, res) => {
 
       const enriched = [];
       for (const f of retFlightsLimited) {
-        enriched.push(await applyOffersToFlight(f, selectedPaymentMethods));
+        enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
       }
       returnFlights = enriched;
     }
