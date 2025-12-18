@@ -449,14 +449,20 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
 
     const bestDeal = best
-      ? {
-          portal,
-          finalPrice: best.finalPrice,
-          code: best.offer?.code || best.offer?.couponCode || best.offer?.parsedFields?.code || null,
-          title: best.offer?.title || null,
-          rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
-        }
-      : null;
+  ? {
+      portal: bestPortal.portal,
+      finalPrice: bestPortal.finalPrice,
+      basePrice: bestPortal.basePrice,
+      applied: bestPortal.applied,
+      code: bestPortal.code,
+      title: bestPortal.title,
+      rawDiscount: bestPortal.rawDiscount,
+
+      // STEP 3: metadata only (no logic impact)
+      constraints: extractOfferConstraints(best.offer),
+    }
+  : null;
+
 
     return {
       portal,
@@ -587,7 +593,7 @@ const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
 
     // Apply offers per flight
-    constraints: extractOfferConstraints(best.offer),
+  
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
       outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
