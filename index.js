@@ -407,6 +407,36 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
     return sel.some((s) => s.type === t && s.name === n);
   });
 }
+function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
+  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
+
+  const offerPMs = extractOfferPaymentMethods(offer);
+  if (offerPMs.length === 0) return null;
+
+  const sel = selectedPaymentMethods.map((x) => ({
+    type: normalizePaymentType(x.type),
+    name: String(x.name || "").toLowerCase().trim(),
+    rawName: String(x.name || "").trim(),
+  }));
+
+  for (const pm of offerPMs) {
+    const t = normalizePaymentType(pm.type);
+    const n = String(pm.name || "").toLowerCase().trim();
+
+    const match = sel.find((s) => s.type === t && s.name === n);
+    if (match) {
+      const namePart = match.rawName ? match.rawName : "";
+      const typePart = match.type ? match.type : "";
+      if (namePart && typePart) return `${namePart} • ${typePart}`;
+      if (namePart) return namePart;
+      if (typePart) return typePart;
+      return null;
+    }
+  }
+
+  return null;
+}
+
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
   let best = null;
@@ -445,6 +475,8 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
     const portalBase = Math.round(base + OTA_MARKUP);
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
+    const matchedPaymentLabel = best ? getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) : null;
+
 
     // ✅ bestDeal must be based on THIS portal's best offer, not bestPortal (which is computed later)
     const bestDeal = best
@@ -457,6 +489,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           title: best.offer?.title || null,
           rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
           constraints: extractOfferConstraints(best.offer),
+
         }
       : null;
 
@@ -469,6 +502,8 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       title: bestDeal?.title || null,
       rawDiscount: bestDeal?.rawDiscount || null,
       constraints: bestDeal?.constraints || null,
+        paymentLabel: matchedPaymentLabel,
+
     };
   });
 
@@ -491,6 +526,8 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           title: bestPortal.title,
           rawDiscount: bestPortal.rawDiscount,
           constraints: bestPortal.constraints || null,
+          paymentLabel: bestPortal.paymentLabel || null,
+
         }
       : null,
   };
