@@ -439,8 +439,6 @@ if (!best || discounted < best.finalPrice) {
 }
 
 async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
-  
-
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
@@ -448,19 +446,19 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
 
+    // ✅ bestDeal must be based on THIS portal's best offer, not bestPortal (which is computed later)
     const bestDeal = best
-  ? {
-      portal: bestPortal.portal,
-      finalPrice: bestPortal.finalPrice,
-      basePrice: bestPortal.basePrice,
-      applied: bestPortal.applied,
-      code: bestPortal.code,
-      title: bestPortal.title,
-      rawDiscount: bestPortal.rawDiscount,
-    constraints: extractOfferConstraints(best.offer),
-    }
-  : null;
-
+      ? {
+          portal,
+          finalPrice: best.finalPrice,
+          basePrice: portalBase,
+          applied: true,
+          code: best.offer?.code || best.offer?.couponCode || best.offer?.parsedFields?.code || null,
+          title: best.offer?.title || null,
+          rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
+          constraints: extractOfferConstraints(best.offer),
+        }
+      : null;
 
     return {
       portal,
@@ -475,7 +473,10 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
   });
 
   // best overall among portals
-  const bestPortal = portalPrices.reduce((acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc), null);
+  const bestPortal = portalPrices.reduce(
+    (acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc),
+    null
+  );
 
   return {
     ...flight,
@@ -489,11 +490,12 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           code: bestPortal.code,
           title: bestPortal.title,
           rawDiscount: bestPortal.rawDiscount,
-        constraints: bestPortal.constraints || null,
+          constraints: bestPortal.constraints || null,
         }
       : null,
   };
 }
+
 
 // --------------------
 // Routes
