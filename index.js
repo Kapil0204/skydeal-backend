@@ -296,6 +296,29 @@ function offerAppliesToPortal(offer, portalName) {
 
   return true;
 }
+function isFlightOffer(offer) {
+  // We only want flight offers to apply to flight results.
+  // GPT-parsed shape (your DB example): offerCategories: ["Flights"]
+  const cats =
+    offer?.offerCategories ??
+    offer?.parsedFields?.offerCategories ??
+    offer?.rawFields?.offerCategories ??
+    [];
+
+  if (!Array.isArray(cats) || cats.length === 0) return false;
+
+  const norm = cats.map((c) => String(c || "").toLowerCase().trim());
+
+  // allow common variants
+  const hasFlights = norm.some((c) => c === "flights" || c === "flight" || c.includes("air"));
+  const hasHotels = norm.some((c) => c === "hotels" || c === "hotel");
+
+  // If it’s clearly a hotel offer, reject it.
+  if (hasHotels && !hasFlights) return false;
+
+  return hasFlights;
+}
+
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
@@ -442,6 +465,7 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
   let best = null;
 
   for (const offer of offers) {
+    if (!isFlightOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
