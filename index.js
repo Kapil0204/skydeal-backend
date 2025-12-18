@@ -457,9 +457,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       code: bestPortal.code,
       title: bestPortal.title,
       rawDiscount: bestPortal.rawDiscount,
-
-      // STEP 3: metadata only (no logic impact)
-      constraints: extractOfferConstraints(best.offer),
+    constraints: extractOfferConstraints(best.offer),
     }
   : null;
 
@@ -472,6 +470,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       code: bestDeal?.code || null,
       title: bestDeal?.title || null,
       rawDiscount: bestDeal?.rawDiscount || null,
+      constraints: bestDeal?.constraints || null,
     };
   });
 
@@ -490,6 +489,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           code: bestPortal.code,
           title: bestPortal.title,
           rawDiscount: bestPortal.rawDiscount,
+        constraints: bestPortal.constraints || null,
         }
       : null,
   };
