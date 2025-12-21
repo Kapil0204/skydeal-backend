@@ -18,8 +18,12 @@ app.use(express.json());
 // --------------------
 const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
 
-// Your requirement: +₹250 markup across 5 OTAs
-const OTA_MARKUP = Number(process.env.OTA_MARKUP || 250);
+// Base OTA markup: ₹0 (no blanket markup)
+const OTA_MARKUP = Number(process.env.OTA_MARKUP || 0);
+
+// SpiceJet-only markup on OTA base prices: ₹100
+const SPICEJET_OTA_MARKUP = Number(process.env.SPICEJET_OTA_MARKUP || 100);
+
 
 // Mongo envs
 const MONGO_URI = process.env.MONGO_URI;
@@ -496,7 +500,9 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
-    const portalBase = Math.round(base);
+    const isSpiceJet = String(flight.airlineName || "").toLowerCase().includes("spicejet");
+const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MARKUP : 0));
+
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
     const matchedPaymentLabel = best ? getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) : null;
