@@ -496,7 +496,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
-    const portalBase = Math.round(base + OTA_MARKUP);
+    const portalBase = Math.round(base);
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
     const matchedPaymentLabel = best ? getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) : null;
