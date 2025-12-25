@@ -496,6 +496,55 @@ if (!best || discounted < best.finalPrice) {
   return best;
 }
 
+function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
+  const info = [];
+
+  for (const offer of offers) {
+    if (!isFlightOffer(offer)) continue;
+    if (isOfferExpired(offer)) continue;
+    if (!offerAppliesToPortal(offer, portal)) continue;
+
+    // IMPORTANT: info offers should still respect payment filtering
+    // so we don’t show irrelevant bank-only deals when user selected something else.
+    if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+
+    // We ONLY want offers that are NOT deterministic / not applied.
+    const percent =
+      offer?.discountPercent ??
+      offer?.parsedFields?.discountPercent ??
+      null;
+
+    const flat =
+      offer?.flatDiscountAmount ??
+      offer?.parsedFields?.flatDiscountAmount ??
+      offer?.discountAmount ??
+      offer?.parsedFields?.discountAmount ??
+      null;
+
+    const hasDeterministicSignal =
+      (typeof percent === "number" && percent > 0) ||
+      (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
+
+    // If deterministic, ignore here (those are eligible for pricing path already)
+    if (hasDeterministicSignal) continue;
+
+    info.push({
+      title: offer?.title || null,
+      couponCode: offer?.couponCode || offer?.code || offer?.parsedFields?.couponCode || offer?.parsedFields?.code || null,
+      rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
+      offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
+      terms: offer?.terms || offer?.parsedFields?.terms || null,
+      paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
+      sourcePortal: offer?.sourceMetadata?.sourcePortal || null,
+    });
+
+    if (info.length >= limit) break;
+  }
+
+  return info;
+}
+
+
 async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -534,9 +583,8 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
         paymentLabel: matchedPaymentLabel,
+      infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, 5),
     
-
-
     };
   });
 
