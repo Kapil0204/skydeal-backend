@@ -369,16 +369,17 @@ function isFlightOffer(offer) {
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
-  const ancillaryKeywords = [
-    "baggage", "excess baggage",
-    "seat", "seat selection",
-    "cancellation", "free cancellation", "cancellation cover",
-    "insurance", "travel insurance",
-    "meal", "meals",
-    "lounge",
-    "web checkin", "web check-in", "check-in",
-    "visa"
-  ];
+ const ancillaryKeywords = [
+  "baggage", "baggages", "excess baggage", "excess baggages",
+  "seat", "seat selection",
+  "cancellation", "free cancellation", "cancellation cover",
+  "insurance", "travel insurance",
+  "meal", "meals",
+  "lounge",
+  "web checkin", "web check-in", "check-in",
+  "visa"
+];
+
 
   if (ancillaryKeywords.some(k => hay.includes(normalizeText(k)))) return false;
 
@@ -488,75 +489,89 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
 
-  // ✅ CRITICAL FIX:
-  // Many offers have no structured paymentMethods in DB (even if offer text mentions bank/UPI/EMI).
-  // If user has selected payment methods but the offer doesn't declare restrictions,
-  // don't block the offer. We'll still compute discount only if we have deterministic signals.
+  // If DB has no structured paymentMethods, don't block (we can't safely infer without re-parsing)
   if (offerPMs.length === 0) return true;
 
-  // Build normalized keys for offer payment methods
-  const offerKeys = new Set(offerPMs.map(paymentKey));
+  // Offer-side normalized type set (creditcard/debitcard/netbanking/upi/wallet/emi/other)
+  const offerNormTypes = new Set(
+    offerPMs.map(pm => normalizePaymentType(pm?.type, pm?.raw || ""))
+  );
 
-  // Selected items might be strings (old) or objects (new). Support BOTH.
+  // Offer-side searchable text (for fuzzy match)
+  const offerText = offerPMs
+    .map(pm => `${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`)
+    .join(" ");
+  const offerHay = normalizeText(offerText);
+
+  // Map UI labels -> internal normalized types
+  const uiToNorm = (s) => {
+    const t = normalizeText(s);
+    if (t === "credit card" || t === "creditcard") return "creditcard";
+    if (t === "debit card" || t === "debitcard") return "debitcard";
+    if (t === "net banking" || t === "netbanking") return "netbanking";
+    if (t === "upi") return "upi";
+    if (t === "wallet") return "wallet";
+    if (t === "emi") return "emi";
+    return null;
+  };
+
   for (const s of selected) {
+    // Case A: string selections from frontend (your current reality)
     if (typeof s === "string") {
-      // old behavior: match raw bank fragments too
+      const norm = uiToNorm(s);
+
+      // If user selected a generic type (Credit Card / UPI / EMI etc), match by type
+      if (norm && offerNormTypes.has(norm)) return true;
+
+      // Otherwise treat it as a bank/network keyword (HDFC / ICICI / Visa etc)
       const needle = normalizeText(s);
-      for (const pm of offerPMs) {
-        const hay = normalizeText(
-          `${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`
-        );
-        if (hay.includes(needle)) return true;
-      }
+      if (needle && offerHay.includes(needle)) return true;
+
       continue;
     }
 
-    // object selection (preferred)
+    // Case B: object selections (future-proof)
     const sk = paymentKey(s);
+    const offerKeys = new Set(offerPMs.map(paymentKey));
     if (offerKeys.has(sk)) return true;
 
-    // ✅ extra tolerance: sometimes selected is normalized differently than pm.type/bank/raw
-    // so also try string-contains match against the offer PM text
     const needle = normalizeText(`${s?.type || ""} ${s?.bank || ""} ${s?.network || ""} ${s?.raw || ""} ${s?.name || ""}`);
-    for (const pm of offerPMs) {
-      const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
-      if (hay.includes(needle) || needle.includes(hay)) return true;
-    }
+    if (needle && (offerHay.includes(needle) || needle.includes(offerHay))) return true;
   }
 
   return false;
 }
 
 
+
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
 
-  const offerPMs = extractOfferPaymentMethods(offer);
+  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
   if (offerPMs.length === 0) return null;
 
-  const sel = selectedPaymentMethods.map((x) => ({
-    type: normalizePaymentType(x.type),
-    name: String(x.name || "").toLowerCase().trim(),
-    rawName: String(x.name || "").trim(),
-  }));
+  // Normalize selected into (type,label)
+  const selectedNorm = selectedPaymentMethods
+    .map((x) => {
+      if (typeof x === "string") {
+        const normType = normalizePaymentType(x, x);
+        return { normType, label: x };
+      }
+      const normType = normalizePaymentType(x?.type, x?.raw || "");
+      const label = x?.name || x?.bank || x?.network || x?.raw || x?.type || "";
+      return { normType, label };
+    })
+    .filter(x => x.normType && x.label);
 
   for (const pm of offerPMs) {
-    const t = normalizePaymentType(pm.type);
-const name = String(pm.bank || pm.name || pm.raw || "").trim();
-
-    const match = sel.find((s) => s.type === t && s.name === n);
-    if (match) {
-      const namePart = match.rawName ? match.rawName : "";
-      const typePart = match.type ? match.type : "";
-      if (namePart && typePart) return `${namePart} • ${typePart}`;
-      if (namePart) return namePart;
-      if (typePart) return typePart;
-      return null;
-    }
+    const offerNormType = normalizePaymentType(pm?.type, pm?.raw || "");
+    const hit = selectedNorm.find(s => s.normType === offerNormType);
+    if (hit) return hit.label;
   }
 
   return null;
 }
+
 
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
@@ -769,6 +784,31 @@ app.get("/payment-options", async (req, res) => {
 
   // ✅ Canonical UI buckets (don’t allow random keys)
   const CANON_KEYS = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet", "EMI"];
+  // Map internal normalized types -> UI bucket labels
+function uiBucketFromNormalizedType(normType) {
+  switch (normType) {
+    case "creditcard": return "Credit Card";
+    case "debitcard": return "Debit Card";
+    case "netbanking": return "Net Banking";
+    case "upi": return "UPI";
+    case "wallet": return "Wallet";
+    case "emi": return "EMI";
+    default: return null;
+  }
+}
+
+// Normalize + dedupe card/bank labels (so you don't get slight variants)
+function normalizeDisplayNameForUI(rawName) {
+  // If it's a bank, normalize with your existing bank normalizer
+  const n = normalizeBankName(rawName);
+  // Make it readable in UI (basic Title Case)
+  return n
+    .split(" ")
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 
   try {
     const col = await getOffersCollection();
@@ -797,17 +837,19 @@ app.get("/payment-options", async (req, res) => {
 
       if (hasStructured) {
         for (const pm of structured) {
-          // normalize type into canonical bucket
-          const bucket = normalizePaymentType(pm.type, pm.raw || ""); // uses your existing helper
-          const name = pickName(pm);
-          if (!name) continue;
+  const normType = normalizePaymentType(pm.type, pm.raw || "");
+  const bucket = uiBucketFromNormalizedType(normType);
+  if (!bucket) continue;
 
-          // only keep keys we support (avoid new buckets sneaking in)
-          const finalBucket = CANON_KEYS.includes(bucket) ? bucket : "Other";
-          if (!groups[finalBucket]) continue;
+  const nameRaw = pickName(pm);
+  if (!nameRaw) continue;
 
-          groups[finalBucket].add(name);
-        }
+  const name = normalizeDisplayNameForUI(nameRaw);
+  if (!name) continue;
+
+  groups[bucket].add(name);
+}
+
       } else {
         // 2) Inference fallback (ONLY for options list)
         const inferredTypes = inferTypesFromText(offer);
@@ -834,9 +876,6 @@ for (const [k, set] of Object.entries(groups)) {
   options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
     .sort((a, b) => a.localeCompare(b));
 }
-
-res.json({ ...meta, options });
-
 
     res.json({ ...meta, options });
   } catch (e) {
