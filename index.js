@@ -229,6 +229,73 @@ function normalizePaymentType(t) {
   if (v.includes("emi")) return "EMI";
   return t || "Other";
 }
+function normalizeText(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\w\s]/g, "");
+}
+
+function normalizeBankName(raw) {
+  const s = normalizeText(raw);
+
+  // common suffix cleanup
+  const cleaned = s
+    .replace(/\bbank\b/g, "bank")
+    .replace(/\bltd\b/g, "ltd")
+    .replace(/\blimited\b/g, "ltd")
+    .trim();
+
+  // lightweight alias mapping (expand as you see patterns)
+  const map = new Map([
+    ["hdfc", "hdfc bank"],
+    ["hdfc bank", "hdfc bank"],
+    ["axis", "axis bank"],
+    ["axis bank", "axis bank"],
+    ["federal", "federal bank"],
+    ["federal bank", "federal bank"],
+    ["icici", "icici bank"],
+    ["icici bank", "icici bank"],
+    ["sbi", "state bank of india"],
+    ["state bank of india", "state bank of india"],
+    ["au small bank", "au small finance bank"],
+    ["au small finance bank", "au small finance bank"],
+  ]);
+
+  return map.get(cleaned) || cleaned;
+}
+
+function normalizePaymentType(rawType, rawText = "") {
+  const t = normalizeText(rawType);
+  const r = normalizeText(rawText);
+
+  // EMI normalization
+  if (t.includes("emi") || r.includes("emi") || r.includes("no cost emi") || r.includes("no-cost emi")) return "emi";
+
+  // Netbanking normalization
+  if (t.includes("net") && t.includes("bank")) return "netbanking";
+  if (r.includes("net banking") || r.includes("netbanking")) return "netbanking";
+
+  // Credit / Debit
+  if (t.includes("credit")) return "creditcard";
+  if (t.includes("debit")) return "debitcard";
+
+  // UPI / Wallet
+  if (t.includes("upi") || r.includes("upi")) return "upi";
+  if (t.includes("wallet") || r.includes("wallet")) return "wallet";
+
+  return t || "other";
+}
+
+function paymentKey(pm) {
+  const type = normalizePaymentType(pm?.type, pm?.raw);
+  const bank = pm?.bank ? normalizeBankName(pm.bank) : "";
+  const network = normalizeText(pm?.network || "");
+  // key is used only for matching/dedup
+  return `${type}|${bank}|${network}`;
+}
+
 
 // Extract (type,name) from offer documents with different shapes
 function extractOfferConstraints(offer) {
@@ -418,22 +485,36 @@ if (typeof scopedCap === "number") {
 }
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
-  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return true;
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
 
-  const offerPMs = extractOfferPaymentMethods(offer);
-  if (offerPMs.length === 0) return false;
+  // If user selected nothing, treat as "no payment filter"
+  if (selected.length === 0) return true;
 
-  const sel = selectedPaymentMethods.map((x) => ({
-    type: normalizePaymentType(x.type),
-    name: String(x.name || "").toLowerCase().trim(),
-  }));
+  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
 
-  return offerPMs.some((pm) => {
-    const t = normalizePaymentType(pm.type);
-    const n = String(pm.name || "").toLowerCase().trim();
-    return sel.some((s) => s.type === t && s.name === n);
-  });
+  // Build normalized keys for offer payment methods
+  const offerKeys = new Set(offerPMs.map(paymentKey));
+
+  // Selected items might be strings (old) or objects (new). Support BOTH.
+  for (const s of selected) {
+    if (typeof s === "string") {
+      // old behavior: match raw bank fragments too
+      const needle = normalizeText(s);
+      for (const pm of offerPMs) {
+        const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
+        if (hay.includes(needle)) return true;
+      }
+      continue;
+    }
+
+    // object selection (preferred)
+    const sk = paymentKey(s);
+    if (offerKeys.has(sk)) return true;
+  }
+
+  return false;
 }
+
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
 
@@ -636,17 +717,56 @@ app.get("/payment-options", async (req, res) => {
       "Wallet": new Set(),
       "EMI": new Set(),
     };
+        // Map normalized type -> UI label keys (keep your existing response structure)
+    const TYPE_TO_LABEL = {
+      creditcard: "Credit Card",
+      debitcard: "Debit Card",
+      netbanking: "Net Banking",
+      upi: "UPI",
+      wallet: "Wallet",
+      emi: "EMI",
+      other: "Other"
+    };
 
-    for (const offer of offers) {
+    // (Optional) ensure Other exists only if needed
+    // groups["Other"] = new Set();
+
+
+        for (const offer of offers) {
       const pms = extractOfferPaymentMethods(offer);
+
       for (const pm of pms) {
-        const type = normalizePaymentType(pm.type);
-        const name = String(pm.name || "").trim();
-        if (!name) continue;
-        if (!groups[type]) groups[type] = new Set();
-        groups[type].add(name);
+        // IMPORTANT: pass pm.raw so EMI/NetBanking can be inferred from wording
+        const normalizedType = normalizePaymentType(pm?.type, pm?.raw);
+
+        const label = TYPE_TO_LABEL[normalizedType] || "Other";
+        if (!groups[label]) groups[label] = new Set();
+
+        // Use bank/name if present, normalize for display and dedupe
+        const rawName =
+          String(pm?.bank || pm?.name || pm?.label || "").trim();
+
+        // For UPI, sometimes bank is missing - keep a single "UPI (Any)"
+        if (label === "UPI" && !rawName) {
+          groups[label].add("UPI (Any)");
+          continue;
+        }
+
+        // If still empty, skip
+        if (!rawName) continue;
+
+        const clean = normalizeBankName(rawName);
+
+        // Title-case-ish display (optional, but makes UI look clean)
+        const display = clean
+          .split(" ")
+          .map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w)
+          .join(" ");
+
+        groups[label].add(display);
       }
     }
+
 
     // convert to arrays (sorted)
     const options = {};
