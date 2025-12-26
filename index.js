@@ -695,10 +695,69 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
 app.get("/payment-options", async (req, res) => {
   const meta = { usedFallback: false };
 
+  // 🔒 Only affects /payment-options output (does NOT touch offer matching)
+  function textBlobForInference(offer) {
+    return [
+      offer?.title,
+      offer?.rawDiscount,
+      offer?.rawText,
+      offer?.offerSummary,
+      offer?.terms,
+      offer?.rawFields ? JSON.stringify(offer.rawFields) : null,
+    ]
+      .filter(Boolean)
+      .join(" \n ")
+      .toLowerCase();
+  }
+
+  function inferTypesFromText(offer) {
+    const t = textBlobForInference(offer);
+
+    const inferred = new Set();
+
+    // EMI
+    if (/(?:\bemi\b|no[\s-]?cost\s*emi|easy\s*emi|credit\s*card\s*emi)/i.test(t)) inferred.add("EMI");
+
+    // UPI
+    if (/(?:\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi)/i.test(t)) inferred.add("UPI");
+
+    // Net Banking
+    if (/(?:net\s*banking|netbanking|internet\s*banking)/i.test(t)) inferred.add("Net Banking");
+
+    // Wallet
+    if (/(?:\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge)/i.test(t)) inferred.add("Wallet");
+
+    // Cards (generic)
+    if (/(?:\bcredit\s*card\b)/i.test(t)) inferred.add("Credit Card");
+    if (/(?:\bdebit\s*card\b)/i.test(t)) inferred.add("Debit Card");
+
+    return Array.from(inferred);
+  }
+
+  function pickName(pm) {
+    // normalize "name" from whichever field exists in your parsed schema
+    // (pm.name might be absent; pm.bank/raw might exist)
+    const candidates = [pm?.name, pm?.bank, pm?.network, pm?.raw];
+    for (const c of candidates) {
+      const s = String(c || "").trim();
+      if (s) return s;
+    }
+    return "";
+  }
+
+  // ✅ Canonical UI buckets (don’t allow random keys)
+  const CANON_KEYS = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet", "EMI"];
+
   try {
     const col = await getOffersCollection();
 
-    const offers = await col.find({}, { projection: { _id: 0, paymentMethods: 1, rawFields: 1 } }).toArray();
+    // pull only what we need
+    const offers = await col
+      .find(
+        {},
+        { projection: { _id: 0, title: 1, rawDiscount: 1, rawText: 1, offerSummary: 1, terms: 1, paymentMethods: 1, rawFields: 1 } }
+      )
+      .toArray();
 
     const groups = {
       "Credit Card": new Set(),
@@ -708,61 +767,41 @@ app.get("/payment-options", async (req, res) => {
       "Wallet": new Set(),
       "EMI": new Set(),
     };
-        // Map normalized type -> UI label keys (keep your existing response structure)
-    const TYPE_TO_LABEL = {
-      creditcard: "Credit Card",
-      debitcard: "Debit Card",
-      netbanking: "Net Banking",
-      upi: "UPI",
-      wallet: "Wallet",
-      emi: "EMI",
-      other: "Other"
-    };
 
-    // (Optional) ensure Other exists only if needed
-    // groups["Other"] = new Set();
+    for (const offer of offers) {
+      // 1) Structured PMs (preferred)
+      const structured = extractOfferPaymentMethods(offer); // keep your existing helper
+      const hasStructured = Array.isArray(structured) && structured.length > 0;
 
+      if (hasStructured) {
+        for (const pm of structured) {
+          // normalize type into canonical bucket
+          const bucket = normalizePaymentType(pm.type, pm.raw || ""); // uses your existing helper
+          const name = pickName(pm);
+          if (!name) continue;
 
-        for (const offer of offers) {
-      const pms = extractOfferPaymentMethods(offer);
+          // only keep keys we support (avoid new buckets sneaking in)
+          const finalBucket = CANON_KEYS.includes(bucket) ? bucket : "Other";
+          if (!groups[finalBucket]) continue;
 
-      for (const pm of pms) {
-        // IMPORTANT: pass pm.raw so EMI/NetBanking can be inferred from wording
-        const normalizedType = normalizePaymentType(pm?.type, pm?.raw);
-
-        const label = TYPE_TO_LABEL[normalizedType] || "Other";
-        if (!groups[label]) groups[label] = new Set();
-
-        // Use bank/name if present, normalize for display and dedupe
-        const rawName =
-          String(pm?.bank || pm?.name || pm?.label || "").trim();
-
-        // For UPI, sometimes bank is missing - keep a single "UPI (Any)"
-        if (label === "UPI" && !rawName) {
-          groups[label].add("UPI (Any)");
-          continue;
+          groups[finalBucket].add(name);
         }
-
-        // If still empty, skip
-        if (!rawName) continue;
-
-        const clean = normalizeBankName(rawName);
-
-        // Title-case-ish display (optional, but makes UI look clean)
-        const display = clean
-          .split(" ")
-          .map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w)
-          .join(" ");
-
-        groups[label].add(display);
+      } else {
+        // 2) Inference fallback (ONLY for options list)
+        const inferredTypes = inferTypesFromText(offer);
+        for (const t of inferredTypes) {
+          if (!groups[t]) continue;
+          // add a generic option so the tab is not empty
+          // (offer matching stays separate; this is only for UI availability)
+          groups[t].add(`Any ${t}`);
+        }
       }
     }
 
-
     // convert to arrays (sorted)
     const options = {};
-    for (const [k, set] of Object.entries(groups)) {
-      options[k] = Array.from(set).sort((a, b) => a.localeCompare(b));
+    for (const k of CANON_KEYS) {
+      options[k] = Array.from(groups[k]).sort((a, b) => a.localeCompare(b));
     }
 
     res.json({ ...meta, options });
@@ -781,6 +820,7 @@ app.get("/payment-options", async (req, res) => {
     });
   }
 });
+
 
 // Search flights + apply offers
 app.post("/search", async (req, res) => {
