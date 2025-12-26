@@ -483,6 +483,12 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
 
+  // ✅ CRITICAL FIX:
+  // Many offers have no structured paymentMethods in DB (even if offer text mentions bank/UPI/EMI).
+  // If user has selected payment methods but the offer doesn't declare restrictions,
+  // don't block the offer. We'll still compute discount only if we have deterministic signals.
+  if (offerPMs.length === 0) return true;
+
   // Build normalized keys for offer payment methods
   const offerKeys = new Set(offerPMs.map(paymentKey));
 
@@ -492,7 +498,9 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
       // old behavior: match raw bank fragments too
       const needle = normalizeText(s);
       for (const pm of offerPMs) {
-        const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
+        const hay = normalizeText(
+          `${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`
+        );
         if (hay.includes(needle)) return true;
       }
       continue;
@@ -501,10 +509,19 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
     // object selection (preferred)
     const sk = paymentKey(s);
     if (offerKeys.has(sk)) return true;
+
+    // ✅ extra tolerance: sometimes selected is normalized differently than pm.type/bank/raw
+    // so also try string-contains match against the offer PM text
+    const needle = normalizeText(`${s?.type || ""} ${s?.bank || ""} ${s?.network || ""} ${s?.raw || ""} ${s?.name || ""}`);
+    for (const pm of offerPMs) {
+      const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
+      if (hay.includes(needle) || needle.includes(hay)) return true;
+    }
   }
 
   return false;
 }
+
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
