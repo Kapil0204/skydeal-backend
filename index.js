@@ -219,16 +219,7 @@ function limitAndSortFlights(flights) {
 // --------------------
 // Offer matching + pricing
 // --------------------
-function normalizePaymentType(t) {
-  const v = String(t || "").toLowerCase().trim();
-  if (v.includes("credit")) return "Credit Card";
-  if (v.includes("debit")) return "Debit Card";
-  if (v.includes("net")) return "Net Banking";
-  if (v.includes("upi")) return "UPI";
-  if (v.includes("wallet")) return "Wallet";
-  if (v.includes("emi")) return "EMI";
-  return t || "Other";
-}
+
 function normalizeText(s) {
   return String(s || "")
     .trim()
