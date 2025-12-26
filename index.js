@@ -359,27 +359,32 @@ function offerAppliesToPortal(offer, portalName) {
   return true;
 }
 function isFlightOffer(offer) {
-  // We only want flight offers to apply to flight results.
-  // GPT-parsed shape (your DB example): offerCategories: ["Flights"]
-  const cats =
-    offer?.offerCategories ??
-    offer?.parsedFields?.offerCategories ??
-    offer?.rawFields?.offerCategories ??
-    [];
+  const cats = offer?.offerCategories || [];
+  const isFlightCategory = Array.isArray(cats) && cats.some(c => /^(flights?|flight)$/i.test(String(c)));
 
-  if (!Array.isArray(cats) || cats.length === 0) return false;
+  if (!isFlightCategory) return false;
 
-  const norm = cats.map((c) => String(c || "").toLowerCase().trim());
+  // Exclude ancillary / add-on offers that should NOT reduce base fare
+  const hay = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
 
-  // allow common variants
-  const hasFlights = norm.some((c) => c === "flights" || c === "flight" || c.includes("air"));
-  const hasHotels = norm.some((c) => c === "hotels" || c === "hotel");
+  const ancillaryKeywords = [
+    "baggage", "excess baggage",
+    "seat", "seat selection",
+    "cancellation", "free cancellation", "cancellation cover",
+    "insurance", "travel insurance",
+    "meal", "meals",
+    "lounge",
+    "web checkin", "web check-in", "check-in",
+    "visa"
+  ];
 
-  // If it’s clearly a hotel offer, reject it.
-  if (hasHotels && !hasFlights) return false;
+  if (ancillaryKeywords.some(k => hay.includes(normalizeText(k)))) return false;
 
-  return hasFlights;
+  return true;
 }
+
 
 
 function isOfferExpired(offer) {
@@ -537,7 +542,7 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
   for (const pm of offerPMs) {
     const t = normalizePaymentType(pm.type);
-    const n = String(pm.name || "").toLowerCase().trim();
+const name = String(pm.bank || pm.name || pm.raw || "").trim();
 
     const match = sel.find((s) => s.type === t && s.name === n);
     if (match) {
@@ -816,10 +821,22 @@ app.get("/payment-options", async (req, res) => {
     }
 
     // convert to arrays (sorted)
-    const options = {};
-    for (const k of CANON_KEYS) {
-      options[k] = Array.from(groups[k]).sort((a, b) => a.localeCompare(b));
-    }
+    // convert to arrays (sorted) with smart "Any X" handling
+const options = {};
+for (const [k, set] of Object.entries(groups)) {
+  const arr = Array.from(set).filter(Boolean);
+
+  const anyLabel = `Any ${k}`;
+  const hasAny = arr.includes(anyLabel);
+  const hasSpecific = arr.some(x => x !== anyLabel);
+
+  // If real banks exist, hide generic "Any X"
+  options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+res.json({ ...meta, options });
+
 
     res.json({ ...meta, options });
   } catch (e) {
