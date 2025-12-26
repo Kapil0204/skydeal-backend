@@ -483,64 +483,63 @@ if (typeof scopedCap === "number") {
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (selected.length === 0) return true; // no filter
 
-  // If user selected nothing, treat as "no payment filter"
-  if (selected.length === 0) return true;
-
-  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
-
-  // If DB has no structured paymentMethods, don't block (we can't safely infer without re-parsing)
-  if (offerPMs.length === 0) return true;
-
-  // Offer-side normalized type set (creditcard/debitcard/netbanking/upi/wallet/emi/other)
-  const offerNormTypes = new Set(
-    offerPMs.map(pm => normalizePaymentType(pm?.type, pm?.raw || ""))
+  // normalize selected -> canonical types only
+  const selectedTypes = new Set(
+    selected
+      .map((x) => normalizeText(typeof x === "string" ? x : (x?.type || x?.name || x?.raw || "")))
+      .filter(Boolean)
+      .map((t) => {
+        if (t.includes("credit")) return "creditcard";
+        if (t.includes("debit")) return "debitcard";
+        if (t.includes("net") && t.includes("bank")) return "netbanking";
+        if (t.includes("upi")) return "upi";
+        if (t.includes("wallet")) return "wallet";
+        if (t.includes("emi")) return "emi";
+        return t;
+      })
   );
 
-  // Offer-side searchable text (for fuzzy match)
-  const offerText = offerPMs
-    .map(pm => `${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`)
-    .join(" ");
-  const offerHay = normalizeText(offerText);
+  // 1) If offer has structured paymentMethods, match against those
+  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  if (offerPMs.length > 0) {
+    for (const pm of offerPMs) {
+      const offerType = normalizePaymentType(pm?.type, pm?.raw);
+      if (selectedTypes.has(offerType)) return true;
 
-  // Map UI labels -> internal normalized types
-  const uiToNorm = (s) => {
-    const t = normalizeText(s);
-    if (t === "credit card" || t === "creditcard") return "creditcard";
-    if (t === "debit card" || t === "debitcard") return "debitcard";
-    if (t === "net banking" || t === "netbanking") return "netbanking";
-    if (t === "upi") return "upi";
-    if (t === "wallet") return "wallet";
-    if (t === "emi") return "emi";
-    return null;
-  };
-
-  for (const s of selected) {
-    // Case A: string selections from frontend (your current reality)
-    if (typeof s === "string") {
-      const norm = uiToNorm(s);
-
-      // If user selected a generic type (Credit Card / UPI / EMI etc), match by type
-      if (norm && offerNormTypes.has(norm)) return true;
-
-      // Otherwise treat it as a bank/network keyword (HDFC / ICICI / Visa etc)
-      const needle = normalizeText(s);
-      if (needle && offerHay.includes(needle)) return true;
-
-      continue;
+      // If user selected "Credit Card" etc, but PM is stored in raw text
+      const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
+      for (const st of selectedTypes) {
+        if (hay.includes(st)) return true;
+      }
     }
-
-    // Case B: object selections (future-proof)
-    const sk = paymentKey(s);
-    const offerKeys = new Set(offerPMs.map(paymentKey));
-    if (offerKeys.has(sk)) return true;
-
-    const needle = normalizeText(`${s?.type || ""} ${s?.bank || ""} ${s?.network || ""} ${s?.raw || ""} ${s?.name || ""}`);
-    if (needle && (offerHay.includes(needle) || needle.includes(offerHay))) return true;
+    return false;
   }
 
+  // 2) No structured PMs: infer from text (ONLY for matching, not for adding fake banks)
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
+
+  const inferred = new Set();
+  if (/\bemi\b|no\s*cost\s*emi|no-?cost\s*emi/.test(blob)) inferred.add("emi");
+  if (/\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi/.test(blob)) inferred.add("upi");
+  if (/net\s*banking|netbanking|internet\s*banking/.test(blob)) inferred.add("netbanking");
+  if (/\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge/.test(blob)) inferred.add("wallet");
+  if (/\bcredit\s*card\b/.test(blob)) inferred.add("creditcard");
+  if (/\bdebit\s*card\b/.test(blob)) inferred.add("debitcard");
+
+  // If offer doesn't mention ANY payment type at all, treat it as "not payment-gated"
+  // (matching should not block it; but applying will be blocked by PATCH 2)
+  if (inferred.size === 0) return true;
+
+  for (const st of selectedTypes) {
+    if (inferred.has(st)) return true;
+  }
   return false;
 }
+
 
 
 
@@ -572,6 +571,25 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   return null;
 }
 
+function offerHasPaymentRestriction(offer) {
+  // structured PMs
+  const pm = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  if (pm.length > 0) return true;
+
+  // inferred from text
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
+
+  return (
+    /\bemi\b|no\s*cost\s*emi|no-?cost\s*emi/.test(blob) ||
+    /\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi/.test(blob) ||
+    /net\s*banking|netbanking|internet\s*banking/.test(blob) ||
+    /\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge/.test(blob) ||
+    /\bcredit\s*card\b/.test(blob) ||
+    /\bdebit\s*card\b/.test(blob)
+  );
+}
 
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
@@ -582,6 +600,9 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+        // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
+    if (!offerHasPaymentRestriction(offer)) continue;
+
     if (!minTxnOK(offer, baseAmount)) continue;
 
     const isDomestic = true; // current searches are domestic only (safe default)
