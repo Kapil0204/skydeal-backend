@@ -514,11 +514,36 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
 
   const arr = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
 
+  const GENERIC_UI = new Set([
+    "credit card",
+    "debit card",
+    "net banking",
+    "upi",
+    "wallet",
+    "emi",
+    "any credit card",
+    "any debit card",
+    "any net banking",
+    "any upi",
+    "any wallet",
+    "any emi",
+  ]);
+
   for (const s of arr) {
     if (typeof s === "string") {
-      const t = normalizePaymentType(s, s);
+      const raw = String(s).trim();
+      const rawNorm = normalizeText(raw);
+
+      // Always add type
+      const t = normalizePaymentType(raw, raw);
       if (t) types.add(t);
-      banks.add(normalizeBankName(s));
+
+      // ✅ IMPORTANT: do NOT treat generic UI selections as banks
+      if (!GENERIC_UI.has(rawNorm)) {
+        const b = normalizeBankName(raw);
+        // only add if it actually looks like a bank label (avoid "credit card" etc.)
+        if (b && !GENERIC_UI.has(normalizeText(b))) banks.add(b);
+      }
       continue;
     }
 
@@ -526,11 +551,15 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
     if (t) types.add(t);
 
     const b = s?.bank || s?.name || s?.raw || "";
-    if (b) banks.add(normalizeBankName(b));
+    if (b) {
+      const bn = normalizeBankName(b);
+      if (bn) banks.add(bn);
+    }
   }
 
   return { types, banks };
 }
+
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
@@ -541,21 +570,29 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
 
   // If offer has structured payment methods, match against them
-  if (offerPMs.length > 0) {
+    if (offerPMs.length > 0) {
     for (const pm of offerPMs) {
       const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
       const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
 
-      // type-only match (e.g., user selected "Credit Card")
-      if (selectedTypes.has(offerType)) return true;
+      // ✅ If offer is bank-specific, require that bank to be selected explicitly
+      if (offerBank) {
+        if (selectedBanks.has(offerBank)) return true;
+        // do NOT allow generic type-only selection to match bank-specific offers
+        continue;
+      }
 
-      // bank match (e.g., user selected "HDFC Bank")
-      if (offerBank && selectedBanks.has(offerBank)) return true;
+      // ✅ Offer is type-only → allow type match
+      if (selectedTypes.has(offerType)) return true;
 
       // last-resort contains match
       const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
       for (const s of selected) {
-        const needle = normalizeText(typeof s === "string" ? s : `${s?.type || ""} ${s?.bank || ""} ${s?.name || ""} ${s?.raw || ""}`);
+        const needle = normalizeText(
+          typeof s === "string"
+            ? s
+            : `${s?.type || ""} ${s?.bank || ""} ${s?.name || ""} ${s?.raw || ""}`
+        );
         if (needle && hay.includes(needle)) return true;
       }
     }
