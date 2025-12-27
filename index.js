@@ -614,67 +614,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
 
 
-function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
-  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (selected.length === 0) return true;
-
-  const { types: selectedTypes, banks: selectedBanks } = normalizeSelectedPaymentToTypes(selected);
-
-  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
-
-  // If offer has structured payment methods, match against them
-    if (offerPMs.length > 0) {
-    for (const pm of offerPMs) {
-      const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
-      const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
-
-      // ✅ If offer is bank-specific, require that bank to be selected explicitly
-      if (offerBank) {
-        if (selectedBanks.has(offerBank)) return true;
-        // do NOT allow generic type-only selection to match bank-specific offers
-        continue;
-      }
-
-      // ✅ Offer is type-only → allow type match
-      if (selectedTypes.has(offerType)) return true;
-
-      // last-resort contains match
-      const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
-      for (const s of selected) {
-        const needle = normalizeText(
-          typeof s === "string"
-            ? s
-            : `${s?.type || ""} ${s?.bank || ""} ${s?.name || ""} ${s?.raw || ""}`
-        );
-        if (needle && hay.includes(needle)) return true;
-      }
-    }
-    return false;
-  }
-
-  // If offer has NO structured paymentMethods, infer from text (ONLY for payment gating)
-  const inferredTypes = inferPaymentTypesFromOfferText(offer);
-
-  // If text indicates it is payment-specific, require intersection
-  if (inferredTypes.size > 0) {
-    for (const t of inferredTypes) {
-      if (selectedTypes.has(t)) return true;
-    }
-    // also allow bank selection matching if bank appears in text
-    const blob = normalizeText(textBlobForPaymentInference(offer));
-    for (const b of selectedBanks) {
-      if (b && blob.includes(normalizeText(b))) return true;
-    }
-    return false;
-  }
-
-  // Offer does not appear payment-specific → don't block it due to payment selection
-  return true;
-}
-
-
-
-
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
