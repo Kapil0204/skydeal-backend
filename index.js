@@ -680,57 +680,37 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
   if (sel.length === 0) return null;
 
   let best = null;
-  let best = null;
 
   for (const offer of offers) {
     if (!isFlightOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
-    for (const offer of offers) {
-  if (!isFlightOffer(offer)) continue;
-  if (isOfferExpired(offer)) continue;
-  if (!offerAppliesToPortal(offer, portal)) continue;
 
-  const isDomestic = true;
-  if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
-
-  if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
-
-  // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
-  if (!offerHasPaymentRestriction(offer)) continue;
-
-  if (!minTxnOK(offer, baseAmount)) continue;
-
-  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
-  ...
-}
+    const isDomestic = true;
+    if (typeof offerScopeMatchesTrip === "function") {
+      if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
+    }
 
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
-        // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
+
+    // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
     if (!offerHasPaymentRestriction(offer)) continue;
 
     if (!minTxnOK(offer, baseAmount)) continue;
 
-    const isDomestic = true; // current searches are domestic only (safe default)
-const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+    const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
 
+    // 🔒 Ignore offers that do not reduce price
+    if (discounted >= baseAmount) continue;
 
-// 🔒 STEP 1 SAFETY RULE:
-// Ignore offers that do not reduce price
-if (discounted >= baseAmount) {
-  continue;
-}
-
-if (!best || discounted < best.finalPrice) {
-  best = {
-    finalPrice: discounted,
-    offer,
-  };
-}
+    if (!best || discounted < best.finalPrice) {
+      best = { finalPrice: discounted, offer };
+    }
   }
 
   return best;
 }
+
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
     const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
