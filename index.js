@@ -559,6 +559,59 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
 
   return { types, banks };
 }
+function escapeRegExp(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+
+  // 🔒 Phase-1 rule: if user didn’t pick anything, don’t apply payment offers
+  if (selected.length === 0) return false;
+
+  const { types: selectedTypes, banks: selectedBanks } =
+    normalizeSelectedPaymentToTypes(selected);
+
+  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+
+  // 1) If offer has structured paymentMethods, use them (no guessing)
+  if (offerPMs.length > 0) {
+    for (const pm of offerPMs) {
+      const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
+      const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
+
+      // A) If user selected a BANK, require bank match
+      if (offerBank && selectedBanks.has(offerBank)) return true;
+
+      // B) If user selected only a TYPE (e.g., "Credit Card"), allow type match even if offer has a bank
+      if (offerType && selectedTypes.has(offerType)) return true;
+    }
+    return false;
+  }
+
+  // 2) No structured PMs: infer types from text ONLY for type matching
+  const inferredTypes = inferPaymentTypesFromOfferText(offer);
+  if (inferredTypes.size > 0) {
+    for (const t of inferredTypes) {
+      if (selectedTypes.has(t)) return true;
+    }
+
+    // optional: bank match from text as a strict whole-word match
+    const blob = normalizeText(textBlobForPaymentInference(offer));
+    for (const b of selectedBanks) {
+      const bn = normalizeText(b);
+      if (!bn) continue;
+      const re = new RegExp(`\\b${escapeRegExp(bn)}\\b`, "i");
+      if (re.test(blob)) return true;
+    }
+
+    return false;
+  }
+
+  // If we can’t confidently tell it’s relevant to the selected payment, don’t apply.
+  return false;
+}
+
 
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
