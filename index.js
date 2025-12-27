@@ -480,65 +480,108 @@ if (typeof scopedCap === "number") {
   if (final < 0) final = 0;
   return Math.round(final);
 }
+function textBlobForPaymentInference(offer) {
+  return [
+    offer?.title,
+    offer?.rawDiscount,
+    offer?.rawText,
+    offer?.offerSummary,
+    offer?.terms,
+  ]
+    .filter(Boolean)
+    .join(" \n ")
+    .toLowerCase();
+}
+
+function inferPaymentTypesFromOfferText(offer) {
+  const t = textBlobForPaymentInference(offer);
+
+  const types = new Set();
+
+  if (/(?:\bemi\b|no[\s-]?cost\s*emi|credit\s*card\s*emi)/i.test(t)) types.add("emi");
+  if (/(?:\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi)/i.test(t)) types.add("upi");
+  if (/(?:net\s*banking|netbanking|internet\s*banking)/i.test(t)) types.add("netbanking");
+  if (/(?:\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge)/i.test(t)) types.add("wallet");
+  if (/(?:\bcredit\s*card\b)/i.test(t)) types.add("creditcard");
+  if (/(?:\bdebit\s*card\b)/i.test(t)) types.add("debitcard");
+
+  return types;
+}
+
+function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
+  const types = new Set();
+  const banks = new Set();
+
+  const arr = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+
+  for (const s of arr) {
+    if (typeof s === "string") {
+      const t = normalizePaymentType(s, s);
+      if (t) types.add(t);
+      banks.add(normalizeBankName(s));
+      continue;
+    }
+
+    const t = normalizePaymentType(s?.type || s?.name || "", s?.raw || "");
+    if (t) types.add(t);
+
+    const b = s?.bank || s?.name || s?.raw || "";
+    if (b) banks.add(normalizeBankName(b));
+  }
+
+  return { types, banks };
+}
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (selected.length === 0) return true; // no filter
+  if (selected.length === 0) return true;
 
-  // normalize selected -> canonical types only
-  const selectedTypes = new Set(
-    selected
-      .map((x) => normalizeText(typeof x === "string" ? x : (x?.type || x?.name || x?.raw || "")))
-      .filter(Boolean)
-      .map((t) => {
-        if (t.includes("credit")) return "creditcard";
-        if (t.includes("debit")) return "debitcard";
-        if (t.includes("net") && t.includes("bank")) return "netbanking";
-        if (t.includes("upi")) return "upi";
-        if (t.includes("wallet")) return "wallet";
-        if (t.includes("emi")) return "emi";
-        return t;
-      })
-  );
+  const { types: selectedTypes, banks: selectedBanks } = normalizeSelectedPaymentToTypes(selected);
 
-  // 1) If offer has structured paymentMethods, match against those
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+
+  // If offer has structured payment methods, match against them
   if (offerPMs.length > 0) {
     for (const pm of offerPMs) {
-      const offerType = normalizePaymentType(pm?.type, pm?.raw);
+      const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
+      const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
+
+      // type-only match (e.g., user selected "Credit Card")
       if (selectedTypes.has(offerType)) return true;
 
-      // If user selected "Credit Card" etc, but PM is stored in raw text
+      // bank match (e.g., user selected "HDFC Bank")
+      if (offerBank && selectedBanks.has(offerBank)) return true;
+
+      // last-resort contains match
       const hay = normalizeText(`${pm?.type || ""} ${pm?.bank || ""} ${pm?.network || ""} ${pm?.raw || ""}`);
-      for (const st of selectedTypes) {
-        if (hay.includes(st)) return true;
+      for (const s of selected) {
+        const needle = normalizeText(typeof s === "string" ? s : `${s?.type || ""} ${s?.bank || ""} ${s?.name || ""} ${s?.raw || ""}`);
+        if (needle && hay.includes(needle)) return true;
       }
     }
     return false;
   }
 
-  // 2) No structured PMs: infer from text (ONLY for matching, not for adding fake banks)
-  const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
-  );
+  // If offer has NO structured paymentMethods, infer from text (ONLY for payment gating)
+  const inferredTypes = inferPaymentTypesFromOfferText(offer);
 
-  const inferred = new Set();
-  if (/\bemi\b|no\s*cost\s*emi|no-?cost\s*emi/.test(blob)) inferred.add("emi");
-  if (/\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi/.test(blob)) inferred.add("upi");
-  if (/net\s*banking|netbanking|internet\s*banking/.test(blob)) inferred.add("netbanking");
-  if (/\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge/.test(blob)) inferred.add("wallet");
-  if (/\bcredit\s*card\b/.test(blob)) inferred.add("creditcard");
-  if (/\bdebit\s*card\b/.test(blob)) inferred.add("debitcard");
-
-  // If offer doesn't mention ANY payment type at all, treat it as "not payment-gated"
-  // (matching should not block it; but applying will be blocked by PATCH 2)
-  if (inferred.size === 0) return true;
-
-  for (const st of selectedTypes) {
-    if (inferred.has(st)) return true;
+  // If text indicates it is payment-specific, require intersection
+  if (inferredTypes.size > 0) {
+    for (const t of inferredTypes) {
+      if (selectedTypes.has(t)) return true;
+    }
+    // also allow bank selection matching if bank appears in text
+    const blob = normalizeText(textBlobForPaymentInference(offer));
+    for (const b of selectedBanks) {
+      if (b && blob.includes(normalizeText(b))) return true;
+    }
+    return false;
   }
-  return false;
+
+  // Offer does not appear payment-specific → don't block it due to payment selection
+  return true;
 }
+
 
 
 
@@ -546,30 +589,38 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
 
-  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  const offerPMs = extractOfferPaymentMethods(offer);
   if (offerPMs.length === 0) return null;
 
-  // Normalize selected into (type,label)
-  const selectedNorm = selectedPaymentMethods
-    .map((x) => {
-      if (typeof x === "string") {
-        const normType = normalizePaymentType(x, x);
-        return { normType, label: x };
-      }
-      const normType = normalizePaymentType(x?.type, x?.raw || "");
-      const label = x?.name || x?.bank || x?.network || x?.raw || x?.type || "";
-      return { normType, label };
-    })
-    .filter(x => x.normType && x.label);
+  // selected can be strings OR objects
+  const sel = selectedPaymentMethods.map((x) => {
+    if (typeof x === "string") {
+      const t = normalizePaymentType(x, x);
+      return { type: t, name: normalizeBankName(x), rawName: x };
+    }
+    const t = normalizePaymentType(x?.type || x?.name || "", x?.raw || "");
+    const nm = normalizeBankName(x?.name || x?.bank || x?.raw || "");
+    return { type: t, name: nm, rawName: x?.name || x?.bank || x?.raw || "" };
+  });
 
   for (const pm of offerPMs) {
-    const offerNormType = normalizePaymentType(pm?.type, pm?.raw || "");
-    const hit = selectedNorm.find(s => s.normType === offerNormType);
-    if (hit) return hit.label;
+    const t = normalizePaymentType(pm.type, pm.raw || "");
+    const name = normalizeBankName(pm.bank || pm.name || pm.raw || "");
+
+    const match = sel.find((s) => s.type === t && (!s.name || s.name === name));
+    if (match) {
+      const namePart = match.rawName ? match.rawName : "";
+      const typePart = match.type ? match.type : "";
+      if (namePart && typePart) return `${namePart} • ${typePart}`;
+      if (namePart) return namePart;
+      if (typePart) return typePart;
+      return null;
+    }
   }
 
   return null;
 }
+
 
 function offerHasPaymentRestriction(offer) {
   // structured PMs
