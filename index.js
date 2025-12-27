@@ -641,15 +641,70 @@ function offerHasPaymentRestriction(offer) {
     /\bdebit\s*card\b/.test(blob)
   );
 }
+function offerScopeMatchesTrip(offer, isDomestic) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
+
+  // If it explicitly says "international" and does NOT say "domestic",
+  // block it for domestic searches.
+  if (isDomestic && blob.includes("international") && !blob.includes("domestic")) return false;
+
+  // Very conservative destination keyword blocklist (only for domestic searches).
+  // (Add more if you keep seeing them; this is meant to avoid obvious irrelevance.)
+  const obviousInternational = [
+    "krabi",
+    "siem reap",
+    "cebu",
+    "bangkok",
+    "singapore",
+    "dubai",
+    "kuala lumpur",
+    "ho chi minh",
+    "phuket",
+    "bali",
+  ].map(normalizeText);
+
+  if (isDomestic && obviousInternational.some(k => blob.includes(k)) && !blob.includes("domestic")) {
+    return false;
+  }
+
+  return true;
+}
 
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
+  // ✅ Phase-1 rule: if user didn't select any payment method,
+  // we should NOT apply payment-restricted offers by default.
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return null;
+
+  let best = null;
   let best = null;
 
   for (const offer of offers) {
     if (!isFlightOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
+    for (const offer of offers) {
+  if (!isFlightOffer(offer)) continue;
+  if (isOfferExpired(offer)) continue;
+  if (!offerAppliesToPortal(offer, portal)) continue;
+
+  const isDomestic = true;
+  if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
+
+  if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+
+  // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
+  if (!offerHasPaymentRestriction(offer)) continue;
+
+  if (!minTxnOK(offer, baseAmount)) continue;
+
+  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+  ...
+}
+
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
         // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
     if (!offerHasPaymentRestriction(offer)) continue;
@@ -678,6 +733,9 @@ if (!best || discounted < best.finalPrice) {
 }
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
+    const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return [];
+
   const info = [];
 
   for (const offer of offers) {
