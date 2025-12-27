@@ -565,8 +565,7 @@ function escapeRegExp(s) {
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-
-  // 🔒 Phase-1 rule: if user didn’t pick anything, don’t apply payment offers
+  // IMPORTANT: if user selected nothing, do NOT apply payment-gated offers
   if (selected.length === 0) return false;
 
   const { types: selectedTypes, banks: selectedBanks } =
@@ -574,43 +573,29 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
 
-  // 1) If offer has structured paymentMethods, use them (no guessing)
+  // If offer has structured payment methods, match against them
   if (offerPMs.length > 0) {
     for (const pm of offerPMs) {
       const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
       const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
 
-      // A) If user selected a BANK, require bank match
-      if (offerBank && selectedBanks.has(offerBank)) return true;
-
-      // B) If user selected only a TYPE (e.g., "Credit Card"), allow type match even if offer has a bank
+      // ✅ TYPE-ONLY match should work (Credit Card, UPI, EMI etc.)
       if (offerType && selectedTypes.has(offerType)) return true;
+
+      // ✅ BANK match should work (HDFC Bank, Kotak Bank etc.)
+      if (offerBank && selectedBanks.has(offerBank)) return true;
     }
+
+    // If user selected ONLY a type (like "Credit Card") and no banks,
+    // and offer has any PM type at all, we already checked that above.
     return false;
   }
 
-  // 2) No structured PMs: infer types from text ONLY for type matching
-  const inferredTypes = inferPaymentTypesFromOfferText(offer);
-  if (inferredTypes.size > 0) {
-    for (const t of inferredTypes) {
-      if (selectedTypes.has(t)) return true;
-    }
-
-    // optional: bank match from text as a strict whole-word match
-    const blob = normalizeText(textBlobForPaymentInference(offer));
-    for (const b of selectedBanks) {
-      const bn = normalizeText(b);
-      if (!bn) continue;
-      const re = new RegExp(`\\b${escapeRegExp(bn)}\\b`, "i");
-      if (re.test(blob)) return true;
-    }
-
-    return false;
-  }
-
-  // If we can’t confidently tell it’s relevant to the selected payment, don’t apply.
+  // If offer has NO structured PMs, do not apply in payment-only phase.
+  // (keeps demo deterministic and avoids random/non-deterministic offers)
   return false;
 }
+
 
 
 
@@ -802,7 +787,11 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
 
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
-    const matchedPaymentLabel = best ? getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) : null;
+    const matchedPaymentLabel = best
+  ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) ||
+     (Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length ? String(selectedPaymentMethods[0]) : null))
+  : null;
+
 
 
     // ✅ bestDeal must be based on THIS portal's best offer, not bestPortal (which is computed later)
