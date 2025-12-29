@@ -213,6 +213,10 @@ function normalizeText(s) {
 
 function normalizeBankName(raw) {
   const s = normalizeText(raw);
+    // Handle common co-branded / shorthand selections
+  if (s.includes("flipkart") && s.includes("axis")) return "axis bank";
+  if (s === "au bank" || s.includes("au bank")) return "au small finance bank";
+
 
   const cleaned = s
     .replace(/\bbank\b/g, "bank")
@@ -428,74 +432,92 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
 }
 
 function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
-  const types = new Set();
-  const banks = new Set();
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
 
-  const arr = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  const genericTypes = new Set();           // e.g. user picked "Any Credit Card"
+  const specificBanksByType = new Map();    // e.g. creditcard -> Set(["axis bank","au small finance bank"])
 
-  const GENERIC_UI = new Set([
-    "credit card",
-    "debit card",
-    "net banking",
-    "upi",
-    "wallet",
-    "emi",
-    "any credit card",
-    "any debit card",
-    "any net banking",
-    "any upi",
-    "any wallet",
-    "any emi",
-  ]);
+  function addSpecific(typeNorm, bankNameRaw) {
+    if (!typeNorm) return;
+    const bankNorm = normalizeBankName(bankNameRaw);
+    if (!bankNorm) return;
 
-  for (const s of arr) {
-    if (typeof s === "string") {
-      const raw = String(s).trim();
+    if (!specificBanksByType.has(typeNorm)) specificBanksByType.set(typeNorm, new Set());
+    specificBanksByType.get(typeNorm).add(bankNorm);
+  }
+
+  for (const item of selected) {
+    // Accept both string + object payloads
+    if (typeof item === "string") {
+      const raw = item.trim();
       const rawNorm = normalizeText(raw);
 
-      const t = normalizePaymentType(raw, raw);
-      if (t) types.add(t);
-
-      if (!GENERIC_UI.has(rawNorm)) {
-        const b = normalizeBankName(raw);
-        if (b && !GENERIC_UI.has(normalizeText(b))) banks.add(b);
+      // Generic UI selections
+      if (rawNorm.startsWith("any ")) {
+        const t = normalizePaymentType(raw, raw);
+        if (t) genericTypes.add(t);
+        continue;
       }
+
+      // Otherwise treat as specific bank/card name
+      const tGuess = normalizePaymentType(raw, raw); // might become creditcard/debitcard/etc
+      addSpecific(tGuess || "other", raw);
       continue;
     }
 
-    const t = normalizePaymentType(s?.type || s?.name || "", s?.raw || "");
-    if (t) types.add(t);
+    if (item && typeof item === "object") {
+      const rawType = item.type || "";
+      const rawName = item.name || item.bank || item.raw || "";
 
-    const b = s?.bank || s?.name || s?.raw || "";
-    if (b) {
-      const bn = normalizeBankName(b);
-      if (bn) banks.add(bn);
+      const typeNorm = normalizePaymentType(rawType, rawName);
+
+      // If UI ever sends "Any X" as name, treat as generic
+      const nameNorm = normalizeText(rawName);
+      if (nameNorm.startsWith("any ")) {
+        if (typeNorm) genericTypes.add(typeNorm);
+        continue;
+      }
+
+      // Specific selection
+      addSpecific(typeNorm, rawName);
     }
   }
 
-  return { types, banks };
+  return { genericTypes, specificBanksByType };
 }
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (selected.length === 0) return false;
 
-  const { types: selectedTypes, banks: selectedBanks } = normalizeSelectedPaymentToTypes(selected);
-
-  // STRICT: only use structured paymentMethods from Mongo
+  // Offer must have structured payment methods
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
   if (offerPMs.length === 0) return false;
+
+  const { genericTypes, specificBanksByType } = normalizeSelectedPaymentToTypes(selectedPaymentMethods);
 
   for (const pm of offerPMs) {
     const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
     const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
 
-    if (offerType && selectedTypes.has(offerType)) return true;
-    if (offerBank && selectedBanks.has(offerBank)) return true;
+    // 1) If user selected ANY specific bank/card for this type,
+    //    ONLY allow bank matches (do NOT match just by type).
+    const specificSet = offerType ? specificBanksByType.get(offerType) : null;
+    if (specificSet && specificSet.size > 0) {
+      if (offerBank && specificSet.has(offerBank)) return true;
+      continue; // important: don't allow type-only match
+    }
+
+    // 2) If user selected "Any <Type>" (generic), allow type match.
+    if (offerType && genericTypes.has(offerType)) return true;
+
+    // 3) If user didn't select generic type, don't match by type.
+    //    (no-op)
   }
 
   return false;
 }
+
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
