@@ -565,36 +565,28 @@ function escapeRegExp(s) {
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  // IMPORTANT: if user selected nothing, do NOT apply payment-gated offers
-  if (selected.length === 0) return false;
+  if (selected.length === 0) return false; // strict rule: user must select something
 
-  const { types: selectedTypes, banks: selectedBanks } =
-    normalizeSelectedPaymentToTypes(selected);
+  const { types: selectedTypes, banks: selectedBanks } = normalizeSelectedPaymentToTypes(selected);
 
+  // STRICT: only use structured paymentMethods from Mongo
   const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  if (offerPMs.length === 0) return false;
 
-  // If offer has structured payment methods, match against them
-  if (offerPMs.length > 0) {
-    for (const pm of offerPMs) {
-      const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
-      const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
+  for (const pm of offerPMs) {
+    const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
+    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
 
-      // ✅ TYPE-ONLY match should work (Credit Card, UPI, EMI etc.)
-      if (offerType && selectedTypes.has(offerType)) return true;
+    // 1) Type match (Credit Card / UPI / EMI etc.)
+    if (offerType && selectedTypes.has(offerType)) return true;
 
-      // ✅ BANK match should work (HDFC Bank, Kotak Bank etc.)
-      if (offerBank && selectedBanks.has(offerBank)) return true;
-    }
-
-    // If user selected ONLY a type (like "Credit Card") and no banks,
-    // and offer has any PM type at all, we already checked that above.
-    return false;
+    // 2) Bank match (HDFC / Kotak / Axis etc.)
+    if (offerBank && selectedBanks.has(offerBank)) return true;
   }
 
-  // If offer has NO structured PMs, do not apply in payment-only phase.
-  // (keeps demo deterministic and avoids random/non-deterministic offers)
   return false;
 }
+
 
 
 
@@ -708,7 +700,9 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
     // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
-    if (!offerHasPaymentRestriction(offer)) continue;
+    // STRICT: Only consider offers that have structured paymentMethods[]
+if (!Array.isArray(offer?.paymentMethods) || offer.paymentMethods.length === 0) continue;
+
 
     if (!minTxnOK(offer, baseAmount)) continue;
 
