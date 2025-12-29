@@ -18,12 +18,8 @@ app.use(express.json());
 // --------------------
 const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
 
-// Base OTA markup: ₹0 (no blanket markup)
-const OTA_MARKUP = Number(process.env.OTA_MARKUP || 0);
-
-// SpiceJet-only markup on OTA base prices: ₹100
-const SPICEJET_OTA_MARKUP = Number(process.env.SPICEJET_OTA_MARKUP || 100);
-
+// ✅ Simulation removed: no blanket markup, no SpiceJet-specific markup
+// (We keep base prices exactly as FlightAPI returns)
 
 // Mongo envs
 const MONGO_URI = process.env.MONGO_URI;
@@ -46,7 +42,7 @@ function toISO(d) {
   return "";
 }
 
-// FlightAPI expects: Economy | Premium_Economy | Business | First (based on your earlier notes + typical docs)
+// FlightAPI expects: Economy | Premium_Economy | Business | First
 function normalizeCabin(travelClass) {
   const v = String(travelClass || "economy").toLowerCase().trim();
   if (v === "premium economy" || v === "premium_economy" || v === "premium-economy") return "Premium_Economy";
@@ -63,23 +59,17 @@ let _mongoClient = null;
 async function getOffersCollection() {
   if (!MONGO_URI) throw new Error("Missing MONGO_URI env var");
   if (!_mongoClient) {
-    _mongoClient = new MongoClient(MONGO_URI, {
-      // keep defaults; your connection already works for /payment-options
-    });
+    _mongoClient = new MongoClient(MONGO_URI, {});
     await _mongoClient.connect();
   }
   return _mongoClient.db(MONGODB_DB).collection(MONGO_COL);
 }
 
 // --------------------
-// FlightAPI call (FIXED): onewaytrip
+// FlightAPI call: onewaytrip
 // --------------------
 function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency }) {
   if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY env var");
-
-  // IMPORTANT: FlightAPI price search uses /onewaytrip/... not /oneway/...
-  // format:
-  // https://api.flightapi.io/onewaytrip/<api-key>/<from>/<to>/<date>/<adults>/<children>/<infants>/<cabin>/<currency>
   return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${cabin}/${currency}`;
 }
 
@@ -120,8 +110,6 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
 
 // --------------------
 // Map FlightAPI response to consistent flights
-// FlightAPI responses often look "Skyscanner-style" with itineraries/legs/segments/carriers.
-// This mapper is defensive.
 // --------------------
 function mapFlightsFromFlightAPI(raw) {
   const itineraries = Array.isArray(raw?.itineraries) ? raw.itineraries : [];
@@ -152,7 +140,6 @@ function mapFlightsFromFlightAPI(raw) {
     // Carrier name
     const marketingCarrierId = Array.isArray(leg?.marketing_carrier_ids) ? leg.marketing_carrier_ids[0] : null;
     const carrier = marketingCarrierId != null ? carrierById[String(marketingCarrierId)] : null;
-
     const airlineName = carrier?.name || carrier?.display_name || carrier?.code || "-";
 
     // flight number guess from first segment
@@ -180,8 +167,9 @@ function mapFlightsFromFlightAPI(raw) {
 
   return flights;
 }
+
 // --------------------
-// FIX #4: Limit results (Indian carriers + non-stop first)
+// Limit results (Indian carriers + non-stop first)
 // --------------------
 const MAX_RESULTS_PER_DIRECTION = 25;
 
@@ -205,21 +193,16 @@ function isIndianCarrier(airlineName) {
 }
 
 function limitAndSortFlights(flights) {
-  // 1. Keep Indian carriers only (if available)
   const indian = flights.filter(f => isIndianCarrier(f.airlineName));
   const pool = indian.length > 0 ? indian : flights;
 
-  // 2. Non-stop first
   pool.sort((a, b) => (a.stops || 0) - (b.stops || 0));
-
-  // 3. Limit
   return pool.slice(0, MAX_RESULTS_PER_DIRECTION);
 }
 
 // --------------------
 // Offer matching + pricing
 // --------------------
-
 function normalizeText(s) {
   return String(s || "")
     .trim()
@@ -231,14 +214,12 @@ function normalizeText(s) {
 function normalizeBankName(raw) {
   const s = normalizeText(raw);
 
-  // common suffix cleanup
   const cleaned = s
     .replace(/\bbank\b/g, "bank")
     .replace(/\bltd\b/g, "ltd")
     .replace(/\blimited\b/g, "ltd")
     .trim();
 
-  // lightweight alias mapping (expand as you see patterns)
   const map = new Map([
     ["hdfc", "hdfc bank"],
     ["hdfc bank", "hdfc bank"],
@@ -261,34 +242,18 @@ function normalizePaymentType(rawType, rawText = "") {
   const t = normalizeText(rawType);
   const r = normalizeText(rawText);
 
-  // EMI normalization
   if (t.includes("emi") || r.includes("emi") || r.includes("no cost emi") || r.includes("no-cost emi")) return "emi";
-
-  // Netbanking normalization
   if (t.includes("net") && t.includes("bank")) return "netbanking";
   if (r.includes("net banking") || r.includes("netbanking")) return "netbanking";
-
-  // Credit / Debit
   if (t.includes("credit")) return "creditcard";
   if (t.includes("debit")) return "debitcard";
-
-  // UPI / Wallet
   if (t.includes("upi") || r.includes("upi")) return "upi";
   if (t.includes("wallet") || r.includes("wallet")) return "wallet";
 
   return t || "other";
 }
 
-function paymentKey(pm) {
-  const type = normalizePaymentType(pm?.type, pm?.raw);
-  const bank = pm?.bank ? normalizeBankName(pm.bank) : "";
-  const network = normalizeText(pm?.network || "");
-  // key is used only for matching/dedup
-  return `${type}|${bank}|${network}`;
-}
-
-
-// Extract (type,name) from offer documents with different shapes
+// Extract (type,name) from offer docs with different shapes
 function extractOfferConstraints(offer) {
   const text = String(offer?.terms || "").toLowerCase();
   return {
@@ -303,12 +268,10 @@ function extractOfferPaymentMethods(offer) {
   const out = [];
   const pm = offer?.paymentMethods;
 
-  // Shape A: [{type, bank/network/name, ...}]
   if (Array.isArray(pm)) {
     for (const x of pm) {
       if (typeof x === "string") {
-        // string like "ICICI Bank" without type (not ideal)
-        out.push({ type: "Other", name: x });
+        out.push({ type: "other", name: x });
       } else if (x && typeof x === "object") {
         const type = normalizePaymentType(x.type || x.methodType || x.paymentType);
         const name =
@@ -320,19 +283,18 @@ function extractOfferPaymentMethods(offer) {
           x.cardNetwork ||
           x.issuer ||
           "";
-        if (name) out.push({ type, name: String(name) });
+        if (name) out.push({ type, name: String(name), bank: x.bank || x.bankName || "" , raw: x.raw || "" });
       }
     }
   }
 
-  // Shape B: rawFields.paymentMethods may exist
   const rawPM = offer?.rawFields?.paymentMethods;
   if (Array.isArray(rawPM)) {
     for (const x of rawPM) {
       if (x && typeof x === "object") {
         const type = normalizePaymentType(x.type);
         const name = x.name || x.bank || x.network || x.provider;
-        if (name) out.push({ type, name: String(name) });
+        if (name) out.push({ type, name: String(name), bank: x.bank || "" , raw: x.raw || "" });
       }
     }
   }
@@ -341,7 +303,6 @@ function extractOfferPaymentMethods(offer) {
 }
 
 function offerAppliesToPortal(offer, portalName) {
-  // If offer has explicit platform/portal targeting, respect it. Otherwise assume it can apply.
   const candidates = [
     offer?.sourcePortal,
     offer?.sourceMetadata?.sourcePortal,
@@ -358,46 +319,40 @@ function offerAppliesToPortal(offer, portalName) {
 
   return true;
 }
+
 function isFlightOffer(offer) {
   const cats = offer?.offerCategories || [];
   const isFlightCategory = Array.isArray(cats) && cats.some(c => /^(flights?|flight)$/i.test(String(c)));
-
   if (!isFlightCategory) return false;
 
-  // Exclude ancillary / add-on offers that should NOT reduce base fare
   const hay = normalizeText(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
- const ancillaryKeywords = [
-  "baggage", "baggages", "excess baggage", "excess baggages",
-  "seat", "seat selection",
-  "cancellation", "free cancellation", "cancellation cover",
-  "insurance", "travel insurance",
-  "meal", "meals",
-  "lounge",
-  "web checkin", "web check-in", "check-in",
-  "visa"
-];
-
+  const ancillaryKeywords = [
+    "baggage", "baggages", "excess baggage", "excess baggages",
+    "seat", "seat selection",
+    "cancellation", "free cancellation", "cancellation cover",
+    "insurance", "travel insurance",
+    "meal", "meals",
+    "lounge",
+    "web checkin", "web check-in", "check-in",
+    "visa"
+  ];
 
   if (ancillaryKeywords.some(k => hay.includes(normalizeText(k)))) return false;
-
   return true;
 }
-
-
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  // try parsed validityPeriod end
   const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate;
   if (end) {
     const t = new Date(end);
     if (!isNaN(t)) return t.getTime() < Date.now();
   }
-  return false; // default: not expired if unknown
+  return false;
 }
 
 function minTxnOK(offer, amount) {
@@ -408,17 +363,14 @@ function minTxnOK(offer, amount) {
     null;
 
   if (typeof v === "number") return amount >= v;
-
-  // sometimes minTransactionValue is string like "4000"
   const n = Number(String(v || "").replace(/[^\d.]/g, ""));
   if (!isNaN(n) && n > 0) return amount >= n;
 
-  return true; // if unknown, do not block
+  return true;
 }
+
 function detectDomesticInternationalCap(offer, isDomestic) {
   const text = String(offer?.rawDiscount || "").toLowerCase();
-
-  // Look for explicit dual-scope wording
   if (text.includes("domestic") && text.includes("international")) {
     if (isDomestic) {
       const m = text.match(/domestic.*?rs\.?\s*([\d,]+)/i);
@@ -431,9 +383,7 @@ function detectDomesticInternationalCap(offer, isDomestic) {
   return null;
 }
 
-
 function computeDiscountedPrice(offer, baseAmount, isDomestic) {
-  // Support percent discount AND flat discount (you explicitly need flat-amount support)
   const percent =
     offer?.discountPercent ??
     offer?.parsedFields?.discountPercent ??
@@ -455,18 +405,15 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
     if (!isNaN(n) && n > 0) final = baseAmount - n;
   }
 
-  // cap by maxDiscountAmount if present (if percent was used)
   let maxAmt =
-  offer?.maxDiscountAmount ??
-  offer?.parsedFields?.maxDiscountAmount ??
-  null;
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    null;
 
-// 🔒 STEP 2: Domestic / International override (only if detected)
-const scopedCap = detectDomesticInternationalCap(offer, isDomestic);
-if (typeof scopedCap === "number") {
-  maxAmt = scopedCap;
-}
-
+  const scopedCap = detectDomesticInternationalCap(offer, isDomestic);
+  if (typeof scopedCap === "number") {
+    maxAmt = scopedCap;
+  }
 
   if (typeof percent === "number" && percent > 0 && maxAmt != null) {
     const maxN = Number(String(maxAmt).replace(/[^\d.]/g, ""));
@@ -476,36 +423,8 @@ if (typeof scopedCap === "number") {
     }
   }
 
-  // no negative
   if (final < 0) final = 0;
   return Math.round(final);
-}
-function textBlobForPaymentInference(offer) {
-  return [
-    offer?.title,
-    offer?.rawDiscount,
-    offer?.rawText,
-    offer?.offerSummary,
-    offer?.terms,
-  ]
-    .filter(Boolean)
-    .join(" \n ")
-    .toLowerCase();
-}
-
-function inferPaymentTypesFromOfferText(offer) {
-  const t = textBlobForPaymentInference(offer);
-
-  const types = new Set();
-
-  if (/(?:\bemi\b|no[\s-]?cost\s*emi|credit\s*card\s*emi)/i.test(t)) types.add("emi");
-  if (/(?:\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi)/i.test(t)) types.add("upi");
-  if (/(?:net\s*banking|netbanking|internet\s*banking)/i.test(t)) types.add("netbanking");
-  if (/(?:\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge)/i.test(t)) types.add("wallet");
-  if (/(?:\bcredit\s*card\b)/i.test(t)) types.add("creditcard");
-  if (/(?:\bdebit\s*card\b)/i.test(t)) types.add("debitcard");
-
-  return types;
 }
 
 function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
@@ -534,14 +453,11 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
       const raw = String(s).trim();
       const rawNorm = normalizeText(raw);
 
-      // Always add type
       const t = normalizePaymentType(raw, raw);
       if (t) types.add(t);
 
-      // ✅ IMPORTANT: do NOT treat generic UI selections as banks
       if (!GENERIC_UI.has(rawNorm)) {
         const b = normalizeBankName(raw);
-        // only add if it actually looks like a bank label (avoid "credit card" etc.)
         if (b && !GENERIC_UI.has(normalizeText(b))) banks.add(b);
       }
       continue;
@@ -559,13 +475,10 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
 
   return { types, banks };
 }
-function escapeRegExp(s) {
-  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (selected.length === 0) return false; // strict rule: user must select something
+  if (selected.length === 0) return false;
 
   const { types: selectedTypes, banks: selectedBanks } = normalizeSelectedPaymentToTypes(selected);
 
@@ -577,20 +490,12 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
     const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
     const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
 
-    // 1) Type match (Credit Card / UPI / EMI etc.)
     if (offerType && selectedTypes.has(offerType)) return true;
-
-    // 2) Bank match (HDFC / Kotak / Axis etc.)
     if (offerBank && selectedBanks.has(offerBank)) return true;
   }
 
   return false;
 }
-
-
-
-
-
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
@@ -598,7 +503,6 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (offerPMs.length === 0) return null;
 
-  // selected can be strings OR objects
   const sel = selectedPaymentMethods.map((x) => {
     if (typeof x === "string") {
       const t = normalizePaymentType(x, x);
@@ -627,48 +531,16 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   return null;
 }
 
-
-function offerHasPaymentRestriction(offer) {
-  // structured PMs
-  const pm = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
-  if (pm.length > 0) return true;
-
-  // inferred from text
-  const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
-  );
-
-  return (
-    /\bemi\b|no\s*cost\s*emi|no-?cost\s*emi/.test(blob) ||
-    /\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi/.test(blob) ||
-    /net\s*banking|netbanking|internet\s*banking/.test(blob) ||
-    /\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge/.test(blob) ||
-    /\bcredit\s*card\b/.test(blob) ||
-    /\bdebit\s*card\b/.test(blob)
-  );
-}
 function offerScopeMatchesTrip(offer, isDomestic) {
   const blob = normalizeText(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
-  // If it explicitly says "international" and does NOT say "domestic",
-  // block it for domestic searches.
   if (isDomestic && blob.includes("international") && !blob.includes("domestic")) return false;
 
-  // Very conservative destination keyword blocklist (only for domestic searches).
-  // (Add more if you keep seeing them; this is meant to avoid obvious irrelevance.)
   const obviousInternational = [
-    "krabi",
-    "siem reap",
-    "cebu",
-    "bangkok",
-    "singapore",
-    "dubai",
-    "kuala lumpur",
-    "ho chi minh",
-    "phuket",
-    "bali",
+    "krabi", "siem reap", "cebu", "bangkok", "singapore", "dubai",
+    "kuala lumpur", "ho chi minh", "phuket", "bali",
   ].map(normalizeText);
 
   if (isDomestic && obviousInternational.some(k => blob.includes(k)) && !blob.includes("domestic")) {
@@ -678,10 +550,7 @@ function offerScopeMatchesTrip(offer, isDomestic) {
   return true;
 }
 
-
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
-  // ✅ Phase-1 rule: if user didn't select any payment method,
-  // we should NOT apply payment-restricted offers by default.
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return null;
 
@@ -693,22 +562,15 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerAppliesToPortal(offer, portal)) continue;
 
     const isDomestic = true;
-    if (typeof offerScopeMatchesTrip === "function") {
-      if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
-    }
+    if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
 
+    // 🔒 Phase-1 rule: only payment-method offers
+    if (!Array.isArray(offer?.paymentMethods) || offer.paymentMethods.length === 0) continue;
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
-
-    // 🔒 PAYMENT-PHASE RULE: only apply payment-method-related offers
-    // STRICT: Only consider offers that have structured paymentMethods[]
-if (!Array.isArray(offer?.paymentMethods) || offer.paymentMethods.length === 0) continue;
-
 
     if (!minTxnOK(offer, baseAmount)) continue;
 
     const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
-
-    // 🔒 Ignore offers that do not reduce price
     if (discounted >= baseAmount) continue;
 
     if (!best || discounted < best.finalPrice) {
@@ -719,9 +581,8 @@ if (!Array.isArray(offer?.paymentMethods) || offer.paymentMethods.length === 0) 
   return best;
 }
 
-
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
-    const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return [];
 
   const info = [];
@@ -731,11 +592,8 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
 
-    // IMPORTANT: info offers should still respect payment filtering
-    // so we don’t show irrelevant bank-only deals when user selected something else.
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
-    // We ONLY want offers that are NOT deterministic / not applied.
     const percent =
       offer?.discountPercent ??
       offer?.parsedFields?.discountPercent ??
@@ -752,7 +610,6 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
-    // If deterministic, ignore here (those are eligible for pricing path already)
     if (hasDeterministicSignal) continue;
 
     info.push({
@@ -762,7 +619,7 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
       paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
-      sourcePortal: offer?.sourceMetadata?.sourcePortal || null,
+      sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
     });
 
     if (info.length >= limit) break;
@@ -771,24 +628,18 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
   return info;
 }
 
-
 async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
-    const isSpiceJet = String(flight.airlineName || "").toLowerCase().includes("spicejet");
-const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MARKUP : 0));
-
+    // ✅ Simulation removed: portalBase is just base
+    const portalBase = Math.round(base);
 
     const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
     const matchedPaymentLabel = best
-  ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) ||
-     (Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length ? String(selectedPaymentMethods[0]) : null))
-  : null;
+      ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
+      : null;
 
-
-
-    // ✅ bestDeal must be based on THIS portal's best offer, not bestPortal (which is computed later)
     const bestDeal = best
       ? {
           portal,
@@ -799,7 +650,6 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
           title: best.offer?.title || null,
           rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
           constraints: extractOfferConstraints(best.offer),
-
         }
       : null;
 
@@ -813,13 +663,11 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
       rawDiscount: bestDeal?.rawDiscount || null,
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
-        paymentLabel: matchedPaymentLabel,
+      paymentLabel: matchedPaymentLabel,
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, 5),
-    
     };
   });
 
-  // best overall among portals
   const bestPortal = portalPrices.reduce(
     (acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc),
     null
@@ -839,12 +687,10 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
           rawDiscount: bestPortal.rawDiscount,
           constraints: bestPortal.constraints || null,
           paymentLabel: bestPortal.paymentLabel || null,
-
         }
       : null,
   };
 }
-
 
 // --------------------
 // Routes
@@ -854,7 +700,6 @@ const portalBase = Math.round(base + OTA_MARKUP + (isSpiceJet ? SPICEJET_OTA_MAR
 app.get("/payment-options", async (req, res) => {
   const meta = { usedFallback: false };
 
-  // 🔒 Only affects /payment-options output (does NOT touch offer matching)
   function textBlobForInference(offer) {
     return [
       offer?.title,
@@ -871,22 +716,12 @@ app.get("/payment-options", async (req, res) => {
 
   function inferTypesFromText(offer) {
     const t = textBlobForInference(offer);
-
     const inferred = new Set();
 
-    // EMI
     if (/(?:\bemi\b|no[\s-]?cost\s*emi|easy\s*emi|credit\s*card\s*emi)/i.test(t)) inferred.add("EMI");
-
-    // UPI
     if (/(?:\bupi\b|bhim|gpay|google\s*pay|phonepe|paytm\s*upi)/i.test(t)) inferred.add("UPI");
-
-    // Net Banking
     if (/(?:net\s*banking|netbanking|internet\s*banking)/i.test(t)) inferred.add("Net Banking");
-
-    // Wallet
     if (/(?:\bwallet\b|paytm\s*wallet|amazon\s*pay|mobikwik|freecharge)/i.test(t)) inferred.add("Wallet");
-
-    // Cards (generic)
     if (/(?:\bcredit\s*card\b)/i.test(t)) inferred.add("Credit Card");
     if (/(?:\bdebit\s*card\b)/i.test(t)) inferred.add("Debit Card");
 
@@ -894,8 +729,6 @@ app.get("/payment-options", async (req, res) => {
   }
 
   function pickName(pm) {
-    // normalize "name" from whichever field exists in your parsed schema
-    // (pm.name might be absent; pm.bank/raw might exist)
     const candidates = [pm?.name, pm?.bank, pm?.network, pm?.raw];
     for (const c of candidates) {
       const s = String(c || "").trim();
@@ -904,38 +737,32 @@ app.get("/payment-options", async (req, res) => {
     return "";
   }
 
-  // ✅ Canonical UI buckets (don’t allow random keys)
   const CANON_KEYS = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet", "EMI"];
-  // Map internal normalized types -> UI bucket labels
-function uiBucketFromNormalizedType(normType) {
-  switch (normType) {
-    case "creditcard": return "Credit Card";
-    case "debitcard": return "Debit Card";
-    case "netbanking": return "Net Banking";
-    case "upi": return "UPI";
-    case "wallet": return "Wallet";
-    case "emi": return "EMI";
-    default: return null;
+
+  function uiBucketFromNormalizedType(normType) {
+    switch (normType) {
+      case "creditcard": return "Credit Card";
+      case "debitcard": return "Debit Card";
+      case "netbanking": return "Net Banking";
+      case "upi": return "UPI";
+      case "wallet": return "Wallet";
+      case "emi": return "EMI";
+      default: return null;
+    }
   }
-}
 
-// Normalize + dedupe card/bank labels (so you don't get slight variants)
-function normalizeDisplayNameForUI(rawName) {
-  // If it's a bank, normalize with your existing bank normalizer
-  const n = normalizeBankName(rawName);
-  // Make it readable in UI (basic Title Case)
-  return n
-    .split(" ")
-    .filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
+  function normalizeDisplayNameForUI(rawName) {
+    const n = normalizeBankName(rawName);
+    return n
+      .split(" ")
+      .filter(Boolean)
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
 
   try {
     const col = await getOffersCollection();
 
-    // pull only what we need
     const offers = await col
       .find(
         {},
@@ -953,69 +780,54 @@ function normalizeDisplayNameForUI(rawName) {
     };
 
     for (const offer of offers) {
-      // 1) Structured PMs (preferred)
-      const structured = extractOfferPaymentMethods(offer); // keep your existing helper
+      const structured = extractOfferPaymentMethods(offer);
       const hasStructured = Array.isArray(structured) && structured.length > 0;
 
       if (hasStructured) {
         for (const pm of structured) {
-  const normType = normalizePaymentType(pm.type, pm.raw || "");
-  const bucket = uiBucketFromNormalizedType(normType);
-  if (!bucket) continue;
+          const normType = normalizePaymentType(pm.type, pm.raw || "");
+          const bucket = uiBucketFromNormalizedType(normType);
+          if (!bucket) continue;
 
-  const nameRaw = pickName(pm);
-  if (!nameRaw) continue;
+          const nameRaw = pickName(pm);
+          if (!nameRaw) continue;
 
-  const name = normalizeDisplayNameForUI(nameRaw);
-  if (!name) continue;
+          const name = normalizeDisplayNameForUI(nameRaw);
+          if (!name) continue;
 
-  groups[bucket].add(name);
-}
-
+          groups[bucket].add(name);
+        }
       } else {
-        // 2) Inference fallback (ONLY for options list)
+        // ONLY for options list, not for matching
         const inferredTypes = inferTypesFromText(offer);
         for (const t of inferredTypes) {
           if (!groups[t]) continue;
-          // add a generic option so the tab is not empty
-          // (offer matching stays separate; this is only for UI availability)
           groups[t].add(`Any ${t}`);
         }
       }
     }
 
-    // convert to arrays (sorted)
-    // convert to arrays (sorted) with smart "Any X" handling
-const options = {};
-for (const [k, set] of Object.entries(groups)) {
-  const arr = Array.from(set).filter(Boolean);
+    const options = {};
+    for (const [k, set] of Object.entries(groups)) {
+      const arr = Array.from(set).filter(Boolean);
 
-  const anyLabel = `Any ${k}`;
-  const hasAny = arr.includes(anyLabel);
-  const hasSpecific = arr.some(x => x !== anyLabel);
+      const anyLabel = `Any ${k}`;
+      const hasAny = arr.includes(anyLabel);
+      const hasSpecific = arr.some(x => x !== anyLabel);
 
-  // If real banks exist, hide generic "Any X"
-  options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
-    .sort((a, b) => a.localeCompare(b));
-}
+      options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
+        .sort((a, b) => a.localeCompare(b));
+    }
 
     res.json({ ...meta, options });
   } catch (e) {
     res.status(500).json({
       usedFallback: false,
-      options: {
-        "Credit Card": [],
-        "Debit Card": [],
-        "Net Banking": [],
-        "UPI": [],
-        "Wallet": [],
-        "EMI": [],
-      },
+      options: CANON_KEYS.reduce((acc, k) => (acc[k] = [], acc), {}),
       error: e?.message || "Failed to load payment options",
     });
   }
 });
-
 
 // Search flights + apply offers
 app.post("/search", async (req, res) => {
@@ -1033,6 +845,7 @@ app.post("/search", async (req, res) => {
     const cabin = normalizeCabin(body.travelClass);
     const currency = "INR";
 
+    // ✅ Keep as-is: backend can handle array of strings or objects
     const selectedPaymentMethods = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
 
     if (!from || !to || !outDate) {
@@ -1043,29 +856,24 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Load offers ONCE per request
+    const col = await getOffersCollection();
+    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
     // Outbound
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
-    // --------------------
-// FIX #1: Load offers ONCE per search request
-// --------------------
-const col = await getOffersCollection();
-const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
-
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
-
-    // Apply offers per flight
-  
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
       outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
     }
 
-    // Return (if round-trip)
+    // Return
     let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
       const retRes = await fetchOneWayTrip({ from: to, to: from, date: retDate, adults, cabin, currency });
@@ -1074,7 +882,6 @@ const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
-
 
       const enriched = [];
       for (const f of retFlightsLimited) {
