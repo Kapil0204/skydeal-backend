@@ -68,22 +68,20 @@ async function getOffersCollection() {
 // --------------------
 // FlightAPI call: onewaytrip
 // --------------------
-function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency }) {
+function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency, region }) {
   if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY env var");
-  return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${cabin}/${currency}`;
+  const r = region || "IN"; // ✅ default region
+  return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${cabin}/${currency}/${r}`;
 }
 
-async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", currency = "INR" }) {
+
+async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", currency = "INR", region = "IN" }) {
   const url = buildOnewayTripUrl({
-    from,
-    to,
-    date,
-    adults,
-    children: 0,
-    infants: 0,
-    cabin,
-    currency,
+    from, to, date, adults,
+    children: 0, infants: 0,
+    cabin, currency, region,
   });
+
 
   const tried = [{ url }];
 
