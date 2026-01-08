@@ -456,6 +456,40 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
     const discounted = Math.round(base * (1 - pct / 100));
     return discounted < base ? discounted : base;
   }
+  // ---- Fallback for "Up to X%" discounts ----
+  if (process.env.ENABLE_ESTIMATED_DISCOUNTS === "true") {
+if (
+  baseAmount > 0 &&
+  !offer.discountPercent &&
+  !offer.flatDiscountAmount &&
+  typeof offer.rawDiscount === "string"
+) {
+  const m = offer.rawDiscount.match(/up to\s*(\d+)\s*%/i);
+  if (m) {
+    const statedPct = Number(m[1]);
+
+    // Conservative fallback:
+    // take 50% of stated, cap at 10%
+    const effectivePct = Math.min(Math.floor(statedPct / 2), 10);
+
+    if (effectivePct > 0) {
+      const discounted = Math.floor(
+        baseAmount * (1 - effectivePct / 100)
+      );
+
+      return {
+        price: discounted,
+        meta: {
+          estimated: true,
+          method: "UP_TO_PERCENT_FALLBACK",
+          appliedPercent: effectivePct,
+          statedPercent: statedPct,
+        },
+      };
+    }
+  }
+}
+}
 
   // 3) Flat discount support (you said you need this later; keep it safe now)
   const flat = Number(offer?.flatDiscountAmount);
@@ -708,14 +742,32 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerMatchesSelectedPayment(offer, sel)) continue;
     if (!minTxnOK(offer, baseAmount)) continue;
 
-    const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
 
-    // If no deterministic price improvement, don't treat as "applied"
-    if (discounted >= baseAmount) continue;
+const discounted =
+  typeof result === "number" ? result : result.price;
 
-    if (!best || discounted < best.finalPrice) {
-      best = { finalPrice: discounted, offer };
-    }
+const discountMeta =
+  typeof result === "object" ? result.meta : null;
+
+// If no deterministic improvement, skip
+if (discounted >= baseAmount) continue;
+
+if (!best || discounted < best.finalPrice) {
+  best = {
+    finalPrice: discounted,
+    offer,
+    explain: discountMeta
+      ? {
+          type: "ESTIMATED_DISCOUNT",
+          message: `Estimated ${discountMeta.appliedPercent}% off (offer says up to ${discountMeta.statedPercent}%)`,
+          confidence: "LOW",
+          method: discountMeta.method,
+        }
+      : null,
+  };
+}
+
   }
 
   return best;
@@ -807,6 +859,8 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       constraints: bestDeal?.constraints || null,
       paymentLabel: (best ? paymentLabelFromSelection(selectedPaymentMethods) : null),
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, 5),
+      explain: best?.explain || null
+
     };
   });
 
