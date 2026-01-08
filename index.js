@@ -666,6 +666,8 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
   return best;
 }
+  return null;
+} 
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
