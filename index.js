@@ -276,73 +276,64 @@ function extractOfferConstraints(offer) {
  * We normalize that into the format: [{ type, bank, name, raw }]
  */
 function extractOfferPaymentMethods(offer) {
-  const out = [];
+  // Always return an array of normalized objects:
+  // { type, bank, network, methodCanonical, bankCanonical, networkCanonical, raw, conditions, ... }
+  if (!offer || typeof offer !== "object") return [];
 
-  // -------------------------
-  // A) NEW: eligiblePaymentMethods (Mongo normalized)
-  // -------------------------
-  const epm = offer?.eligiblePaymentMethods;
-  if (Array.isArray(epm)) {
-    for (const x of epm) {
-      if (!x || typeof x !== "object") continue;
+  // ----------------------------
+  // 1) Preferred: eligiblePaymentMethods (your DB has this)
+  // ----------------------------
+  if (Array.isArray(offer.eligiblePaymentMethods) && offer.eligiblePaymentMethods.length > 0) {
+    return offer.eligiblePaymentMethods
+      .filter(pm => pm && typeof pm === "object")
+      .map(pm => ({
+        // Keep both raw + canonical fields so other functions can match reliably
+        type: pm.type || null, // e.g. "credit_card"
+        bank: pm.bank || null, // e.g. "Axis Bank"
+        network: pm.network || null, // may be null
 
-      // type can come as: "credit_card" OR methodCanonical:"CREDIT_CARD"
-      const typeRaw = x.type || x.methodCanonical || x.method || x.paymentType || "";
-      const type = normalizePaymentType(typeRaw, x.raw || "");
+        methodCanonical: pm.methodCanonical || null, // e.g. "CREDIT_CARD"
+        bankCanonical: pm.bankCanonical || null, // e.g. "AXIS_BANK"
+        networkCanonical: pm.networkCanonical || null,
 
-      // bank can come as: "Axis Bank" OR bankCanonical:"AXIS_BANK"
-      const bankRaw = x.bank || x.bankName || x.bankDisplay || x.bankCanonical || "";
-      const bank = bankRaw ? String(bankRaw) : "";
-
-      out.push({
-        type,
-        name: bank,     // keep same shape as your existing code expects
-        bank,
-        raw: x.raw || "",
-      });
-    }
+        // extra optional metadata (keep it, useful later)
+        cardVariant: pm.cardVariant || null,
+        emiOnly: pm.emiOnly === true,
+        tenureMonths: pm.tenureMonths ?? null,
+        conditions: pm.conditions || null,
+        raw: pm.raw || null,
+      }))
+      .filter(pm => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
 
-  // -------------------------
-  // B) Existing: paymentMethods (if present in future)
-  // -------------------------
-  const pm = offer?.paymentMethods;
-  if (Array.isArray(pm)) {
-    for (const x of pm) {
-      if (typeof x === "string") {
-        out.push({ type: "other", name: x, bank: x, raw: "" });
-      } else if (x && typeof x === "object") {
-        const type = normalizePaymentType(x.type || x.methodType || x.paymentType);
-        const name =
-          x.name ||
-          x.bank ||
-          x.bankName ||
-          x.provider ||
-          x.network ||
-          x.cardNetwork ||
-          x.issuer ||
-          "";
-        if (name) out.push({ type, name: String(name), bank: x.bank || x.bankName || "", raw: x.raw || "" });
-      }
-    }
+  // ----------------------------
+  // 2) Legacy/alternate: paymentMethods (your DB currently does NOT have this)
+  // ----------------------------
+  if (Array.isArray(offer.paymentMethods) && offer.paymentMethods.length > 0) {
+    return offer.paymentMethods
+      .filter(pm => pm && typeof pm === "object")
+      .map(pm => ({
+        // Many older schemas look like { type:"Credit Card", name:"Axis Bank", bank:"Axis Bank", ... }
+        type: pm.type || null,
+        bank: pm.bank || pm.name || null,
+        network: pm.network || null,
+
+        methodCanonical: pm.methodCanonical || null,
+        bankCanonical: pm.bankCanonical || null,
+        networkCanonical: pm.networkCanonical || null,
+
+        cardVariant: pm.cardVariant || null,
+        emiOnly: pm.emiOnly === true,
+        tenureMonths: pm.tenureMonths ?? null,
+        conditions: pm.conditions || null,
+        raw: pm.raw || null,
+      }))
+      .filter(pm => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
 
-  // -------------------------
-  // C) Existing: rawFields.paymentMethods (older parser shape)
-  // -------------------------
-  const rawPM = offer?.rawFields?.paymentMethods;
-  if (Array.isArray(rawPM)) {
-    for (const x of rawPM) {
-      if (x && typeof x === "object") {
-        const type = normalizePaymentType(x.type);
-        const name = x.name || x.bank || x.network || x.provider;
-        if (name) out.push({ type, name: String(name), bank: x.bank || "", raw: x.raw || "" });
-      }
-    }
-  }
-
-  return out;
+  return [];
 }
+
 
 
 function offerAppliesToPortal(offer, portalName) {
