@@ -18,6 +18,9 @@ app.use(express.json());
 // --------------------
 const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
 
+// ✅ Simulation removed: no blanket markup, no SpiceJet-specific markup
+// (We keep base prices exactly as FlightAPI returns)
+
 // Mongo envs
 const MONGO_URI = process.env.MONGO_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
@@ -65,16 +68,9 @@ async function getOffersCollection() {
 // --------------------
 // FlightAPI call: onewaytrip
 // --------------------
-// ✅ CRITICAL: Must match FlightAPI documented schema exactly
-// https://api.flightapi.io/onewaytrip/<api-key>/<from>/<to>/<date>/<adults>/<children>/<infants>/<cabin>/<currency>
-// (NO trailing /IN or region suffix) :contentReference[oaicite:2]{index=2}
 function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency }) {
   if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY env var");
-
-  const safeCabin = encodeURIComponent(String(cabin || "Economy"));
-  const safeCurrency = encodeURIComponent(String(currency || "INR"));
-
-  return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${encodeURIComponent(from)}/${encodeURIComponent(to)}/${encodeURIComponent(date)}/${encodeURIComponent(String(adults))}/${encodeURIComponent(String(children))}/${encodeURIComponent(String(infants))}/${safeCabin}/${safeCurrency}`;
+  return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${cabin}/${currency}`;
 }
 
 async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", currency = "INR" }) {
@@ -259,6 +255,7 @@ function normalizePaymentType(rawType, rawText = "") {
   return t || "other";
 }
 
+// Extract constraints
 function extractOfferConstraints(offer) {
   const text = String(offer?.terms || "").toLowerCase();
   return {
@@ -269,37 +266,55 @@ function extractOfferConstraints(offer) {
   };
 }
 
+/**
+ * ✅ KEY FIX:
+ * Your Mongo docs store payment eligibility in `eligiblePaymentMethods` (not `paymentMethods`).
+ * We normalize that into the format: [{ type, bank, name, raw }]
+ */
 function extractOfferPaymentMethods(offer) {
   const out = [];
-  const pm = offer?.paymentMethods;
 
-  if (Array.isArray(pm)) {
-    for (const x of pm) {
-      if (typeof x === "string") {
-        out.push({ type: "other", name: x });
-      } else if (x && typeof x === "object") {
-        const type = normalizePaymentType(x.type || x.methodType || x.paymentType);
-        const name =
-          x.name ||
-          x.bank ||
-          x.bankName ||
-          x.provider ||
-          x.network ||
-          x.cardNetwork ||
-          x.issuer ||
-          "";
-        if (name) out.push({ type, name: String(name), bank: x.bank || x.bankName || "", raw: x.raw || "" });
+  // Prefer eligiblePaymentMethods (your real schema)
+  const epm = offer?.eligiblePaymentMethods;
+  if (Array.isArray(epm)) {
+    for (const x of epm) {
+      if (!x || typeof x !== "object") continue;
+
+      const typeNorm = normalizePaymentType(
+        x.methodCanonical || x.methodType || x.type || x.paymentType || "",
+        x.methodCanonical || ""
+      );
+
+      const bankRaw = x.bankCanonical || x.bank || x.issuer || x.name || "";
+      const bank = bankRaw ? normalizeBankName(bankRaw) : "";
+
+      // Keep a display-ish name too (for UI label)
+      const name = x.bankDisplay || x.bankName || x.name || bankRaw || "";
+
+      // If we have at least type or bank, keep it
+      if (typeNorm || bank) {
+        out.push({
+          type: typeNorm || "other",
+          bank,
+          name: String(name || "").trim(),
+          raw: JSON.stringify(x),
+        });
       }
     }
   }
 
-  const rawPM = offer?.rawFields?.paymentMethods;
-  if (Array.isArray(rawPM)) {
-    for (const x of rawPM) {
-      if (x && typeof x === "object") {
-        const type = normalizePaymentType(x.type);
-        const name = x.name || x.bank || x.network || x.provider;
-        if (name) out.push({ type, name: String(name), bank: x.bank || "", raw: x.raw || "" });
+  // Back-compat: if any portal parser still writes old paymentMethods, include them too
+  const pm = offer?.paymentMethods;
+  if (Array.isArray(pm)) {
+    for (const x of pm) {
+      if (typeof x === "string") {
+        out.push({ type: "other", bank: "", name: x, raw: x });
+      } else if (x && typeof x === "object") {
+        const type = normalizePaymentType(x.type || x.methodType || x.paymentType);
+        const name =
+          x.name || x.bank || x.bankName || x.provider || x.network || x.cardNetwork || x.issuer || "";
+        const bank = x.bank || x.bankName || "";
+        out.push({ type, bank: bank ? normalizeBankName(bank) : "", name: String(name || ""), raw: JSON.stringify(x) });
       }
     }
   }
@@ -325,13 +340,18 @@ function offerAppliesToPortal(offer, portalName) {
   return true;
 }
 
+/**
+ * ✅ KEY FIX:
+ * Many offers have offerCategories: [] (like your sample Cleartrip doc).
+ * So:
+ * - If categories include "Flight" -> accept
+ * - Else infer "flight" from text, but reject obvious non-flight categories
+ * - Still keep your ancillary exclusion keywords
+ */
 function isFlightOffer(offer) {
   const cats = offer?.offerCategories || [];
-  const isFlightCategory = Array.isArray(cats) && cats.some(c => /^(flights?|flight)$/i.test(String(c)));
-  if (!isFlightCategory) return false;
-
   const hay = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
   const ancillaryKeywords = [
@@ -345,8 +365,21 @@ function isFlightOffer(offer) {
     "visa"
   ];
 
+  // If clearly ancillary, reject
   if (ancillaryKeywords.some(k => hay.includes(normalizeText(k)))) return false;
-  return true;
+
+  // If categories explicitly say flight -> accept
+  const isFlightCategory = Array.isArray(cats) && cats.some(c => /^(flights?|flight)$/i.test(String(c)));
+  if (isFlightCategory) return true;
+
+  // Otherwise infer flight from text (light, safe inference)
+  const mustInclude = ["flight", "flights", "airfare", "air ticket", "airline", "book a flight", "domestic flight", "international flight"];
+  const rejectIfInclude = ["hotel", "hotels", "villa", "resort", "train", "bus", "cab", "taxi", "forex", "visa"];
+
+  if (rejectIfInclude.some(k => hay.includes(normalizeText(k)))) return false;
+  if (mustInclude.some(k => hay.includes(normalizeText(k)))) return true;
+
+  return false;
 }
 
 function isOfferExpired(offer) {
@@ -466,6 +499,7 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
     if (item && typeof item === "object") {
       const rawType = item.type || "";
       const rawName = item.name || item.bank || item.raw || "";
+
       const typeNorm = normalizePaymentType(rawType, rawName);
 
       const nameNorm = normalizeText(rawName);
@@ -481,18 +515,22 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
   return { genericTypes, specificBanksByType };
 }
 
+/**
+ * ✅ KEY FIX:
+ * Use extracted payment methods (eligiblePaymentMethods), NOT offer.paymentMethods
+ */
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (selected.length === 0) return false;
 
-  const offerPMs = Array.isArray(offer?.paymentMethods) ? offer.paymentMethods : [];
+  const offerPMs = extractOfferPaymentMethods(offer);
   if (offerPMs.length === 0) return false;
 
   const { genericTypes, specificBanksByType } = normalizeSelectedPaymentToTypes(selectedPaymentMethods);
 
   for (const pm of offerPMs) {
     const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
-    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : "";
+    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : normalizeBankName(pm.name || "");
 
     const specificSet = offerType ? specificBanksByType.get(offerType) : null;
     if (specificSet && specificSet.size > 0) {
@@ -524,7 +562,7 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
   for (const pm of offerPMs) {
     const t = normalizePaymentType(pm.type, pm.raw || "");
-    const name = normalizeBankName(pm.bank || pm.name || pm.raw || "");
+    const name = normalizeBankName(pm.bank || pm.name || "");
 
     const match = sel.find((s) => s.type === t && (!s.name || s.name === name));
     if (match) {
@@ -573,12 +611,16 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     const isDomestic = true;
     if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
 
-    if (!Array.isArray(offer?.paymentMethods) || offer.paymentMethods.length === 0) continue;
+    // 🔒 Phase-1 rule: only payment-method offers
+    const offerPMs = extractOfferPaymentMethods(offer);
+    if (!offerPMs || offerPMs.length === 0) continue;
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
     if (!minTxnOK(offer, baseAmount)) continue;
 
     const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+
+    // If no deterministic price improvement, don't treat as "applied"
     if (discounted >= baseAmount) continue;
 
     if (!best || discounted < best.finalPrice) {
@@ -599,6 +641,7 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
     if (!isFlightOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
+
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
     const percent =
@@ -617,6 +660,8 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
+    // If deterministic, it would've been eligible to apply (subject to minTxn etc)
+    // For infoOffers, we only want "potentially relevant but not computable"
     if (hasDeterministicSignal) continue;
 
     info.push({
@@ -734,15 +779,6 @@ app.get("/payment-options", async (req, res) => {
     return Array.from(inferred);
   }
 
-  function pickName(pm) {
-    const candidates = [pm?.name, pm?.bank, pm?.network, pm?.raw];
-    for (const c of candidates) {
-      const s = String(c || "").trim();
-      if (s) return s;
-    }
-    return "";
-  }
-
   const CANON_KEYS = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet", "EMI"];
 
   function uiBucketFromNormalizedType(normType) {
@@ -770,10 +806,7 @@ app.get("/payment-options", async (req, res) => {
     const col = await getOffersCollection();
 
     const offers = await col
-      .find(
-        {},
-        { projection: { _id: 0, title: 1, rawDiscount: 1, rawText: 1, offerSummary: 1, terms: 1, paymentMethods: 1, rawFields: 1 } }
-      )
+      .find({}, { projection: { _id: 0, title: 1, rawDiscount: 1, rawText: 1, offerSummary: 1, terms: 1, eligiblePaymentMethods: 1, paymentMethods: 1, rawFields: 1 } })
       .toArray();
 
     const groups = {
@@ -795,7 +828,7 @@ app.get("/payment-options", async (req, res) => {
           const bucket = uiBucketFromNormalizedType(normType);
           if (!bucket) continue;
 
-          const nameRaw = pickName(pm);
+          const nameRaw = pm.bank || pm.name || "";
           if (!nameRaw) continue;
 
           const name = normalizeDisplayNameForUI(nameRaw);
@@ -804,6 +837,7 @@ app.get("/payment-options", async (req, res) => {
           groups[bucket].add(name);
         }
       } else {
+        // ONLY for options list, not for matching
         const inferredTypes = inferTypesFromText(offer);
         for (const t of inferredTypes) {
           if (!groups[t]) continue;
@@ -859,6 +893,7 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Load offers ONCE per request
     const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
