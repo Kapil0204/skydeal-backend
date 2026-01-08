@@ -363,38 +363,34 @@ function offerAppliesToPortal(offer, portalName) {
  * - Still keep your ancillary exclusion keywords
  */
 function isFlightOffer(offer) {
-  const cats = offer?.offerCategories || [];
-  const hay = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
-  );
+  if (!offer || typeof offer !== "object") return false;
 
-  const ancillaryKeywords = [
-    "baggage", "baggages", "excess baggage", "excess baggages",
-    "seat", "seat selection",
-    "cancellation", "free cancellation", "cancellation cover",
-    "insurance", "travel insurance",
-    "meal", "meals",
-    "lounge",
-    "web checkin", "web check-in", "check-in",
-    "visa"
-  ];
+  // If schema has categories, honor them
+  const cats = offer.offerCategories || offer.parsedFields?.offerCategories;
+  if (Array.isArray(cats) && cats.some(c => /flight|airfare|air travel|air ticket/i.test(String(c)))) {
+    return true;
+  }
 
-  // If clearly ancillary, reject
-  if (ancillaryKeywords.some(k => hay.includes(normalizeText(k)))) return false;
+  // Otherwise infer from text (your data often has empty categories)
+  const hay = [
+    offer.title,
+    offer.rawDiscount,
+    offer.offerSummary,
+    offer.rawText,
+    offer.terms,
+    offer.parsedFields?.rawDiscount,
+    offer.parsedFields?.rawText,
+    offer.parsedFields?.offerSummary,
+    offer.parsedFields?.terms,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 
-  // If categories explicitly say flight -> accept
-  const isFlightCategory = Array.isArray(cats) && cats.some(c => /^(flights?|flight)$/i.test(String(c)));
-  if (isFlightCategory) return true;
-
-  // Otherwise infer flight from text (light, safe inference)
-  const mustInclude = ["flight", "flights", "airfare", "air ticket", "airline", "book a flight", "domestic flight", "international flight"];
-  const rejectIfInclude = ["hotel", "hotels", "villa", "resort", "train", "bus", "cab", "taxi", "forex", "visa"];
-
-  if (rejectIfInclude.some(k => hay.includes(normalizeText(k)))) return false;
-  if (mustInclude.some(k => hay.includes(normalizeText(k)))) return true;
-
-  return false;
+  // Keep this conservative but effective
+  return /(flight|flights|air ticket|airfare|airline|airport|domestic flights|international flights)/i.test(hay);
 }
+
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
@@ -533,33 +529,89 @@ function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
  * ✅ KEY FIX:
  * Use extracted payment methods (eligiblePaymentMethods), NOT offer.paymentMethods
  */
+function normalizeSelectedPM(pm) {
+  const typeRaw = String(pm?.type || "").trim();
+  const nameRaw = String(pm?.name || pm?.bank || "").trim();
+
+  // Normalize type into your canonical buckets
+  // Reuse your existing helper if you have it:
+  //   normalizePaymentType(typeRaw, "")
+  // If not, basic mapping:
+  const t = typeRaw.toLowerCase();
+  let typeNorm =
+    /credit/.test(t) ? "CREDIT_CARD" :
+    /debit/.test(t) ? "DEBIT_CARD" :
+    /net\s*bank/.test(t) ? "NET_BANKING" :
+    /upi/.test(t) ? "UPI" :
+    /wallet/.test(t) ? "WALLET" :
+    /emi/.test(t) ? "EMI" :
+    null;
+
+  // Bank canonicalization: if you already have one, use it.
+  // Otherwise do a simple slug style: "Axis Bank" -> "AXIS_BANK"
+  const bankCanonical = nameRaw
+    ? nameRaw
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+    : null;
+
+  return { typeNorm, bankCanonical, nameRaw };
+}
+
+function normalizeOfferPM(pm) {
+  // pm can be from eligiblePaymentMethods or legacy paymentMethods
+  const methodCanonical = pm?.methodCanonical
+    ? String(pm.methodCanonical).toUpperCase()
+    : null;
+
+  const typeRaw = String(pm?.type || "").toLowerCase();
+  const typeNorm =
+    methodCanonical ||
+    (/credit/.test(typeRaw) ? "CREDIT_CARD" :
+     /debit/.test(typeRaw) ? "DEBIT_CARD" :
+     /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
+     /upi/.test(typeRaw) ? "UPI" :
+     /wallet/.test(typeRaw) ? "WALLET" :
+     /emi/.test(typeRaw) ? "EMI" :
+     null);
+
+  const bankCanonical =
+    pm?.bankCanonical
+      ? String(pm.bankCanonical).toUpperCase()
+      : (pm?.bank || pm?.name)
+        ? String(pm.bank || pm.name)
+            .toUpperCase()
+            .replace(/[^A-Z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
+        : null;
+
+  return { typeNorm, bankCanonical };
+}
+
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
-  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (selected.length === 0) return false;
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return false;
 
-  // ✅ IMPORTANT: use extracted payment methods (eligiblePaymentMethods + others)
   const offerPMs = extractOfferPaymentMethods(offer);
-  if (offerPMs.length === 0) return false;
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
-  const { genericTypes, specificBanksByType } = normalizeSelectedPaymentToTypes(selectedPaymentMethods);
+  const selNorm = sel.map(normalizeSelectedPM).filter(x => x.typeNorm && x.bankCanonical);
+  if (selNorm.length === 0) return false;
 
-  for (const pm of offerPMs) {
-    const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
-    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : normalizeBankName(pm?.name || "");
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm && x.bankCanonical);
+  if (offerNorm.length === 0) return false;
 
-    // 1) If user selected specific bank(s) for this type -> only bank match allowed
-    const specificSet = offerType ? specificBanksByType.get(offerType) : null;
-    if (specificSet && specificSet.size > 0) {
-      if (offerBank && specificSet.has(offerBank)) return true;
-      continue;
+  // Match if any selected PM matches any offer PM (type + bank)
+  for (const s of selNorm) {
+    for (const o of offerNorm) {
+      if (s.typeNorm === o.typeNorm && s.bankCanonical === o.bankCanonical) return true;
     }
-
-    // 2) If user selected "Any <Type>" -> type match allowed
-    if (offerType && genericTypes.has(offerType)) return true;
   }
 
   return false;
 }
+
 
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
