@@ -625,6 +625,15 @@ function offerScopeMatchesTrip(offer, isDomestic) {
 }
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
+  for (const offer of offers) {
+  if (offer?.eligiblePaymentMethods?.length) {
+    console.log(
+      "[DEBUG] offer with eligiblePaymentMethods:",
+      offer.sourceMetadata?.sourcePortal,
+      offer.eligiblePaymentMethods[0]
+    );
+  }
+
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return null;
 
