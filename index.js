@@ -278,53 +278,72 @@ function extractOfferConstraints(offer) {
 function extractOfferPaymentMethods(offer) {
   const out = [];
 
-  // Prefer eligiblePaymentMethods (your real schema)
+  // -------------------------
+  // A) NEW: eligiblePaymentMethods (Mongo normalized)
+  // -------------------------
   const epm = offer?.eligiblePaymentMethods;
   if (Array.isArray(epm)) {
     for (const x of epm) {
       if (!x || typeof x !== "object") continue;
 
-      const typeNorm = normalizePaymentType(
-        x.methodCanonical || x.methodType || x.type || x.paymentType || "",
-        x.methodCanonical || ""
-      );
+      // type can come as: "credit_card" OR methodCanonical:"CREDIT_CARD"
+      const typeRaw = x.type || x.methodCanonical || x.method || x.paymentType || "";
+      const type = normalizePaymentType(typeRaw, x.raw || "");
 
-      const bankRaw = x.bank || x.bankDisplay || x.bankName || x.bankCanonical || x.issuer || x.name || "";
-      const bank = bankRaw ? normalizeBankName(bankRaw) : "";
+      // bank can come as: "Axis Bank" OR bankCanonical:"AXIS_BANK"
+      const bankRaw = x.bank || x.bankName || x.bankDisplay || x.bankCanonical || "";
+      const bank = bankRaw ? String(bankRaw) : "";
 
-      // Keep a display-ish name too (for UI label)
-      const name = x.bankDisplay || x.bankName || x.name || bankRaw || "";
-
-      // If we have at least type or bank, keep it
-      if (typeNorm || bank) {
-        out.push({
-          type: typeNorm || "other",
-          bank,
-          name: String(name || "").trim(),
-          raw: JSON.stringify(x),
-        });
-      }
+      out.push({
+        type,
+        name: bank,     // keep same shape as your existing code expects
+        bank,
+        raw: x.raw || "",
+      });
     }
   }
 
-  // Back-compat: if any portal parser still writes old paymentMethods, include them too
+  // -------------------------
+  // B) Existing: paymentMethods (if present in future)
+  // -------------------------
   const pm = offer?.paymentMethods;
   if (Array.isArray(pm)) {
     for (const x of pm) {
       if (typeof x === "string") {
-        out.push({ type: "other", bank: "", name: x, raw: x });
+        out.push({ type: "other", name: x, bank: x, raw: "" });
       } else if (x && typeof x === "object") {
         const type = normalizePaymentType(x.type || x.methodType || x.paymentType);
         const name =
-          x.name || x.bank || x.bankName || x.provider || x.network || x.cardNetwork || x.issuer || "";
-        const bank = x.bank || x.bankName || "";
-        out.push({ type, bank: bank ? normalizeBankName(bank) : "", name: String(name || ""), raw: JSON.stringify(x) });
+          x.name ||
+          x.bank ||
+          x.bankName ||
+          x.provider ||
+          x.network ||
+          x.cardNetwork ||
+          x.issuer ||
+          "";
+        if (name) out.push({ type, name: String(name), bank: x.bank || x.bankName || "", raw: x.raw || "" });
+      }
+    }
+  }
+
+  // -------------------------
+  // C) Existing: rawFields.paymentMethods (older parser shape)
+  // -------------------------
+  const rawPM = offer?.rawFields?.paymentMethods;
+  if (Array.isArray(rawPM)) {
+    for (const x of rawPM) {
+      if (x && typeof x === "object") {
+        const type = normalizePaymentType(x.type);
+        const name = x.name || x.bank || x.network || x.provider;
+        if (name) out.push({ type, name: String(name), bank: x.bank || "", raw: x.raw || "" });
       }
     }
   }
 
   return out;
 }
+
 
 function offerAppliesToPortal(offer, portalName) {
   const candidates = [
@@ -527,6 +546,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (selected.length === 0) return false;
 
+  // ✅ IMPORTANT: use extracted payment methods (eligiblePaymentMethods + others)
   const offerPMs = extractOfferPaymentMethods(offer);
   if (offerPMs.length === 0) return false;
 
@@ -534,19 +554,22 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   for (const pm of offerPMs) {
     const offerType = normalizePaymentType(pm?.type || "", pm?.raw || "");
-    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : normalizeBankName(pm.name || "");
+    const offerBank = pm?.bank ? normalizeBankName(pm.bank) : normalizeBankName(pm?.name || "");
 
+    // 1) If user selected specific bank(s) for this type -> only bank match allowed
     const specificSet = offerType ? specificBanksByType.get(offerType) : null;
     if (specificSet && specificSet.size > 0) {
       if (offerBank && specificSet.has(offerBank)) return true;
       continue;
     }
 
+    // 2) If user selected "Any <Type>" -> type match allowed
     if (offerType && genericTypes.has(offerType)) return true;
   }
 
   return false;
 }
+
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
@@ -810,7 +833,7 @@ app.get("/payment-options", async (req, res) => {
     const col = await getOffersCollection();
 
     const offers = await col
-      .find({}, { projection: { _id: 0, title: 1, rawDiscount: 1, rawText: 1, offerSummary: 1, terms: 1, eligiblePaymentMethods: 1, paymentMethods: 1, rawFields: 1 } })
+.find({}, { projection: { _id: 0, title: 1, rawDiscount: 1, rawText: 1, offerSummary: 1, terms: 1, paymentMethods: 1, eligiblePaymentMethods: 1, rawFields: 1 } })
       .toArray();
 
     const groups = {
