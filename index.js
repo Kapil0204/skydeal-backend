@@ -966,6 +966,43 @@ app.post("/search", async (req, res) => {
   }
 });
 
+app.get("/debug/payment-match", async (req, res) => {
+  try {
+    const portal = String(req.query.portal || "Cleartrip");
+    const bank = String(req.query.bank || "Axis Bank");
+    const type = String(req.query.type || "Credit Card");
+
+    const selectedPaymentMethods = [{ type, name: bank }];
+
+    const col = await getOffersCollection();
+    const offers = await col.find(
+      { "sourceMetadata.sourcePortal": portal },
+      { projection: { _id: 0, title: 1, rawDiscount: 1, eligiblePaymentMethods: 1, offerCategories: 1, validityPeriod: 1 } }
+    ).toArray();
+
+    // show a small sample of what extractOfferPaymentMethods produces
+    const sample = offers.slice(0, 20).map(o => ({
+      title: o.title,
+      extractedPMs: extractOfferPaymentMethods(o),
+      matches: offerMatchesSelectedPayment(o, selectedPaymentMethods),
+      isFlight: isFlightOffer(o),
+      expired: isOfferExpired(o),
+    }));
+
+    const matchCount = offers.filter(o => offerMatchesSelectedPayment(o, selectedPaymentMethods)).length;
+
+    res.json({
+      portal,
+      selectedPaymentMethods,
+      portalOfferCount: offers.length,
+      matchCount,
+      sample,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "debug failed" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
