@@ -432,48 +432,63 @@ function detectDomesticInternationalCap(offer, isDomestic) {
 }
 
 function computeDiscountedPrice(offer, baseAmount, isDomestic) {
-  const percent =
-    offer?.discountPercent ??
-    offer?.parsedFields?.discountPercent ??
-    null;
+  const base = Number(baseAmount);
+  if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
-  const flat =
-    offer?.flatDiscountAmount ??
-    offer?.parsedFields?.flatDiscountAmount ??
-    offer?.discountAmount ??
-    offer?.parsedFields?.discountAmount ??
-    null;
-
-  let final = baseAmount;
-
-  if (typeof percent === "number" && percent > 0) {
-    final = baseAmount * (1 - percent / 100);
-  } else {
-    const n = Number(String(flat || "").replace(/[^\d.]/g, ""));
-    if (!isNaN(n) && n > 0) final = baseAmount - n;
+  // 1) Prefer parsed discountPercent if present
+  let pct = null;
+  if (offer?.discountPercent != null) {
+    const n = Number(offer.discountPercent);
+    if (Number.isFinite(n) && n > 0) pct = n;
   }
 
-  let maxAmt =
-    offer?.maxDiscountAmount ??
-    offer?.parsedFields?.maxDiscountAmount ??
-    null;
-
-  const scopedCap = detectDomesticInternationalCap(offer, isDomestic);
-  if (typeof scopedCap === "number") {
-    maxAmt = scopedCap;
+  // 2) If missing, parse from rawDiscount text (THIS FIXES YOUR AXIS CASE)
+  if (pct == null) {
+    pct = parsePercentFromRawDiscount(offer, isDomestic);
   }
 
-  if (typeof percent === "number" && percent > 0 && maxAmt != null) {
-    const maxN = Number(String(maxAmt).replace(/[^\d.]/g, ""));
-    if (!isNaN(maxN) && maxN > 0) {
-      const discount = baseAmount - final;
-      if (discount > maxN) final = baseAmount - maxN;
-    }
+  if (pct != null) {
+    const discounted = Math.round(base * (1 - pct / 100));
+    return discounted < base ? discounted : base;
   }
 
-  if (final < 0) final = 0;
-  return Math.round(final);
+  // 3) Flat discount support (you said you need this later; keep it safe now)
+  const flat = Number(offer?.flatDiscountAmount);
+  if (Number.isFinite(flat) && flat > 0) {
+    const discounted = Math.round(base - flat);
+    return discounted < base ? discounted : base;
+  }
+
+  return base;
 }
+
+function parsePercentFromRawDiscount(offer, isDomestic) {
+  const txt = String(
+    offer?.rawDiscount ||
+    offer?.parsedFields?.rawDiscount ||
+    offer?.offerSummary ||
+    offer?.rawText ||
+    ""
+  );
+
+  if (!txt) return null;
+
+  // Prefer a domestic-specific % if available
+  if (isDomestic) {
+    const mDom = txt.match(/(\d{1,2})\s*%[^%]{0,40}\bdomestic\b/i);
+    if (mDom) return Number(mDom[1]);
+  }
+
+  // Otherwise take the first reasonable percent (1-90)
+  const mAny = txt.match(/(\d{1,2})\s*%/);
+  if (mAny) {
+    const p = Number(mAny[1]);
+    if (p > 0 && p < 90) return p;
+  }
+
+  return null;
+}
+
 
 function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
   const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
