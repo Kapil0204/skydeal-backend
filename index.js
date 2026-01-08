@@ -41,6 +41,18 @@ function toISO(d) {
   if (!isNaN(t)) return t.toISOString().slice(0, 10);
   return "";
 }
+function paymentLabelFromSelection(selectedPaymentMethods) {
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (!sel.length) return null;
+
+  const first = sel[0] || {};
+  const bank = String(first.name || first.bank || "").trim();
+  const type = String(first.type || "").trim().toLowerCase().replace(/\s+/g, "");
+
+  if (!bank && !type) return null;
+  return [bank || null, type || null].filter(Boolean).join(" • ");
+}
+
 
 // FlightAPI expects: Economy | Premium_Economy | Business | First
 function normalizeCabin(travelClass) {
@@ -363,33 +375,26 @@ function offerAppliesToPortal(offer, portalName) {
  * - Still keep your ancillary exclusion keywords
  */
 function isFlightOffer(offer) {
-  if (!offer || typeof offer !== "object") return false;
+  const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
 
-  // If schema has categories, honor them
-  const cats = offer.offerCategories || offer.parsedFields?.offerCategories;
-  if (Array.isArray(cats) && cats.some(c => /flight|airfare|air travel|air ticket/i.test(String(c)))) {
-    return true;
-  }
+  // Hard exclusions (add more later if needed)
+  if (/\bhotel(s)?\b/.test(text)) return false;
+  if (/\bbus\b/.test(text)) return false;
+  if (/\bholiday(s)?\b/.test(text)) return false;
 
-  // Otherwise infer from text (your data often has empty categories)
-  const hay = [
-    offer.title,
-    offer.rawDiscount,
-    offer.offerSummary,
-    offer.rawText,
-    offer.terms,
-    offer.parsedFields?.rawDiscount,
-    offer.parsedFields?.rawText,
-    offer.parsedFields?.offerSummary,
-    offer.parsedFields?.terms,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+  // Positive flight signals
+  if (/\bflight(s)?\b/.test(text)) return true;
+  if (/\bairfare\b/.test(text)) return true;
+  if (/\bdomestic flights?\b/.test(text)) return true;
+  if (/\binternational flights?\b/.test(text)) return true;
 
-  // Keep this conservative but effective
-  return /(flight|flights|air ticket|airfare|airline|airport|domestic flights|international flights)/i.test(hay);
+  // If you rely on categories sometimes, keep it as an additional signal:
+  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
+  if (Array.isArray(cats) && cats.some(c => /flight/i.test(c))) return true;
+
+  return false;
 }
+
 
 
 function isOfferExpired(offer) {
@@ -800,7 +805,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       rawDiscount: bestDeal?.rawDiscount || null,
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
-      paymentLabel: matchedPaymentLabel,
+      paymentLabel: (best ? paymentLabelFromSelection(selectedPaymentMethods) : null),
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, 5),
     };
   });
