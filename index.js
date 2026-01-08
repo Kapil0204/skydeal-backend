@@ -212,7 +212,10 @@ function normalizeText(s) {
 }
 
 function normalizeBankName(raw) {
-  const s = normalizeText(raw);
+  const s0 = String(raw || "").trim();
+  // ✅ handle canonical formats like AXIS_BANK / HDFC_BANK etc.
+  const s = normalizeText(s0.replace(/_/g, " "));
+
   if (s.includes("flipkart") && s.includes("axis")) return "axis bank";
   if (s === "au bank" || s.includes("au bank")) return "au small finance bank";
 
@@ -239,6 +242,7 @@ function normalizeBankName(raw) {
 
   return map.get(cleaned) || cleaned;
 }
+
 
 function normalizePaymentType(rawType, rawText = "") {
   const t = normalizeText(rawType);
@@ -285,7 +289,7 @@ function extractOfferPaymentMethods(offer) {
         x.methodCanonical || ""
       );
 
-      const bankRaw = x.bankCanonical || x.bank || x.issuer || x.name || "";
+      const bankRaw = x.bank || x.bankDisplay || x.bankName || x.bankCanonical || x.issuer || x.name || "";
       const bank = bankRaw ? normalizeBankName(bankRaw) : "";
 
       // Keep a display-ish name too (for UI label)
