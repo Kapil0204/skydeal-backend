@@ -858,8 +858,12 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
       paymentLabel: (best ? paymentLabelFromSelection(selectedPaymentMethods) : null),
+      explain: best
+  ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
+  : null,
+
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, 5),
-      explain: best?.explain || null
+      
 
     };
   });
@@ -883,6 +887,10 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           rawDiscount: bestPortal.rawDiscount,
           constraints: bestPortal.constraints || null,
           paymentLabel: bestPortal.paymentLabel || null,
+        explain: bestPortal?.applied
+  ? `Best price is on ${bestPortal.portal} because ${bestPortal.code || "an offer"} reduced ₹${bestPortal.basePrice} → ₹${bestPortal.finalPrice}`
+  : null,
+
         }
       : null,
   };
