@@ -625,15 +625,6 @@ function offerScopeMatchesTrip(offer, isDomestic) {
 }
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
-  for (const offer of offers) {
-  if (offer?.eligiblePaymentMethods?.length) {
-    console.log(
-      "[DEBUG] offer with eligiblePaymentMethods:",
-      offer.sourceMetadata?.sourcePortal,
-      offer.eligiblePaymentMethods[0]
-    );
-  }
-
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return null;
 
@@ -644,14 +635,14 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
 
-    const isDomestic = true;
+    const isDomestic = true; // Phase-1 assumption (keep as-is for now)
     if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
 
-    // 🔒 Phase-1 rule: only payment-method offers
+    // Phase-1 rule: only payment-method offers
     const offerPMs = extractOfferPaymentMethods(offer);
-    if (!offerPMs || offerPMs.length === 0) continue;
-    if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+    if (!Array.isArray(offerPMs) || offerPMs.length === 0) continue;
 
+    if (!offerMatchesSelectedPayment(offer, sel)) continue;
     if (!minTxnOK(offer, baseAmount)) continue;
 
     const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
@@ -666,8 +657,7 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
   return best;
 }
-  return null;
-} 
+
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
