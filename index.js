@@ -630,55 +630,33 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
 }
 
 
-function normalizeSelectedPaymentToTypes(selectedPaymentMethods) {
-  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+function normalizeSelectedPM(pm) {
+  const typeRaw = String(pm?.type || "").trim();
+  const nameRaw = String(pm?.name || pm?.bank || "").trim();
 
-  const genericTypes = new Set();
-  const specificBanksByType = new Map();
+  const t = typeRaw.toLowerCase();
 
-  function addSpecific(typeNorm, bankNameRaw) {
-    if (!typeNorm) return;
-    const bankNorm = normalizeBankName(bankNameRaw);
-    if (!bankNorm) return;
+  // Keep consistent canonical buckets
+  let typeNorm =
+    /emi/.test(t) ? "EMI" :
+    /credit/.test(t) ? "CREDIT_CARD" :
+    /debit/.test(t) ? "DEBIT_CARD" :
+    /net\s*bank/.test(t) ? "NET_BANKING" :
+    /upi/.test(t) ? "UPI" :
+    /wallet/.test(t) ? "WALLET" :
+    null;
 
-    if (!specificBanksByType.has(typeNorm)) specificBanksByType.set(typeNorm, new Set());
-    specificBanksByType.get(typeNorm).add(bankNorm);
-  }
+  // "Axis Bank" -> "AXIS_BANK"
+  const bankCanonical = nameRaw
+    ? nameRaw
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+    : null;
 
-  for (const item of selected) {
-    if (typeof item === "string") {
-      const raw = item.trim();
-      const rawNorm = normalizeText(raw);
-
-      if (rawNorm.startsWith("any ")) {
-        const t = normalizePaymentType(raw, raw);
-        if (t) genericTypes.add(t);
-        continue;
-      }
-
-      const tGuess = normalizePaymentType(raw, raw);
-      addSpecific(tGuess || "other", raw);
-      continue;
-    }
-
-    if (item && typeof item === "object") {
-      const rawType = item.type || "";
-      const rawName = item.name || item.bank || item.raw || "";
-
-      const typeNorm = normalizePaymentType(rawType, rawName);
-
-      const nameNorm = normalizeText(rawName);
-      if (nameNorm.startsWith("any ")) {
-        if (typeNorm) genericTypes.add(typeNorm);
-        continue;
-      }
-
-      addSpecific(typeNorm, rawName);
-    }
-  }
-
-  return { genericTypes, specificBanksByType };
+  return { typeNorm, bankCanonical, nameRaw };
 }
+
 
 /**
  * ✅ KEY FIX:
@@ -715,20 +693,20 @@ function normalizeSelectedPM(pm) {
 }
 
 function normalizeOfferPM(pm) {
-  // pm can be from eligiblePaymentMethods or legacy paymentMethods
   const methodCanonical = pm?.methodCanonical
     ? String(pm.methodCanonical).toUpperCase()
     : null;
 
   const typeRaw = String(pm?.type || "").toLowerCase();
+
   const typeNorm =
     methodCanonical ||
-    (/credit/.test(typeRaw) ? "CREDIT_CARD" :
+    (/emi/.test(typeRaw) ? "EMI" :
+     /credit/.test(typeRaw) ? "CREDIT_CARD" :
      /debit/.test(typeRaw) ? "DEBIT_CARD" :
      /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
      /upi/.test(typeRaw) ? "UPI" :
      /wallet/.test(typeRaw) ? "WALLET" :
-     /emi/.test(typeRaw) ? "EMI" :
      null);
 
   const bankCanonical =
@@ -741,8 +719,13 @@ function normalizeOfferPM(pm) {
             .replace(/^_+|_+$/g, "")
         : null;
 
-  return { typeNorm, bankCanonical };
+  // IMPORTANT: carry emiOnly flag forward
+  const emiOnly = pm?.emiOnly === true;
+
+  return { typeNorm, bankCanonical, emiOnly };
 }
+
+
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
@@ -757,10 +740,25 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm && x.bankCanonical);
   if (offerNorm.length === 0) return false;
 
-  // Match if any selected PM matches any offer PM (type + bank)
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      if (s.typeNorm === o.typeNorm && s.bankCanonical === o.bankCanonical) return true;
+      if (s.bankCanonical !== o.bankCanonical) continue;
+
+      // ✅ EMI selection: match EMI offers OR emiOnly credit-card offers
+      if (s.typeNorm === "EMI") {
+        if (o.typeNorm === "EMI") return true;
+        if (o.typeNorm === "CREDIT_CARD" && o.emiOnly === true) return true;
+        continue;
+      }
+
+      // ✅ Credit Card selection: match CREDIT_CARD but only if NOT emiOnly
+      if (s.typeNorm === "CREDIT_CARD") {
+        if (o.typeNorm === "CREDIT_CARD" && o.emiOnly !== true) return true;
+        continue;
+      }
+
+      // Other types: strict match
+      if (s.typeNorm === o.typeNorm) return true;
     }
   }
 
