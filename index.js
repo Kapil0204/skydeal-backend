@@ -1000,6 +1000,45 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
 // --------------------
 // Routes
 // --------------------
+function getCouponCode(offer) {
+  return (
+    offer?.couponCode ||
+    offer?.code ||
+    offer?.parsedFields?.couponCode ||
+    offer?.parsedFields?.code ||
+    null
+  );
+}
+
+function getDeterministicDiscountSignal(offer) {
+  const pct =
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    null;
+
+  const flat =
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    offer?.discountAmount ??
+    offer?.parsedFields?.discountAmount ??
+    null;
+
+  const pctOk = typeof pct === "number" && pct > 0;
+  const flatOk = flat != null && String(flat).replace(/[^\d.]/g, "") !== "";
+
+  return { pct, flat, pctOk, flatOk, deterministic: pctOk || flatOk };
+}
+
+function offerMentionsUpToPercent(offer) {
+  const txt = String(
+    offer?.rawDiscount ||
+    offer?.parsedFields?.rawDiscount ||
+    offer?.title ||
+    ""
+  ).toLowerCase();
+  return /\bup to\s*\d+\s*%/.test(txt);
+}
+
 
 // Payment options must come from Mongo (no static fallback list)
 app.get("/payment-options", async (req, res) => {
@@ -1228,6 +1267,122 @@ app.get("/debug/payment-match", async (req, res) => {
     res.status(500).json({ error: e?.message || "debug failed" });
   }
 });
+app.get("/debug/why-not-applied", async (req, res) => {
+  try {
+    const portal = String(req.query.portal || "Goibibo");
+    const bank = String(req.query.bank || "Axis Bank");
+    const type = String(req.query.type || "Credit Card");
+    const baseAmount = Number(req.query.amount || 9000) || 9000;
+
+    const selectedPaymentMethods = [{ type, name: bank }];
+
+    const col = await getOffersCollection();
+
+    // pull only portal offers to keep response readable
+    const offers = await col.find(
+      { "sourceMetadata.sourcePortal": portal },
+      {
+        projection: {
+          _id: 0,
+          title: 1,
+          rawDiscount: 1,
+          discountPercent: 1,
+          flatDiscountAmount: 1,
+          minTransactionValue: 1,
+          offerCategories: 1,
+          isExpired: 1,
+          validityPeriod: 1,
+          parsedFields: 1,
+          eligiblePaymentMethods: 1,
+          paymentMethods: 1,
+          terms: 1,
+          offerSummary: 1
+        }
+      }
+    ).toArray();
+
+    const stats = {
+      portal,
+      total: offers.length,
+      isFlight: 0,
+      notExpired: 0,
+      matchesPayment: 0,
+      minTxnOK: 0,
+      deterministicDiscount: 0,
+      mentionsUpTo: 0,
+      wouldApplyIfEstimatedUpToAllowed: 0,
+      wouldApplyNow: 0
+    };
+
+    const samples = [];
+
+    for (const o of offers) {
+      const row = { title: o.title || null, code: getCouponCode(o), rawDiscount: o.rawDiscount || null };
+
+      const flightOk = isFlightOffer(o);
+      if (flightOk) stats.isFlight++;
+
+      const expired = isOfferExpired(o);
+      if (!expired) stats.notExpired++;
+
+      const payOk = offerMatchesSelectedPayment(o, selectedPaymentMethods);
+      if (payOk) stats.matchesPayment++;
+
+      const minOk = minTxnOK(o, baseAmount);
+      if (minOk) stats.minTxnOK++;
+
+      const sig = getDeterministicDiscountSignal(o);
+      if (sig.deterministic) stats.deterministicDiscount++;
+
+      const upTo = offerMentionsUpToPercent(o);
+      if (upTo) stats.mentionsUpTo++;
+
+      // "Would apply now" logic mirrors your pipeline
+      let wouldApplyNow = false;
+      let wouldApplyIfEstimated = false;
+
+      if (flightOk && !expired && payOk && minOk) {
+        if (sig.deterministic) {
+          const result = computeDiscountedPrice(o, baseAmount, true);
+          const discounted = typeof result === "number" ? result : result?.price;
+          if (typeof discounted === "number" && discounted < baseAmount) wouldApplyNow = true;
+        } else {
+          // If only "up to %" exists, it is not deterministic unless you allow estimation
+          if (upTo) wouldApplyIfEstimated = true;
+        }
+      }
+
+      if (wouldApplyIfEstimated) stats.wouldApplyIfEstimatedUpToAllowed++;
+      if (wouldApplyNow) stats.wouldApplyNow++;
+
+      // Keep response small but useful: collect first 20 offers that reach "matchesPayment"
+      if (samples.length < 20 && payOk) {
+        samples.push({
+          title: row.title,
+          code: row.code,
+          rawDiscount: row.rawDiscount,
+          expired,
+          minTxnOK: minOk,
+          discountPercent: o.discountPercent ?? o?.parsedFields?.discountPercent ?? null,
+          flatDiscountAmount: o.flatDiscountAmount ?? o?.parsedFields?.flatDiscountAmount ?? null,
+          mentionsUpTo: upTo,
+          extractedPMs: extractOfferPaymentMethods(o),
+          deterministicDiscount: sig.deterministic
+        });
+      }
+    }
+
+    res.json({
+      selectedPaymentMethods,
+      baseAmount,
+      stats,
+      samples
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "debug failed" });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
