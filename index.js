@@ -808,7 +808,10 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerAppliesToPortal(offer, portal)) continue;
 
     const isDomestic = true; // Phase-1 assumption (keep as-is for now)
-    if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
+
+    // ✅ TEMP FIX: scope filter is currently too aggressive + breaks real applying for some portals/offers
+    // Once we infer domestic/international from route properly, we can re-enable this.
+    // if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
 
     // Phase-1 rule: only payment-method offers
     const offerPMs = extractOfferPaymentMethods(offer);
@@ -817,36 +820,54 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (!offerMatchesSelectedPayment(offer, sel)) continue;
     if (!minTxnOK(offer, baseAmount)) continue;
 
-const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
+    // ✅ Compute discount (function can return number OR {price, meta})
+    const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
 
-const discounted =
-  typeof result === "number" ? result : result.price;
+    let discounted;
+    let discountMeta = null;
 
-const discountMeta =
-  typeof result === "object" ? result.meta : null;
+    if (typeof result === "number") {
+      discounted = result;
+    } else if (result && typeof result === "object" && typeof result.price === "number") {
+      discounted = result.price;
+      discountMeta = result.meta || null;
+    } else {
+      // Unexpected shape -> skip safely
+      continue;
+    }
 
-// If no deterministic improvement, skip
-if (discounted >= baseAmount) continue;
+    // ✅ EMI FIX:
+    // Many portal offers store EMI as CREDIT_CARD with emiOnly:true.
+    // Those offers were getting skipped when discounted == baseAmount due to parsing quirks.
+    // If the offer is specifically an EMI-only offer, allow it through even if the computed
+    // discounted value doesn't strictly improve (we'll still rank by finalPrice).
+    const isEmiOnlyOffer = offerPMs.some((pm) => pm && pm.emiOnly === true);
 
-if (!best || discounted < best.finalPrice) {
-  best = {
-    finalPrice: discounted,
-    offer,
-    explain: discountMeta
-      ? {
-          type: "ESTIMATED_DISCOUNT",
-          message: `Estimated ${discountMeta.appliedPercent}% off (offer says up to ${discountMeta.statedPercent}%)`,
-          confidence: "LOW",
-          method: discountMeta.method,
-        }
-      : null,
-  };
-}
+    // If no improvement and not EMI-only, skip (keeps your strictness for normal offers)
+    if (!isEmiOnlyOffer && discounted >= baseAmount) continue;
 
+    // Guard: ensure discounted is a sane number
+    if (!Number.isFinite(discounted) || discounted <= 0) continue;
+
+    if (!best || discounted < best.finalPrice) {
+      best = {
+        finalPrice: discounted,
+        offer,
+        explain: discountMeta
+          ? {
+              type: "ESTIMATED_DISCOUNT",
+              message: `Estimated ${discountMeta.appliedPercent}% off (offer says up to ${discountMeta.statedPercent}%)`,
+              confidence: "LOW",
+              method: discountMeta.method,
+            }
+          : null,
+      };
+    }
   }
 
   return best;
 }
+
 
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
