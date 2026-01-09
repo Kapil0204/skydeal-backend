@@ -636,7 +636,6 @@ function normalizeSelectedPM(pm) {
 
   const t = typeRaw.toLowerCase();
 
-  // Keep consistent canonical buckets
   let typeNorm =
     /emi/.test(t) ? "EMI" :
     /credit/.test(t) ? "CREDIT_CARD" :
@@ -646,7 +645,6 @@ function normalizeSelectedPM(pm) {
     /wallet/.test(t) ? "WALLET" :
     null;
 
-  // "Axis Bank" -> "AXIS_BANK"
   const bankCanonical = nameRaw
     ? nameRaw
         .toUpperCase()
@@ -657,40 +655,6 @@ function normalizeSelectedPM(pm) {
   return { typeNorm, bankCanonical, nameRaw };
 }
 
-
-/**
- * ✅ KEY FIX:
- * Use extracted payment methods (eligiblePaymentMethods), NOT offer.paymentMethods
- */
-function normalizeSelectedPM(pm) {
-  const typeRaw = String(pm?.type || "").trim();
-  const nameRaw = String(pm?.name || pm?.bank || "").trim();
-
-  // Normalize type into your canonical buckets
-  // Reuse your existing helper if you have it:
-  //   normalizePaymentType(typeRaw, "")
-  // If not, basic mapping:
-  const t = typeRaw.toLowerCase();
-  let typeNorm =
-    /credit/.test(t) ? "CREDIT_CARD" :
-    /debit/.test(t) ? "DEBIT_CARD" :
-    /net\s*bank/.test(t) ? "NET_BANKING" :
-    /upi/.test(t) ? "UPI" :
-    /wallet/.test(t) ? "WALLET" :
-    /emi/.test(t) ? "EMI" :
-    null;
-
-  // Bank canonicalization: if you already have one, use it.
-  // Otherwise do a simple slug style: "Axis Bank" -> "AXIS_BANK"
-  const bankCanonical = nameRaw
-    ? nameRaw
-        .toUpperCase()
-        .replace(/[^A-Z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "")
-    : null;
-
-  return { typeNorm, bankCanonical, nameRaw };
-}
 
 function normalizeOfferPM(pm) {
   const methodCanonical = pm?.methodCanonical
