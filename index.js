@@ -411,29 +411,117 @@ function isFlightOffer(offer) {
 
 
 function isOfferExpired(offer) {
+  // 1) If explicitly set, trust it
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate;
+  // 2) If parsed endDate exists, use it
+  const end =
+    offer?.validityPeriod?.endDate ||
+    offer?.parsedFields?.validityPeriod?.endDate ||
+    null;
+
   if (end) {
     const t = new Date(end);
     if (!isNaN(t)) return t.getTime() < Date.now();
   }
-  return false;
+
+  // 3) Heuristic: parse end date from any text we have
+  const blobs = [];
+
+  // validityPeriod raw (if you store it)
+  if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
+  if (offer?.parsedFields?.validityPeriod?.raw) blobs.push(String(offer.parsedFields.validityPeriod.raw));
+
+  // offerSummary keyTerms often contains validity
+  const keyTerms = offer?.offerSummary?.keyTerms || offer?.parsedFields?.offerSummary?.keyTerms;
+  if (Array.isArray(keyTerms)) blobs.push(keyTerms.join(" | "));
+
+  // terms raw
+  if (offer?.terms?.raw) blobs.push(String(offer.terms.raw));
+  if (offer?.parsedFields?.terms?.raw) blobs.push(String(offer.parsedFields.terms.raw));
+
+  // fallback text fields
+  blobs.push(String(offer?.title || ""));
+  blobs.push(String(offer?.rawDiscount || ""));
+  blobs.push(String(offer?.rawText || ""));
+
+  const text = blobs.filter(Boolean).join(" \n ");
+
+  // Match patterns like "December 31, 2025" / "Dec 31 2025" / "31 Dec 2025"
+  const monthNames = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+  const re1 = new RegExp(`\\b${monthNames}\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}\\b`, "ig"); // Dec 31, 2025
+  const re2 = new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${monthNames}\\s+\\d{4}\\b`, "ig"); // 31 Dec 2025
+  const re3 = /\b\d{4}-\d{2}-\d{2}\b/g; // 2025-12-31
+
+  const candidates = [
+    ...(text.match(re1) || []),
+    ...(text.match(re2) || []),
+    ...(text.match(re3) || []),
+  ];
+
+  if (candidates.length === 0) return false;
+
+  // Take the *latest* date we can parse (most likely the end date)
+  let latest = null;
+  for (const s of candidates) {
+    const d = new Date(s.replace(/(\d+)(st|nd|rd|th)/gi, "$1"));
+    if (!isNaN(d)) {
+      if (!latest || d.getTime() > latest.getTime()) latest = d;
+    }
+  }
+
+  if (!latest) return false;
+
+  return latest.getTime() < Date.now();
 }
 
+
 function minTxnOK(offer, amount) {
+  const base = Number(amount);
+  if (!Number.isFinite(base) || base <= 0) return false;
+
+  // Get structured value if exists
   const v =
     offer?.minTransactionValue ??
     offer?.parsedFields?.minTransactionValue ??
     offer?.parsedFields?.minTxnValue ??
     null;
 
-  if (typeof v === "number") return amount >= v;
-  const n = Number(String(v || "").replace(/[^\d.]/g, ""));
-  if (!isNaN(n) && n > 0) return amount >= n;
+  // If numeric, enforce
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return base >= v;
 
+  // If string contains number, enforce
+  const n = Number(String(v || "").replace(/[^\d]/g, ""));
+  if (Number.isFinite(n) && n > 0) return base >= n;
+
+  // If minTxn is missing, check if the offer text suggests there IS a minimum
+  const t = [
+    offer?.rawDiscount,
+    offer?.title,
+    offer?.terms?.raw,
+    offer?.parsedFields?.terms?.raw,
+    offer?.rawText,
+    offer?.offerSummary ? JSON.stringify(offer.offerSummary) : null,
+  ]
+    .filter(Boolean)
+    .join(" \n ")
+    .toLowerCase();
+
+  const mentionsMin =
+    /\bminimum\b/.test(t) ||
+    /\bmin\b/.test(t) ||
+    /\bmin(?:imum)?\s*(?:txn|transaction|spend|booking|fare)\b/.test(t) ||
+    /\bbooking\s*value\b/.test(t) ||
+    /\btransaction\s*value\b/.test(t) ||
+    /\bmin(?:imum)?\s*purchase\b/.test(t);
+
+  // If it mentions a minimum but we couldn't parse it, DO NOT apply automatically
+  if (mentionsMin) return false;
+
+  // If it does NOT mention a minimum, allow
   return true;
 }
+
 
 function detectDomesticInternationalCap(offer, isDomestic) {
   const text = String(offer?.rawDiscount || "").toLowerCase();
