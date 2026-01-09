@@ -349,22 +349,35 @@ function extractOfferPaymentMethods(offer) {
 
 
 function offerAppliesToPortal(offer, portalName) {
-  const candidates = [
-    offer?.sourcePortal,
-    offer?.sourceMetadata?.sourcePortal,
-  ].filter(Boolean);
+  const portal = String(portalName || "").toLowerCase().trim();
 
-  if (candidates.length > 0) {
-    return candidates.some((p) => String(p).toLowerCase() === String(portalName).toLowerCase());
+  // 1) Prefer source metadata (most reliable in your pipeline)
+  const src =
+    offer?.sourceMetadata?.sourcePortal ??
+    offer?.sourcePortal ??
+    offer?.parsedFields?.sourceMetadata?.sourcePortal ??
+    null;
+
+  if (src) {
+    return String(src).toLowerCase().trim() === portal;
   }
 
-  const platforms = offer?.parsedApplicablePlatforms || offer?.applicablePlatforms || offer?.platforms;
+  // 2) Next: applicable platforms list
+  const platforms =
+    offer?.parsedApplicablePlatforms ||
+    offer?.applicablePlatforms ||
+    offer?.platforms ||
+    offer?.parsedFields?.parsedApplicablePlatforms ||
+    null;
+
   if (Array.isArray(platforms) && platforms.length > 0) {
-    return platforms.some((p) => String(p).toLowerCase().includes(String(portalName).toLowerCase()));
+    return platforms.some((p) => String(p || "").toLowerCase().includes(portal));
   }
 
-  return true;
+  // 3) If we don't know the portal, DON'T apply it (avoid cross-portal bleed)
+  return false;
 }
+
 
 /**
  * ✅ KEY FIX:
@@ -840,7 +853,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
           finalPrice: best.finalPrice,
           basePrice: portalBase,
           applied: true,
-          code: best.offer?.code || best.offer?.couponCode || best.offer?.parsedFields?.code || null,
+          code: best.offer?.couponCode || best.offer?.code || best.offer?.parsedFields?.couponCode || best.offer?.parsedFields?.code || null,
           title: best.offer?.title || null,
           rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
           constraints: extractOfferConstraints(best.offer),
@@ -857,7 +870,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
       rawDiscount: bestDeal?.rawDiscount || null,
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
-      paymentLabel: (best ? paymentLabelFromSelection(selectedPaymentMethods) : null),
+      paymentLabel: (best ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods)) : null),
       explain: best
   ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
   : null,
