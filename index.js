@@ -666,12 +666,12 @@ function normalizeOfferPM(pm) {
 
   const typeNorm =
     methodCanonical ||
-    (/emi/.test(typeRaw) ? "EMI" :
-     /credit/.test(typeRaw) ? "CREDIT_CARD" :
+    (/credit/.test(typeRaw) ? "CREDIT_CARD" :
      /debit/.test(typeRaw) ? "DEBIT_CARD" :
      /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
      /upi/.test(typeRaw) ? "UPI" :
      /wallet/.test(typeRaw) ? "WALLET" :
+     /emi/.test(typeRaw) ? "EMI" :
      null);
 
   const bankCanonical =
@@ -687,8 +687,7 @@ function normalizeOfferPM(pm) {
   return {
     typeNorm,
     bankCanonical,
-    emiOnly: pm?.emiOnly === true,   // ✅ CRITICAL
-    tenureMonths: pm?.tenureMonths ?? null
+    emiOnly: pm?.emiOnly === true,   // ✅ IMPORTANT: carry emiOnly forward
   };
 }
 
@@ -699,48 +698,42 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
+  // selected side
   const selNorm = sel
     .map(normalizeSelectedPM)
     .filter(x => x.typeNorm && x.bankCanonical);
 
   if (selNorm.length === 0) return false;
 
+  // offer side
   const offerNorm = offerPMs
     .map(normalizeOfferPM)
     .filter(x => x.typeNorm && x.bankCanonical);
 
   if (offerNorm.length === 0) return false;
 
+  // ✅ Match rule:
+  // 1) Exact match: (type + bank)
+  // 2) EMI special-case: if user selected EMI, accept offer PMs where:
+  //    - bank matches AND
+  //    - (offer is EMI) OR (offer is CREDIT_CARD + emiOnly:true)
   for (const s of selNorm) {
     for (const o of offerNorm) {
       if (s.bankCanonical !== o.bankCanonical) continue;
 
-      // ✅ EMI selection should match:
-      // (A) explicit EMI offers
-      // (B) CREDIT_CARD offers that are emiOnly:true
+      // exact type match
+      if (s.typeNorm === o.typeNorm) return true;
+
+      // EMI special case
       if (s.typeNorm === "EMI") {
         if (o.typeNorm === "EMI") return true;
         if (o.typeNorm === "CREDIT_CARD" && o.emiOnly === true) return true;
-        if (o.typeNorm === "DEBIT_CARD" && o.emiOnly === true) return true; // safe
-        continue;
       }
-
-      // ✅ Credit card selection should NOT match emiOnly:true offers
-      // (unless user also selected EMI separately)
-      if (s.typeNorm === "CREDIT_CARD") {
-        if (o.typeNorm === "CREDIT_CARD" && o.emiOnly !== true) return true;
-        continue;
-      }
-
-      // ✅ Default: exact match type + bank
-      if (s.typeNorm === o.typeNorm) return true;
     }
   }
 
   return false;
 }
-
-
 
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
