@@ -698,42 +698,60 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
-  // selected side
+  // Normalize selected PMs
   const selNorm = sel
     .map(normalizeSelectedPM)
     .filter(x => x.typeNorm && x.bankCanonical);
 
   if (selNorm.length === 0) return false;
 
-  // offer side
+  // Normalize offer PMs
   const offerNorm = offerPMs
-    .map(normalizeOfferPM)
+    .map(pm => {
+      const norm = normalizeOfferPM(pm);
+      return {
+        ...norm,
+        emiOnly: pm?.emiOnly === true,
+        raw: String(pm?.raw || "").toLowerCase(),
+      };
+    })
     .filter(x => x.typeNorm && x.bankCanonical);
 
   if (offerNorm.length === 0) return false;
 
-  // ✅ Match rule:
-  // 1) Exact match: (type + bank)
-  // 2) EMI special-case: if user selected EMI, accept offer PMs where:
-  //    - bank matches AND
-  //    - (offer is EMI) OR (offer is CREDIT_CARD + emiOnly:true)
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      if (s.bankCanonical !== o.bankCanonical) continue;
+      // Primary exact match: TYPE + BANK
+      if (s.typeNorm === o.typeNorm && s.bankCanonical === o.bankCanonical) return true;
 
-      // exact type match
-      if (s.typeNorm === o.typeNorm) return true;
-
-      // EMI special case
-      if (s.typeNorm === "EMI") {
-        if (o.typeNorm === "EMI") return true;
-        if (o.typeNorm === "CREDIT_CARD" && o.emiOnly === true) return true;
+      // ✅ EMI special-case:
+      // If user selects EMI, allow matching CREDIT_CARD offers that are explicitly EMI-only
+      if (
+        s.typeNorm === "EMI" &&
+        s.bankCanonical === o.bankCanonical &&
+        (o.typeNorm === "EMI" || o.emiOnly === true || o.raw.includes("emi"))
+      ) {
+        return true;
       }
+
+      // Optional: if user selects CREDIT_CARD, you may want to match an offerPM that is EMI-only (still CC based)
+      // Uncomment ONLY if you want this behavior:
+      /*
+      if (
+        s.typeNorm === "CREDIT_CARD" &&
+        s.bankCanonical === o.bankCanonical &&
+        o.emiOnly === true &&
+        o.typeNorm === "CREDIT_CARD"
+      ) {
+        return true;
+      }
+      */
     }
   }
 
   return false;
 }
+
 
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
@@ -789,9 +807,14 @@ function offerScopeMatchesTrip(offer, isDomestic) {
   return true;
 }
 
-function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods) {
+function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, opts = {}) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return null;
+
+  const eligibilityAmount =
+    typeof opts.eligibilityAmount === "number" && opts.eligibilityAmount > 0
+      ? opts.eligibilityAmount
+      : baseAmount;
 
   let best = null;
 
@@ -800,47 +823,32 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
 
-    const isDomestic = true; // Phase-1 assumption (keep as-is for now)
+    const isDomestic = true; // Phase-1 assumption
+    if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
 
-    // ✅ TEMP FIX: scope filter is currently too aggressive + breaks real applying for some portals/offers
-    // Once we infer domestic/international from route properly, we can re-enable this.
-    // if (!offerScopeMatchesTrip(offer, isDomestic)) continue;
-
-    // Phase-1 rule: only payment-method offers
+    // Phase-1: must have payment eligibility in DB
     const offerPMs = extractOfferPaymentMethods(offer);
     if (!Array.isArray(offerPMs) || offerPMs.length === 0) continue;
 
+    // Payment must match selected PM (includes EMI special-case now)
     if (!offerMatchesSelectedPayment(offer, sel)) continue;
-    if (!minTxnOK(offer, baseAmount)) continue;
 
-    // ✅ Compute discount (function can return number OR {price, meta})
+    // ✅ minTxn must be checked against eligibilityAmount (not necessarily baseAmount)
+    if (!minTxnOK(offer, eligibilityAmount)) continue;
+
+    // Compute discount using the REAL base flight price (baseAmount)
     const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
 
-    let discounted;
-    let discountMeta = null;
+    const discounted =
+      typeof result === "number" ? result : result?.price;
 
-    if (typeof result === "number") {
-      discounted = result;
-    } else if (result && typeof result === "object" && typeof result.price === "number") {
-      discounted = result.price;
-      discountMeta = result.meta || null;
-    } else {
-      // Unexpected shape -> skip safely
-      continue;
-    }
+    const discountMeta =
+      typeof result === "object" ? result?.meta : null;
 
-    // ✅ EMI FIX:
-    // Many portal offers store EMI as CREDIT_CARD with emiOnly:true.
-    // Those offers were getting skipped when discounted == baseAmount due to parsing quirks.
-    // If the offer is specifically an EMI-only offer, allow it through even if the computed
-    // discounted value doesn't strictly improve (we'll still rank by finalPrice).
-    const isEmiOnlyOffer = offerPMs.some((pm) => pm && pm.emiOnly === true);
+    if (typeof discounted !== "number" || !Number.isFinite(discounted)) continue;
 
-    // If no improvement and not EMI-only, skip (keeps your strictness for normal offers)
-    if (!isEmiOnlyOffer && discounted >= baseAmount) continue;
-
-    // Guard: ensure discounted is a sane number
-    if (!Number.isFinite(discounted) || discounted <= 0) continue;
+    // If no improvement, skip
+    if (discounted >= baseAmount) continue;
 
     if (!best || discounted < best.finalPrice) {
       best = {
@@ -860,7 +868,6 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
   return best;
 }
-
 
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
@@ -924,9 +931,11 @@ const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers)
 const best = pickBestOfferForPortal(
   offers,
   portal,
-  eligibilityAmount,          // ✅ eligibilityAmount used for minTxn checks
-  selectedPaymentMethods
+  portalBase,                 // ✅ discount base (actual flight price)
+  selectedPaymentMethods,
+  { eligibilityAmount }        // ✅ only for minTxn
 );
+
 
     const matchedPaymentLabel = best
       ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
