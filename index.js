@@ -912,13 +912,22 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
   return info;
 }
 
-async function applyOffersToFlight(flight, selectedPaymentMethods, offers) {
+async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
 
-    const best = pickBestOfferForPortal(offers, portal, portalBase, selectedPaymentMethods);
+// Use total booking amount for eligibility checks (minTxn etc.)
+const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
+
+const best = pickBestOfferForPortal(
+  offers,
+  portal,
+  eligibilityAmount,          // ✅ eligibilityAmount used for minTxn checks
+  selectedPaymentMethods
+);
+
     const matchedPaymentLabel = best
       ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
       : null;
@@ -1188,7 +1197,7 @@ app.post("/search", async (req, res) => {
 
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
-      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers));
+     outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults));
     }
 
     // Return
