@@ -390,23 +390,46 @@ function offerAppliesToPortal(offer, portalName) {
 function isFlightOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
 
-  // Hard exclusions (add more later if needed)
-  if (/\bhotel(s)?\b/.test(text)) return false;
-  if (/\bbus\b/.test(text)) return false;
-  if (/\bholiday(s)?\b/.test(text)) return false;
+  // Prefer structured categories if available (this is the key fix)
+  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
+  if (Array.isArray(cats) && cats.length) {
+    const catBlob = cats.map(c => String(c || "").toLowerCase()).join(" | ");
 
-  // Positive flight signals
+    // Hard exclusions by category (stronger than text)
+    if (/\bhotel(s)?\b/.test(catBlob)) return false;
+    if (/\bbus(es)?\b/.test(catBlob)) return false;
+    if (/\btourism\b/.test(catBlob)) return false;
+    if (/\battraction(s)?\b/.test(catBlob)) return false;
+    if (/\bholiday(s)?\b/.test(catBlob)) return false;
+    if (/\bcab(s)?\b/.test(catBlob)) return false;
+    if (/\btrain(s)?\b/.test(catBlob)) return false;
+
+    // Positive category signals
+    if (/\bflight(s)?\b/.test(catBlob)) return true;
+    if (/\bairfare\b/.test(catBlob)) return true;
+    // If categories explicitly say international flights, still counts as "flight offer"
+    if (/\binternational\s+flight(s)?\b/.test(catBlob)) return true;
+    if (/\bdomestic\s+flight(s)?\b/.test(catBlob)) return true;
+  }
+
+  // Hard exclusions by text (fallback)
+  if (/\bhotel(s)?\b/.test(text)) return false;
+  if (/\bbus(es)?\b/.test(text)) return false;
+  if (/\btourism\b/.test(text)) return false;
+  if (/\battraction(s)?\b/.test(text)) return false;
+  if (/\bholiday(s)?\b/.test(text)) return false;
+  if (/\bcab(s)?\b/.test(text)) return false;
+  if (/\btrain(s)?\b/.test(text)) return false;
+
+  // Positive flight signals by text
   if (/\bflight(s)?\b/.test(text)) return true;
   if (/\bairfare\b/.test(text)) return true;
-  if (/\bdomestic flights?\b/.test(text)) return true;
-  if (/\binternational flights?\b/.test(text)) return true;
-
-  // If you rely on categories sometimes, keep it as an additional signal:
-  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  if (Array.isArray(cats) && cats.some(c => /flight/i.test(c))) return true;
+  if (/\bdomestic\s+flight(s)?\b/.test(text)) return true;
+  if (/\binternational\s+flight(s)?\b/.test(text)) return true;
 
   return false;
 }
+
 
 
 
@@ -793,15 +816,42 @@ function offerScopeMatchesTrip(offer, isDomestic) {
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
-  if (isDomestic && blob.includes("international") && !blob.includes("domestic")) return false;
+  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
+  const catBlob = Array.isArray(cats)
+    ? normalizeText(cats.map(c => String(c || "")).join(" "))
+    : "";
 
+  // Phase-1: Domestic trip assumption => reject obvious international scope
+  // Check BOTH text and categories.
+  const hasInternational = blob.includes("international") || catBlob.includes("international");
+  const hasDomestic = blob.includes("domestic") || catBlob.includes("domestic");
+
+  if (isDomestic && hasInternational && !hasDomestic) return false;
+
+  // Phase-1: if trip is domestic, reject business-class-only international promos
+  // (this blocks your MMTAXISBIZ offer from slipping in)
+  if (isDomestic) {
+    const mentionsBusinessClass =
+      blob.includes("business class") || catBlob.includes("business class");
+    const mentionsInternationalFlights =
+      blob.includes("international flights") || catBlob.includes("international flights");
+
+    if (mentionsBusinessClass && (hasInternational || mentionsInternationalFlights) && !hasDomestic) {
+      return false;
+    }
+  }
+
+  // Optional: keep your "obviousInternational" heuristic (still useful as fallback)
   const obviousInternational = [
     "krabi", "siem reap", "cebu", "bangkok", "singapore", "dubai",
     "kuala lumpur", "ho chi minh", "phuket", "bali",
   ].map(normalizeText);
 
-  if (isDomestic && obviousInternational.some(k => blob.includes(k)) && !blob.includes("domestic")) {
-    return false;
+  if (isDomestic) {
+    const combined = `${blob} ${catBlob}`;
+    if (obviousInternational.some(k => combined.includes(k)) && !combined.includes("domestic")) {
+      return false;
+    }
   }
 
   return true;
