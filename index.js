@@ -720,23 +720,39 @@ function evaluateOfferForFlight({
 }
 
 // --------------------
+// Trip scope (Domestic vs International)
+// --------------------
+const INDIA_IATA = new Set([
+  // Major Indian airports (add more anytime)
+  "DEL","BOM","BLR","HYD","MAA","CCU","PNQ","GOI","COK","AMD","JAI","LKO","PAT","BBI",
+  "IXC","IXR","IXB","GAU","TRV","VNS","SXR","IXM","NAG","IDR","RPR","VTZ","BHU","UDR",
+]);
+
+function isDomesticRoute(from, to) {
+  const a = String(from || "").trim().toUpperCase();
+  const b = String(to || "").trim().toUpperCase();
+  if (!a || !b) return true; // safe default (keeps existing behavior)
+  return INDIA_IATA.has(a) && INDIA_IATA.has(b);
+}
+
+// --------------------
 // Best offer picker (fixed signature)
 // --------------------
-function pickBestOfferForPortal(offers, portal, discountBaseAmount, eligibilityAmount, selectedPaymentMethods) {
+function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, trip) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return null;
 
-  const isDomestic = true; // Phase-1 assumption
+  const isDomestic = isDomesticRoute(trip?.from, trip?.to);
+
   let best = null;
 
   for (const offer of offers) {
     const ev = evaluateOfferForFlight({
       offer,
       portal,
-      discountBaseAmount,
-      eligibilityAmount,
+      baseAmount,
       selectedPaymentMethods: sel,
-      isDomestic
+      isDomestic,
     });
 
     if (!ev.ok) continue;
@@ -747,11 +763,11 @@ function pickBestOfferForPortal(offers, portal, discountBaseAmount, eligibilityA
         offer,
         explain: ev.meta
           ? {
-            type: "ESTIMATED_DISCOUNT",
-            message: `Estimated ${ev.meta.appliedPercent}% off (offer says up to ${ev.meta.statedPercent}%)`,
-            confidence: "LOW",
-            method: ev.meta.method,
-          }
+              type: "ESTIMATED_DISCOUNT",
+              message: `Estimated ${ev.meta.appliedPercent}% off (offer says up to ${ev.meta.statedPercent}%)`,
+              confidence: "LOW",
+              method: ev.meta.method,
+            }
           : null,
       };
     }
@@ -759,6 +775,7 @@ function pickBestOfferForPortal(offers, portal, discountBaseAmount, eligibilityA
 
   return best;
 }
+
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
@@ -848,12 +865,13 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
 
     // ✅ fixed signature
     const best = pickBestOfferForPortal(
-      offers,
-      portal,
-      portalBase,         // discount base = single pax flight price
-      eligibilityAmount,   // minTxn checks
-      selectedPaymentMethods
-    );
+  offers,
+  portal,
+  portalBase,
+  selectedPaymentMethods,
+  { from: flight.from, to: flight.to }
+);
+
 
     const matchedPaymentLabel = best
       ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
@@ -1088,9 +1106,13 @@ app.post("/search", async (req, res) => {
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
     const outboundFlights = [];
-    for (const f of outFlightsLimited) {
-      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults));
-    }
+for (const f of outFlightsLimited) {
+  // Attach route context onto the flight object
+  outboundFlights.push(
+    await applyOffersToFlight({ ...f, from, to }, selectedPaymentMethods, offers, adults)
+  );
+}
+
 
     let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
@@ -1102,10 +1124,14 @@ app.post("/search", async (req, res) => {
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
 
       const enriched = [];
-      for (const f of retFlightsLimited) {
-        enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults));
-      }
-      returnFlights = enriched;
+for (const f of retFlightsLimited) {
+  // Return leg is reverse route: to -> from
+  enriched.push(
+    await applyOffersToFlight({ ...f, from: to, to: from }, selectedPaymentMethods, offers, adults)
+  );
+}
+returnFlights = enriched;
+
     }
 
     res.json({ meta, outboundFlights, returnFlights });
