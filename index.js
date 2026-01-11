@@ -26,7 +26,7 @@ const MONGO_COL = process.env.MONGO_COL || "offers";
 // FlightAPI env
 const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 
-// ✅ SKYDEAL FIX #2: Estimated discounts flag (demo-friendly)
+// ✅ Enable estimated discounts (controls whether we try to infer % from rawDiscount text)
 const ENABLE_ESTIMATED_DISCOUNTS =
   String(process.env.ENABLE_ESTIMATED_DISCOUNTS || "").toLowerCase() === "true";
 
@@ -58,7 +58,8 @@ function paymentLabelFromSelection(selectedPaymentMethods) {
 // FlightAPI expects: Economy | Premium_Economy | Business | First
 function normalizeCabin(travelClass) {
   const v = String(travelClass || "economy").toLowerCase().trim();
-  if (v === "premium economy" || v === "premium_economy" || v === "premium-economy") return "Premium_Economy";
+  if (v === "premium economy" || v === "premium_economy" || v === "premium-economy")
+    return "Premium_Economy";
   if (v === "business") return "Business";
   if (v === "first") return "First";
   return "Economy";
@@ -109,8 +110,8 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       typeof e?.response?.data === "string"
         ? e.response.data
         : e?.response?.data
-          ? JSON.stringify(e.response.data)
-          : "";
+        ? JSON.stringify(e.response.data)
+        : "";
     tried[0].status = st;
     tried[0].body = body.slice(0, 800);
 
@@ -197,16 +198,16 @@ const INDIAN_CARRIERS = [
   "alliance air",
   "trujet",
   "vistara",
-  "go first"
+  "go first",
 ];
 
 function isIndianCarrier(airlineName) {
   const n = String(airlineName || "").toLowerCase();
-  return INDIAN_CARRIERS.some(c => n.includes(c));
+  return INDIAN_CARRIERS.some((c) => n.includes(c));
 }
 
 function limitAndSortFlights(flights) {
-  const indian = flights.filter(f => isIndianCarrier(f.airlineName));
+  const indian = flights.filter((f) => isIndianCarrier(f.airlineName));
   const pool = indian.length > 0 ? indian : flights;
 
   pool.sort((a, b) => (a.stops || 0) - (b.stops || 0));
@@ -250,6 +251,8 @@ function normalizeBankName(raw) {
     ["state bank of india", "state bank of india"],
     ["au small bank", "au small finance bank"],
     ["au small finance bank", "au small finance bank"],
+    ["hsbc", "hsbc"],
+    ["hsbc bank", "hsbc"],
   ]);
 
   return map.get(cleaned) || cleaned;
@@ -289,8 +292,8 @@ function extractOfferPaymentMethods(offer) {
 
   if (Array.isArray(offer.eligiblePaymentMethods) && offer.eligiblePaymentMethods.length > 0) {
     return offer.eligiblePaymentMethods
-      .filter(pm => pm && typeof pm === "object")
-      .map(pm => ({
+      .filter((pm) => pm && typeof pm === "object")
+      .map((pm) => ({
         type: pm.type || null,
         bank: pm.bank || null,
         network: pm.network || null,
@@ -305,13 +308,13 @@ function extractOfferPaymentMethods(offer) {
         conditions: pm.conditions || null,
         raw: pm.raw || null,
       }))
-      .filter(pm => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
+      .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
 
   if (Array.isArray(offer.paymentMethods) && offer.paymentMethods.length > 0) {
     return offer.paymentMethods
-      .filter(pm => pm && typeof pm === "object")
-      .map(pm => ({
+      .filter((pm) => pm && typeof pm === "object")
+      .map((pm) => ({
         type: pm.type || null,
         bank: pm.bank || pm.name || null,
         network: pm.network || null,
@@ -326,7 +329,7 @@ function extractOfferPaymentMethods(offer) {
         conditions: pm.conditions || null,
         raw: pm.raw || null,
       }))
-      .filter(pm => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
+      .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
 
   return [];
@@ -360,14 +363,13 @@ function offerAppliesToPortal(offer, portalName) {
 }
 
 /**
- * ✅ FIX: inclusive by default; exclude only when obvious non-flight.
- * This stops generic CC/EMI offers from being dropped.
+ * ✅ inclusive by default; exclude only when obvious non-flight.
  */
 function isFlightOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
 
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  const catBlob = Array.isArray(cats) ? cats.map(c => String(c || "").toLowerCase()).join(" | ") : "";
+  const catBlob = Array.isArray(cats) ? cats.map((c) => String(c || "").toLowerCase()).join(" | ") : "";
 
   const NEG_RE = /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
   if (NEG_RE.test(text) || NEG_RE.test(catBlob)) return false;
@@ -375,23 +377,20 @@ function isFlightOffer(offer) {
   const POS_RE = /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
   if (POS_RE.test(text) || POS_RE.test(catBlob)) return true;
 
-  // If not clearly non-flight, treat it as flight (payment offers are generic)
   return true;
 }
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  const end =
-    offer?.validityPeriod?.endDate ||
-    offer?.parsedFields?.validityPeriod?.endDate ||
-    null;
+  const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate || null;
 
   if (end) {
     const t = new Date(end);
     if (!isNaN(t)) return t.getTime() < Date.now();
   }
 
+  // fallback heuristic
   const blobs = [];
   if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
   if (offer?.parsedFields?.validityPeriod?.raw) blobs.push(String(offer.parsedFields.validityPeriod.raw));
@@ -408,16 +407,13 @@ function isOfferExpired(offer) {
 
   const text = blobs.filter(Boolean).join(" \n ");
 
-  const monthNames = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+  const monthNames =
+    "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
   const re1 = new RegExp(`\\b${monthNames}\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}\\b`, "ig");
   const re2 = new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${monthNames}\\s+\\d{4}\\b`, "ig");
   const re3 = /\b\d{4}-\d{2}-\d{2}\b/g;
 
-  const candidates = [
-    ...(text.match(re1) || []),
-    ...(text.match(re2) || []),
-    ...(text.match(re3) || []),
-  ];
+  const candidates = [...(text.match(re1) || []), ...(text.match(re2) || []), ...(text.match(re3) || [])];
 
   if (candidates.length === 0) return false;
 
@@ -434,11 +430,7 @@ function isOfferExpired(offer) {
 }
 
 function getMinTxnValue(offer) {
-  const v =
-    offer?.minTransactionValue ??
-    offer?.parsedFields?.minTransactionValue ??
-    null;
-
+  const v = offer?.minTransactionValue ?? offer?.parsedFields?.minTransactionValue ?? null;
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
@@ -449,10 +441,10 @@ function getMinTxnValue(offer) {
 function parsePercentFromRawDiscount(offer, isDomestic) {
   const txt = String(
     offer?.rawDiscount ||
-    offer?.parsedFields?.rawDiscount ||
-    offer?.offerSummary ||
-    offer?.rawText ||
-    ""
+      offer?.parsedFields?.rawDiscount ||
+      offer?.offerSummary ||
+      offer?.rawText ||
+      ""
   );
   if (!txt) return null;
 
@@ -470,147 +462,130 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
   return null;
 }
 
-// ✅ SKYDEAL FIX #2: extract "up to ₹X" from rawDiscount/terms
-function parseUpToAmountFromText(offer) {
-  const txt = String(
-    offer?.rawDiscount ||
-    offer?.parsedFields?.rawDiscount ||
-    offer?.offerSummary ||
-    offer?.rawText ||
-    offer?.terms ||
-    ""
-  );
-
-  // up to ₹1,000 / upto Rs 1000 / Up to INR 1500
-  const m =
-    txt.match(/up\s*to\s*(?:₹|rs\.?|inr)\s*([\d,]{2,})/i) ||
-    txt.match(/upto\s*(?:₹|rs\.?|inr)\s*([\d,]{2,})/i);
-  if (!m) return null;
-
-  const n = Number(String(m[1]).replace(/,/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
-
 function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   const base = Number(baseAmount);
   if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
+  // 1) Deterministic percent
   let pct = null;
   if (offer?.discountPercent != null) {
     const n = Number(offer.discountPercent);
     if (Number.isFinite(n) && n > 0) pct = n;
+  } else if (offer?.parsedFields?.discountPercent != null) {
+    const n = Number(offer.parsedFields.discountPercent);
+    if (Number.isFinite(n) && n > 0) pct = n;
   }
 
-  if (pct == null) {
-    pct = parsePercentFromRawDiscount(offer, isDomestic);
-  }
-
-  // ✅ SKYDEAL FIX #2: "Up to X%" should be conservative if estimation enabled
   if (pct != null) {
-    const raw = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
-    const isUpTo = /\bup\s*to\b/i.test(raw) || /\bupto\b/i.test(raw);
-
-    let appliedPct = pct;
-    if (ENABLE_ESTIMATED_DISCOUNTS && isUpTo) {
-      appliedPct = Math.max(1, Math.floor(pct * 0.75)); // conservative estimate
-    }
-
-    const discounted = Math.round(base * (1 - appliedPct / 100));
+    const discounted = Math.round(base * (1 - pct / 100));
     return discounted < base ? discounted : base;
   }
 
-  const flat = Number(offer?.flatDiscountAmount);
+  // 2) Deterministic flat
+  const flat =
+    Number(offer?.flatDiscountAmount) ||
+    Number(offer?.parsedFields?.flatDiscountAmount) ||
+    0;
+
   if (Number.isFinite(flat) && flat > 0) {
     const discounted = Math.round(base - flat);
     return discounted < base ? discounted : base;
   }
 
-  // ✅ SKYDEAL FIX #2: if not deterministic but estimation is enabled, try "up to ₹X"
-  if (ENABLE_ESTIMATED_DISCOUNTS) {
-    const upToAmt = parseUpToAmountFromText(offer);
-    if (Number.isFinite(upToAmt) && upToAmt > 0) {
-      const estAmt = Math.max(1, Math.floor(upToAmt * 0.75));
-      const discounted = Math.round(base - estAmt);
-      return discounted < base ? discounted : base;
-    }
+  // 3) Estimated/inferred percent (only if enabled)
+  if (!ENABLE_ESTIMATED_DISCOUNTS) return base;
+
+  const inferred = parsePercentFromRawDiscount(offer, isDomestic);
+  if (inferred != null) {
+    const discounted = Math.round(base * (1 - inferred / 100));
+    return discounted < base ? discounted : base;
   }
 
   return base;
 }
 
 // --------------------
-// Payment matching
+// ✅ PAYMENT MATCHING (FIXED)
 // --------------------
-function normalizeSelectedPM(pm) {
-  const typeRaw = String(pm?.type || "").trim();
-  const nameRaw = String(pm?.name || pm?.bank || "").trim();
-  const t = typeRaw.toLowerCase();
 
-  let typeNorm =
-    /emi/.test(t) ? "EMI" :
-    /credit/.test(t) ? "CREDIT_CARD" :
-    /debit/.test(t) ? "DEBIT_CARD" :
-    /net\s*bank/.test(t) ? "NET_BANKING" :
-    /upi/.test(t) ? "UPI" :
-    /wallet/.test(t) ? "WALLET" :
-    null;
+// Canonicalize selection type into the same buckets used in offers
+function canonSelectedType(raw) {
+  const t = String(raw || "").toLowerCase();
+  if (t.includes("emi")) return "EMI";
+  if (t.includes("credit")) return "CREDIT_CARD";
+  if (t.includes("debit")) return "DEBIT_CARD";
+  if (t.includes("net")) return "NET_BANKING";
+  if (t.includes("upi")) return "UPI";
+  if (t.includes("wallet")) return "WALLET";
+  return null;
+}
 
-  // ✅ Handle UI values like "Any Credit Card"
-  if (!typeNorm) {
-    const blob = `${typeRaw} ${nameRaw}`.toLowerCase();
-    if (blob.includes("credit")) typeNorm = "CREDIT_CARD";
-    else if (blob.includes("debit")) typeNorm = "DEBIT_CARD";
-    else if (blob.includes("net")) typeNorm = "NET_BANKING";
-    else if (blob.includes("upi")) typeNorm = "UPI";
-    else if (blob.includes("wallet")) typeNorm = "WALLET";
-    else if (blob.includes("emi")) typeNorm = "EMI";
-  }
+function bankToCanonical(rawBank) {
+  const name = String(rawBank || "").trim();
+  if (!name) return null;
+  return name
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
 
-  const bankCanonical = nameRaw
-    ? nameRaw
-        .toUpperCase()
-        .replace(/[^A-Z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "")
-    : null;
-
-  return { typeNorm, bankCanonical, nameRaw };
+function isAnyBankSelection(name) {
+  return /^any\s+/i.test(String(name || "").trim());
 }
 
 function normalizeOfferPM(pm) {
-  const methodCanonical = pm?.methodCanonical
-    ? String(pm.methodCanonical).toUpperCase()
-    : null;
+  const methodCanonical = pm?.methodCanonical ? String(pm.methodCanonical).toUpperCase() : null;
 
   const typeRaw = String(pm?.type || "").toLowerCase();
-
   const typeNorm =
     methodCanonical ||
-    (/credit/.test(typeRaw) ? "CREDIT_CARD" :
-     /debit/.test(typeRaw) ? "DEBIT_CARD" :
-     /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
-     /upi/.test(typeRaw) ? "UPI" :
-     /wallet/.test(typeRaw) ? "WALLET" :
-     /emi/.test(typeRaw) ? "EMI" :
+    (typeRaw.includes("credit") ? "CREDIT_CARD" :
+     typeRaw.includes("debit") ? "DEBIT_CARD" :
+     typeRaw.includes("net") ? "NET_BANKING" :
+     typeRaw.includes("upi") ? "UPI" :
+     typeRaw.includes("wallet") ? "WALLET" :
+     typeRaw.includes("emi") ? "EMI" :
      null);
 
   const bankCanonical =
     pm?.bankCanonical
       ? String(pm.bankCanonical).toUpperCase()
       : (pm?.bank || pm?.name)
-        ? String(pm.bank || pm.name)
-            .toUpperCase()
-            .replace(/[^A-Z0-9]+/g, "_")
-            .replace(/^_+|_+$/g, "")
-        : null;
+      ? bankToCanonical(pm.bank || pm.name)
+      : null;
+
+  const bankNameNorm = normalizeBankName(pm?.bank || pm?.name || pm?.raw || "");
 
   return {
     typeNorm,
     bankCanonical,
+    bankNameNorm,
     emiOnly: pm?.emiOnly === true,
     raw: String(pm?.raw || "").toLowerCase(),
   };
 }
 
+function normalizeSelectedPM(pm) {
+  const typeNorm = canonSelectedType(pm?.type);
+  const nameRaw = String(pm?.name || pm?.bank || "").trim();
+
+  const bankCanonical = bankToCanonical(nameRaw);
+  const bankNameNorm = normalizeBankName(nameRaw);
+
+  return {
+    typeNorm,
+    nameRaw,
+    bankCanonical,
+    bankNameNorm,
+    anyBank: isAnyBankSelection(nameRaw),
+  };
+}
+
+/**
+ * ✅ This is the actual fixed matcher.
+ * - If user selects EMI + Axis Bank, and offer says CREDIT_CARD + emiOnly:true + Axis Bank => MATCH ✅
+ * - Supports "Any EMI" / "Any Credit Card" style selections => MATCH by type only ✅
+ */
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return false;
@@ -618,23 +593,36 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
-  const selNorm = sel.map(normalizeSelectedPM).filter(x => x.typeNorm);
+  const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm);
   if (selNorm.length === 0) return false;
 
-  const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm);
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm);
   if (offerNorm.length === 0) return false;
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      // ✅ Allow type-only match when user selected "Any X" (bankCanonical missing)
-      if (s.typeNorm === o.typeNorm && (!s.bankCanonical || !o.bankCanonical || s.bankCanonical === o.bankCanonical)) {
+      const bankMatch =
+        s.anyBank ||
+        (!!s.bankCanonical && !!o.bankCanonical && s.bankCanonical === o.bankCanonical) ||
+        (!!s.bankNameNorm && !!o.bankNameNorm && s.bankNameNorm === o.bankNameNorm);
+
+      if (!bankMatch) continue;
+
+      // exact type match
+      if (s.typeNorm === o.typeNorm) return true;
+
+      // ✅ EMI selection should match CC offers that are emiOnly or mention EMI
+      if (
+        s.typeNorm === "EMI" &&
+        (o.typeNorm === "EMI" || o.emiOnly === true || o.raw.includes("emi"))
+      ) {
         return true;
       }
 
+      // Also allow selection CREDIT_CARD to match EMIs stored as credit_card (common)
       if (
-        s.typeNorm === "EMI" &&
-        (!!s.bankCanonical ? s.bankCanonical === o.bankCanonical : true) &&
-        (o.typeNorm === "EMI" || o.emiOnly === true || o.raw.includes("emi"))
+        s.typeNorm === "CREDIT_CARD" &&
+        (o.typeNorm === "CREDIT_CARD" || o.emiOnly === true || o.raw.includes("emi"))
       ) {
         return true;
       }
@@ -645,70 +633,63 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 }
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
-  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return null;
 
   const offerPMs = extractOfferPaymentMethods(offer);
   if (offerPMs.length === 0) return null;
 
-  const sel = selectedPaymentMethods.map((x) => {
-    if (typeof x === "string") {
-      const t = normalizePaymentType(x, x);
-      return { type: t, name: normalizeBankName(x), rawName: x };
-    }
-    const t = normalizePaymentType(x?.type || x?.name || "", x?.raw || "");
-    const nm = normalizeBankName(x?.name || x?.bank || x?.raw || "");
-    return { type: t, name: nm, rawName: x?.name || x?.bank || x?.raw || "" };
-  });
+  // Find the first selected PM that matches this offer
+  for (const sRaw of sel) {
+    const s = normalizeSelectedPM(sRaw);
 
-  for (const pm of offerPMs) {
-    const t = normalizePaymentType(pm.type, pm.raw || "");
-    const name = normalizeBankName(pm.bank || pm.name || "");
+    for (const oRaw of offerPMs) {
+      const o = normalizeOfferPM(oRaw);
 
-    const match = sel.find((s) => s.type === t && (!s.name || s.name === name));
-    if (match) {
-      const namePart = match.rawName ? match.rawName : "";
-      const typePart = match.type ? match.type : "";
-      if (namePart && typePart) return `${namePart} • ${typePart}`;
-      if (namePart) return namePart;
-      if (typePart) return typePart;
-      return null;
+      const bankMatch =
+        s.anyBank ||
+        (!!s.bankCanonical && !!o.bankCanonical && s.bankCanonical === o.bankCanonical) ||
+        (!!s.bankNameNorm && !!o.bankNameNorm && s.bankNameNorm === o.bankNameNorm);
+
+      if (!bankMatch) continue;
+
+      if (s.typeNorm === o.typeNorm) return `${s.nameRaw} • ${String(sRaw.type || "").toLowerCase()}`;
+
+      if (
+        s.typeNorm === "EMI" &&
+        (o.typeNorm === "EMI" || o.emiOnly === true || o.raw.includes("emi"))
+      ) {
+        return `${s.nameRaw} • emi`;
+      }
     }
   }
 
-  return null;
+  // fallback
+  return paymentLabelFromSelection(selectedPaymentMethods);
 }
 
 /**
- * ✅ SKYDEAL FIX #1: Scope matching must not randomly reject generic offers.
- * Phase-1 rule:
- *  - Domestic search: allow almost all flight offers.
- *  - Only block when offer explicitly says "international flights only" (very strict).
+ * Only reject when clearly says "international flights" (not just "international").
  */
 function offerScopeMatchesTrip(offer, isDomestic) {
-  // If this isn't a flight offer anyway, scope is irrelevant (will be filtered elsewhere)
-  if (!isDomestic) return true;
-
   const blob = normalizeText(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
 
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats)
-    ? normalizeText(cats.map(c => String(c || "")).join(" "))
+    ? normalizeText(cats.map((c) => String(c || "")).join(" "))
     : "";
 
   const combined = `${blob} ${catBlob}`.trim();
 
-  // Very strict blocker: explicitly says international flights ONLY
-  // (avoid city-name heuristics; they caused random SCOPE_MISMATCH)
-  const intlOnly =
-    /\binternational\s+flight(s)?\s+only\b/.test(combined) ||
-    /\bvalid\s+for\s+international\s+flight(s)?\s+only\b/.test(combined) ||
-    /\bonly\s+international\s+flight(s)?\b/.test(combined);
+  if (!isDomestic) return true;
 
-  if (intlOnly) return false;
+  const hasDomesticFlights = /\bdomestic\s+flight(s)?\b/.test(combined);
+  const hasInternationalFlights = /\binternational\s+flight(s)?\b/.test(combined);
 
-  // Otherwise allow (generic bank/EMI offers often apply to flights broadly)
+  if (hasInternationalFlights && !hasDomesticFlights) return false;
+
   return true;
 }
 
@@ -718,8 +699,8 @@ function offerScopeMatchesTrip(offer, isDomestic) {
 function evaluateOfferForFlight({
   offer,
   portal,
-  baseAmount,            // fare price (single passenger)
-  eligibilityAmount,     // fare * passengers (used for minTxn)
+  baseAmount,
+  eligibilityAmount,
   selectedPaymentMethods,
   isDomestic,
 }) {
@@ -744,6 +725,7 @@ function evaluateOfferForFlight({
   }
 
   const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
   if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
 
@@ -818,32 +800,6 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
   return info;
 }
 
-// ✅ SKYDEAL FIX #3: ensure frontend receives readable terms text
-function getTermsText(offer) {
-  if (!offer) return null;
-
-  // common shapes:
-  // terms: "string"
-  // terms: { raw: "...", ... }
-  // parsedFields.terms.raw
-  const t =
-    (typeof offer?.terms === "string" ? offer.terms : null) ||
-    (typeof offer?.terms?.raw === "string" ? offer.terms.raw : null) ||
-    (typeof offer?.parsedFields?.terms === "string" ? offer.parsedFields.terms : null) ||
-    (typeof offer?.parsedFields?.terms?.raw === "string" ? offer.parsedFields.terms.raw : null);
-
-  if (t) return t;
-
-  // fallback safe stringify
-  try {
-    if (offer?.terms && typeof offer.terms === "object") {
-      return JSON.stringify(offer.terms, null, 2).slice(0, 6000);
-    }
-  } catch (_) {}
-
-  return null;
-}
-
 async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -876,9 +832,6 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
         }
       : null;
 
-    // ✅ SKYDEAL FIX #3: termsText for frontend, keep terms for backwards compatibility
-    const termsText = best ? getTermsText(best.offer) : null;
-
     return {
       portal,
       basePrice: portalBase,
@@ -887,13 +840,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
       code: bestDeal?.code || null,
       title: bestDeal?.title || null,
       rawDiscount: bestDeal?.rawDiscount || null,
-
-      // old field (keep)
       terms: best?.offer?.terms || null,
-
-      // new field (frontend should use this)
-      termsText,
-
       constraints: bestDeal?.constraints || null,
       paymentLabel: (best ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods)) : null),
       explain: best
@@ -993,7 +940,7 @@ app.get("/payment-options", async (req, res) => {
     return n
       .split(" ")
       .filter(Boolean)
-      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
   }
 
@@ -1045,9 +992,9 @@ app.get("/payment-options", async (req, res) => {
       const arr = Array.from(set).filter(Boolean);
 
       const anyLabel = `Any ${k}`;
-      const hasSpecific = arr.some(x => x !== anyLabel);
+      const hasSpecific = arr.some((x) => x !== anyLabel);
 
-      options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
+      options[k] = (hasSpecific ? arr.filter((x) => x !== anyLabel) : arr)
         .sort((a, b) => a.localeCompare(b));
     }
 
@@ -1055,7 +1002,7 @@ app.get("/payment-options", async (req, res) => {
   } catch (e) {
     res.status(500).json({
       usedFallback: false,
-      options: CANON_KEYS.reduce((acc, k) => (acc[k] = [], acc), {}),
+      options: CANON_KEYS.reduce((acc, k) => ((acc[k] = []), acc), {}),
       error: e?.message || "Failed to load payment options",
     });
   }
@@ -1079,8 +1026,7 @@ app.post("/search", async (req, res) => {
 
     const selectedPaymentMethods = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
     meta.selectedPaymentMethods = selectedPaymentMethods;
-meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
-
+    meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
 
     if (!from || !to || !outDate) {
       return res.status(400).json({
@@ -1135,6 +1081,7 @@ meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
   }
 });
 
+// (your existing debug routes remain unchanged)
 app.get("/debug/payment-match", async (req, res) => {
   try {
     const portal = String(req.query.portal || "Cleartrip");
@@ -1173,7 +1120,6 @@ app.get("/debug/payment-match", async (req, res) => {
   }
 });
 
-// ✅ Debug now uses the SAME evaluator as /search
 app.get("/debug/why-not-applied", async (req, res) => {
   try {
     const portal = String(req.query.portal || "Goibibo");
@@ -1185,7 +1131,6 @@ app.get("/debug/why-not-applied", async (req, res) => {
 
     const col = await getOffersCollection();
 
-    // Only portal offers (same as your earlier debug)
     const offers = await col.find(
       { "sourceMetadata.sourcePortal": portal },
       {
@@ -1290,4 +1235,3 @@ app.get("/debug/why-not-applied", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
-
