@@ -427,33 +427,49 @@ function offerAppliesToPortal(offer, portalName) {
 }
 
 function isFlightOffer(offer) {
-  const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
+  // IMPORTANT: Only trust "core" fields for classification.
+  // rawText/terms often contain site template noise (e.g., nav/footer with “Flights”).
+  const title = String(offer?.title || "");
+  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+  const offerSummary =
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : (offer?.parsedFields?.offerSummary ? JSON.stringify(offer.parsedFields.offerSummary) : "");
+
+  const core = `${title} ${rawDiscount} ${offerSummary}`.toLowerCase();
+
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  const catBlob = Array.isArray(cats) ? cats.map((c) => String(c || "").toLowerCase()).join(" | ") : "";
+  const catBlob = Array.isArray(cats)
+    ? cats.map((c) => String(c || "").toLowerCase()).join(" | ")
+    : "";
 
-  const combined = `${text} ${catBlob}`.trim();
-
-  // Any strong flight signal?
-  const FLIGHT_RE =
-    /\bflight(s)?\b|\bairfare\b|\bair\s*ticket(s)?\b|\bair\s*travel\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
-
-  // Strong non-flight verticals (these should NEVER apply to flights unless flight is explicitly mentioned)
+  // Strong non-flight verticals (if core says these and does NOT say flights, it’s NOT a flight offer)
   const NON_FLIGHT_RE =
-    /\bhotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bholiday(s)?\b|\btourism\b|\battraction(s)?\b|\bactivity\b|\bactivities\b|\bvisa\b|\bforex\b|\bcruise\b|\bcar\s*rental\b/;
+    /\bhotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivities?\b|\bvisa\b|\bforex\b/;
 
-  const hasFlightSignal = FLIGHT_RE.test(combined);
-  const hasNonFlightSignal = NON_FLIGHT_RE.test(combined);
+  // Strong flight signals (must appear in CORE text)
+  const FLIGHT_CORE_RE =
+    /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
 
-  // ✅ Hard rule:
-  // If it mentions tourism/attractions/holidays/etc AND does NOT mention flights -> reject.
-  if (hasNonFlightSignal && !hasFlightSignal) return false;
+  const coreHasFlight = FLIGHT_CORE_RE.test(core);
+  const coreHasNonFlight = NON_FLIGHT_RE.test(core);
 
-  // If it mentions flights, accept (even if it also mentions hotels via "flights & hotels")
-  if (hasFlightSignal) return true;
+  // If core clearly indicates a non-flight vertical AND does not clearly indicate flights => reject
+  if (coreHasNonFlight && !coreHasFlight) return false;
 
-  // Otherwise reject
+  // If core clearly indicates flights => accept
+  if (coreHasFlight) return true;
+
+  // Weak fallback: if categories say flight AND core doesn't indicate non-flight verticals
+  // (prevents template noise from rawText causing false positives)
+  const catsSayFlight = /\bflight(s)?\b/.test(catBlob);
+  if (catsSayFlight && !coreHasNonFlight) return true;
+
   return false;
 }
+
 
 
 function isHotelOnlyOffer(offer) {
