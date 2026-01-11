@@ -26,6 +26,10 @@ const MONGO_COL = process.env.MONGO_COL || "offers";
 // FlightAPI env
 const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 
+// ✅ SKYDEAL FIX #2: Estimated discounts flag (demo-friendly)
+const ENABLE_ESTIMATED_DISCOUNTS =
+  String(process.env.ENABLE_ESTIMATED_DISCOUNTS || "").toLowerCase() === "true";
+
 // --------------------
 // Helpers: Date + Cabin
 // --------------------
@@ -466,6 +470,27 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
   return null;
 }
 
+// ✅ SKYDEAL FIX #2: extract "up to ₹X" from rawDiscount/terms
+function parseUpToAmountFromText(offer) {
+  const txt = String(
+    offer?.rawDiscount ||
+    offer?.parsedFields?.rawDiscount ||
+    offer?.offerSummary ||
+    offer?.rawText ||
+    offer?.terms ||
+    ""
+  );
+
+  // up to ₹1,000 / upto Rs 1000 / Up to INR 1500
+  const m =
+    txt.match(/up\s*to\s*(?:₹|rs\.?|inr)\s*([\d,]{2,})/i) ||
+    txt.match(/upto\s*(?:₹|rs\.?|inr)\s*([\d,]{2,})/i);
+  if (!m) return null;
+
+  const n = Number(String(m[1]).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   const base = Number(baseAmount);
   if (!Number.isFinite(base) || base <= 0) return baseAmount;
@@ -480,8 +505,17 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
     pct = parsePercentFromRawDiscount(offer, isDomestic);
   }
 
+  // ✅ SKYDEAL FIX #2: "Up to X%" should be conservative if estimation enabled
   if (pct != null) {
-    const discounted = Math.round(base * (1 - pct / 100));
+    const raw = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+    const isUpTo = /\bup\s*to\b/i.test(raw) || /\bupto\b/i.test(raw);
+
+    let appliedPct = pct;
+    if (ENABLE_ESTIMATED_DISCOUNTS && isUpTo) {
+      appliedPct = Math.max(1, Math.floor(pct * 0.75)); // conservative estimate
+    }
+
+    const discounted = Math.round(base * (1 - appliedPct / 100));
     return discounted < base ? discounted : base;
   }
 
@@ -489,6 +523,16 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   if (Number.isFinite(flat) && flat > 0) {
     const discounted = Math.round(base - flat);
     return discounted < base ? discounted : base;
+  }
+
+  // ✅ SKYDEAL FIX #2: if not deterministic but estimation is enabled, try "up to ₹X"
+  if (ENABLE_ESTIMATED_DISCOUNTS) {
+    const upToAmt = parseUpToAmountFromText(offer);
+    if (Number.isFinite(upToAmt) && upToAmt > 0) {
+      const estAmt = Math.max(1, Math.floor(upToAmt * 0.75));
+      const discounted = Math.round(base - estAmt);
+      return discounted < base ? discounted : base;
+    }
   }
 
   return base;
@@ -510,6 +554,17 @@ function normalizeSelectedPM(pm) {
     /upi/.test(t) ? "UPI" :
     /wallet/.test(t) ? "WALLET" :
     null;
+
+  // ✅ Handle UI values like "Any Credit Card"
+  if (!typeNorm) {
+    const blob = `${typeRaw} ${nameRaw}`.toLowerCase();
+    if (blob.includes("credit")) typeNorm = "CREDIT_CARD";
+    else if (blob.includes("debit")) typeNorm = "DEBIT_CARD";
+    else if (blob.includes("net")) typeNorm = "NET_BANKING";
+    else if (blob.includes("upi")) typeNorm = "UPI";
+    else if (blob.includes("wallet")) typeNorm = "WALLET";
+    else if (blob.includes("emi")) typeNorm = "EMI";
+  }
 
   const bankCanonical = nameRaw
     ? nameRaw
@@ -563,19 +618,22 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
-  const selNorm = sel.map(normalizeSelectedPM).filter(x => x.typeNorm && x.bankCanonical);
+  const selNorm = sel.map(normalizeSelectedPM).filter(x => x.typeNorm);
   if (selNorm.length === 0) return false;
 
-  const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm && x.bankCanonical);
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm);
   if (offerNorm.length === 0) return false;
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      if (s.typeNorm === o.typeNorm && s.bankCanonical === o.bankCanonical) return true;
+      // ✅ Allow type-only match when user selected "Any X" (bankCanonical missing)
+      if (s.typeNorm === o.typeNorm && (!s.bankCanonical || !o.bankCanonical || s.bankCanonical === o.bankCanonical)) {
+        return true;
+      }
 
       if (
         s.typeNorm === "EMI" &&
-        s.bankCanonical === o.bankCanonical &&
+        (!!s.bankCanonical ? s.bankCanonical === o.bankCanonical : true) &&
         (o.typeNorm === "EMI" || o.emiOnly === true || o.raw.includes("emi"))
       ) {
         return true;
@@ -621,10 +679,15 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 }
 
 /**
- * ✅ FIX: Scope matching must not reject generic offers.
- * Only reject when it clearly says "international flights" (not just "international").
+ * ✅ SKYDEAL FIX #1: Scope matching must not randomly reject generic offers.
+ * Phase-1 rule:
+ *  - Domestic search: allow almost all flight offers.
+ *  - Only block when offer explicitly says "international flights only" (very strict).
  */
 function offerScopeMatchesTrip(offer, isDomestic) {
+  // If this isn't a flight offer anyway, scope is irrelevant (will be filtered elsewhere)
+  if (!isDomestic) return true;
+
   const blob = normalizeText(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
   );
@@ -636,24 +699,16 @@ function offerScopeMatchesTrip(offer, isDomestic) {
 
   const combined = `${blob} ${catBlob}`.trim();
 
-  if (!isDomestic) return true; // Phase-1: no strict handling
+  // Very strict blocker: explicitly says international flights ONLY
+  // (avoid city-name heuristics; they caused random SCOPE_MISMATCH)
+  const intlOnly =
+    /\binternational\s+flight(s)?\s+only\b/.test(combined) ||
+    /\bvalid\s+for\s+international\s+flight(s)?\s+only\b/.test(combined) ||
+    /\bonly\s+international\s+flight(s)?\b/.test(combined);
 
-  const hasDomesticFlights = /\bdomestic\s+flight(s)?\b/.test(combined);
-  const hasInternationalFlights = /\binternational\s+flight(s)?\b/.test(combined);
+  if (intlOnly) return false;
 
-  // Only block when clearly international flights only
-  if (hasInternationalFlights && !hasDomesticFlights) return false;
-
-  // Keep obvious international city heuristic (optional)
-  const obviousInternational = [
-    "krabi", "siem reap", "cebu", "bangkok", "singapore", "dubai",
-    "kuala lumpur", "ho chi minh", "phuket", "bali",
-  ].map(normalizeText);
-
-  if (obviousInternational.some(k => combined.includes(k)) && !combined.includes("domestic")) {
-    return false;
-  }
-
+  // Otherwise allow (generic bank/EMI offers often apply to flights broadly)
   return true;
 }
 
@@ -688,9 +743,7 @@ function evaluateOfferForFlight({
     return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
   }
 
-  const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
-  const discounted = typeof result === "number" ? result : result?.price;
-
+  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
   if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
 
@@ -765,6 +818,32 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
   return info;
 }
 
+// ✅ SKYDEAL FIX #3: ensure frontend receives readable terms text
+function getTermsText(offer) {
+  if (!offer) return null;
+
+  // common shapes:
+  // terms: "string"
+  // terms: { raw: "...", ... }
+  // parsedFields.terms.raw
+  const t =
+    (typeof offer?.terms === "string" ? offer.terms : null) ||
+    (typeof offer?.terms?.raw === "string" ? offer.terms.raw : null) ||
+    (typeof offer?.parsedFields?.terms === "string" ? offer.parsedFields.terms : null) ||
+    (typeof offer?.parsedFields?.terms?.raw === "string" ? offer.parsedFields.terms.raw : null);
+
+  if (t) return t;
+
+  // fallback safe stringify
+  try {
+    if (offer?.terms && typeof offer.terms === "object") {
+      return JSON.stringify(offer.terms, null, 2).slice(0, 6000);
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -797,6 +876,9 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
         }
       : null;
 
+    // ✅ SKYDEAL FIX #3: termsText for frontend, keep terms for backwards compatibility
+    const termsText = best ? getTermsText(best.offer) : null;
+
     return {
       portal,
       basePrice: portalBase,
@@ -805,7 +887,13 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
       code: bestDeal?.code || null,
       title: bestDeal?.title || null,
       rawDiscount: bestDeal?.rawDiscount || null,
+
+      // old field (keep)
       terms: best?.offer?.terms || null,
+
+      // new field (frontend should use this)
+      termsText,
+
       constraints: bestDeal?.constraints || null,
       paymentLabel: (best ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods)) : null),
       explain: best
@@ -1199,3 +1287,4 @@ app.get("/debug/why-not-applied", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
+
