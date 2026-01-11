@@ -454,7 +454,15 @@ function isFlightOffer(offer) {
   return false;
 }
 
+function isHotelOnlyOffer(offer) {
+  const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
 
+  const mentionsHotel = /\bhotel(s)?\b/.test(text);
+  const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(text);
+
+  // ❌ Explicit hotel-only offer
+  return mentionsHotel && !mentionsFlight;
+}
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
@@ -737,7 +745,13 @@ function evaluateOfferForFlight({
   cabin,
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
+
+  // ✅ Gate 1: must be a flight offer
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+
+  // ✅ NEW: reject explicit hotel-only offers (prevents hotel offers applying to flights)
+  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
+
   if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
@@ -802,6 +816,8 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
 
   for (const offer of offers) {
     if (!isFlightOffer(offer)) continue;
+    // ✅ keep info list flight-only, but also skip hotel-only
+    if (isHotelOnlyOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
     if (!offerScopeMatchesTrip(offer, true, cabin)) continue;
@@ -1033,6 +1049,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
       scopeOK: 0,
       minTxnOK: 0,
       wouldApplyNow: 0,
+      hotelOnly: 0, // ✅ NEW stat
     };
 
     const samples = [];
@@ -1043,6 +1060,11 @@ app.get("/debug/why-not-applied", async (req, res) => {
       const flight = isFlightOffer(offer);
       if (flight) stats.isFlight++;
       else failReasons.push("NOT_FLIGHT_OFFER");
+
+      // ✅ NEW: explicitly track hotel-only rejects
+      const hotelOnly = isHotelOnlyOffer(offer);
+      if (hotelOnly) stats.hotelOnly++;
+      if (hotelOnly) failReasons.push("HOTEL_ONLY");
 
       const expired = isOfferExpired(offer);
       if (!expired) stats.notExpired++;
@@ -1065,6 +1087,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
       else failReasons.push("MIN_TXN_NOT_MET");
 
       // Would apply now = all gates except improvement test
+      // (hotel-only should block wouldApplyNow as well)
       const wouldApplyNow = failReasons.length === 0;
 
       if (wouldApplyNow) stats.wouldApplyNow++;
@@ -1087,6 +1110,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
           minTransactionValue: minTxn || 0,
           expired: !!expired,
           isFlight: !!flight,
+          hotelOnly: !!hotelOnly,
           wouldApplyNow,
           failReasons,
         });
@@ -1179,5 +1203,3 @@ app.post("/search", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
-
-
