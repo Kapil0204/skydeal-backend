@@ -773,6 +773,8 @@ function evaluateOfferForFlight({
 
   // ✅ Gate 1: must be a flight offer
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
+
     // HARD BLOCK: non-flight verticals must never apply to flight booking
   // unless "flight/air ticket/airfare" is explicitly mentioned.
   const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
