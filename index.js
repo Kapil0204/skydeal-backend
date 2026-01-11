@@ -757,6 +757,16 @@ function evaluateOfferForFlight({
 
   // ✅ Gate 1: must be a flight offer
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+    // HARD BLOCK: non-flight verticals must never apply to flight booking
+  // unless "flight/air ticket/airfare" is explicitly mentioned.
+  const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
+  const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
+  const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
+
+  if (mentionsNonFlight && !mentionsFlight) {
+    return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
+  }
+
 
   // ✅ NEW: reject explicit hotel-only offers (prevents hotel offers applying to flights)
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
