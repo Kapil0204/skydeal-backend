@@ -431,28 +431,30 @@ function isFlightOffer(offer) {
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats) ? cats.map((c) => String(c || "").toLowerCase()).join(" | ") : "";
 
-  const combined = `${text} ${catBlob}`;
+  const combined = `${text} ${catBlob}`.trim();
 
-  // Strong positive signals
-  const POS_RE =
-    /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b|\bair\s*ticket(s)?\b|\bflights?\s*&\s*hotels?\b/;
+  // Any strong flight signal?
+  const FLIGHT_RE =
+    /\bflight(s)?\b|\bairfare\b|\bair\s*ticket(s)?\b|\bair\s*travel\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
 
-  // Strong negative-only signals (hotel/bus/cab/train etc.)
-  const NEG_RE =
-    /\bhotel(s)?\b|\bdomestic\s+hotel(s)?\b|\binternational\s+hotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bholiday(s)?\b|\btourism\b|\battraction(s)?\b/;
+  // Strong non-flight verticals (these should NEVER apply to flights unless flight is explicitly mentioned)
+  const NON_FLIGHT_RE =
+    /\bhotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bholiday(s)?\b|\btourism\b|\battraction(s)?\b|\bactivity\b|\bactivities\b|\bvisa\b|\bforex\b|\bcruise\b|\bcar\s*rental\b/;
 
-  const hasFlightSignal = POS_RE.test(combined);
-  const hasNonFlightSignal = NEG_RE.test(combined);
+  const hasFlightSignal = FLIGHT_RE.test(combined);
+  const hasNonFlightSignal = NON_FLIGHT_RE.test(combined);
 
-  // If it clearly mentions flights, allow even if it also mentions hotels
+  // ✅ Hard rule:
+  // If it mentions tourism/attractions/holidays/etc AND does NOT mention flights -> reject.
+  if (hasNonFlightSignal && !hasFlightSignal) return false;
+
+  // If it mentions flights, accept (even if it also mentions hotels via "flights & hotels")
   if (hasFlightSignal) return true;
 
-  // If it doesn't mention flights but mentions hotels/bus/cab/train etc, reject
-  if (hasNonFlightSignal) return false;
-
-  // Otherwise: be conservative and reject (prevents "hotel offer applied to flight")
+  // Otherwise reject
   return false;
 }
+
 
 function isHotelOnlyOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
@@ -712,6 +714,13 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats) ? normalizeText(cats.map((c) => String(c || "")).join(" ")) : "";
   const combined = `${blob} ${catBlob}`.trim();
+    // ✅ Extra safety: reject non-flight verticals unless flight is explicitly mentioned
+  const hasFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(combined);
+  const hasNonFlightVertical =
+    /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(combined);
+
+  if (hasNonFlightVertical && !hasFlight) return false;
+
   const cabinShort = normalizeCabinShort(cabin);
 
   if ((cabinShort === "economy" || cabinShort === "premium") && /\bbusiness\s+class\b|\bfirst\s+class\b/.test(combined)) {
