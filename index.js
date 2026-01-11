@@ -290,9 +290,7 @@ function extractOfferConstraints(offer) {
 
 /**
  * ===========================
- * ✅ NEW (REQUIRED): inference fallback
- * Many offers have empty eligiblePaymentMethods[] in Mongo.
- * So infer bank + payment method from text.
+ * Inference fallback (kept)
  * ===========================
  */
 function inferPaymentMethodsFromText(offer) {
@@ -300,7 +298,6 @@ function inferPaymentMethodsFromText(offer) {
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`
   ).toLowerCase();
 
-  // method inference
   const inferredTypes = new Set();
   if (/\bno[\s-]?cost\s*emi\b|\bemi\b/.test(blob)) inferredTypes.add("EMI");
   if (/\bcredit\s*card\b|\bcc\b/.test(blob)) inferredTypes.add("CREDIT_CARD");
@@ -309,7 +306,6 @@ function inferPaymentMethodsFromText(offer) {
   if (/\bupi\b/.test(blob)) inferredTypes.add("UPI");
   if (/\bwallet\b/.test(blob)) inferredTypes.add("WALLET");
 
-  // bank inference (keep it simple + high-signal)
   const bankRules = [
     { re: /\baxis\b/, bank: "Axis Bank", canon: "AXIS_BANK" },
     { re: /\bhdfc\b/, bank: "HDFC Bank", canon: "HDFC_BANK" },
@@ -326,15 +322,18 @@ function inferPaymentMethodsFromText(offer) {
   ];
 
   const banks = bankRules.filter((r) => r.re.test(blob));
-
   if (inferredTypes.size === 0 || banks.length === 0) return [];
 
-  // Build inferred PM objects similar to structured ones
   const out = [];
   for (const b of banks) {
     for (const t of inferredTypes) {
       out.push({
-        type: t === "EMI" ? "emi" : t === "CREDIT_CARD" ? "credit_card" : t === "DEBIT_CARD" ? "debit_card" : t === "NET_BANKING" ? "net_banking" : t === "UPI" ? "upi" : "wallet",
+        type:
+          t === "EMI" ? "emi" :
+          t === "CREDIT_CARD" ? "credit_card" :
+          t === "DEBIT_CARD" ? "debit_card" :
+          t === "NET_BANKING" ? "net_banking" :
+          t === "UPI" ? "upi" : "wallet",
         bank: b.bank,
         network: null,
         methodCanonical: t,
@@ -348,14 +347,9 @@ function inferPaymentMethodsFromText(offer) {
       });
     }
   }
-
   return out;
 }
 
-/**
- * Normalize eligiblePaymentMethods -> array of objects
- * ✅ CHANGED: if no structured methods exist, fallback to inference.
- */
 function extractOfferPaymentMethods(offer) {
   if (!offer || typeof offer !== "object") return [];
 
@@ -397,7 +391,6 @@ function extractOfferPaymentMethods(offer) {
       .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
 
-  // ✅ fallback inference if empty
   if (!out || out.length === 0) {
     const inferred = inferPaymentMethodsFromText(offer);
     if (Array.isArray(inferred) && inferred.length > 0) return inferred;
@@ -626,20 +619,17 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return false;
 
-  // ✅ Now this already includes inferred PMs when structured arrays are empty
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
   const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
   if (selNorm.length === 0) return false;
 
-  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm); // ✅ relaxed: allow missing bankCanonical in edge cases
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm);
   if (offerNorm.length === 0) return false;
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      // If offer has a bank canonical, match it strictly.
-      // If offer bank canonical is missing (rare after inference), allow bank match via raw text.
       if (o.bankCanonical) {
         if (s.bankCanonical !== o.bankCanonical) continue;
       } else {
@@ -649,7 +639,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
       if (s.typeNorm === o.typeNorm) return true;
 
-      // EMI selection can match CREDIT_CARD offer that's EMI-only
       if (
         s.typeNorm === "EMI" &&
         o.typeNorm === "CREDIT_CARD" &&
@@ -693,7 +682,7 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   return null;
 }
 
-// ✅ scope/cabin sanity (kept from your current)
+// scope/cabin sanity
 function offerScopeMatchesTrip(offer, isDomestic, cabin) {
   const blob = normalizeText(`${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`);
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
@@ -737,7 +726,6 @@ function evaluateOfferForFlight({
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
-  // ✅ now includes inference fallback
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
 
@@ -877,6 +865,9 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
       paymentLabel: best ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods)) : null,
       explain: best ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}` : null,
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
+      debugCounts: {
+        offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
+      },
     };
   });
 
@@ -905,14 +896,196 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
 }
 
 // --------------------
-// Routes
+// ✅ RESTORED: Payment options (Mongo-driven, no fallback)
+// --------------------
+function canonicalTypeToFrontendBucket(methodCanonicalOrType) {
+  const v = String(methodCanonicalOrType || "").toUpperCase();
+  if (v === "EMI") return "EMI";
+  if (v === "CREDIT_CARD") return "CreditCard";
+  if (v === "DEBIT_CARD") return "DebitCard";
+  if (v === "NET_BANKING") return "NetBanking";
+  if (v === "UPI") return "UPI";
+  if (v === "WALLET") return "Wallet";
+  return null;
+}
+
+function offerPmToCanonical(pm) {
+  const method = String(pm?.methodCanonical || "").toUpperCase();
+  if (method) return method;
+
+  const t = String(pm?.type || "").toLowerCase();
+  if (t.includes("emi")) return "EMI";
+  if (t.includes("credit")) return "CREDIT_CARD";
+  if (t.includes("debit")) return "DEBIT_CARD";
+  if (t.includes("net")) return "NET_BANKING";
+  if (t.includes("upi")) return "UPI";
+  if (t.includes("wallet")) return "WALLET";
+  return null;
+}
+
+function pickDisplayBankName(pm) {
+  // preserve what user expects (Axis Bank etc.)
+  const b = pm?.bank || pm?.name || "";
+  const raw = String(b || "").trim();
+  if (!raw) return null;
+  // light cleanup
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+async function computePaymentOptionsFromOffers() {
+  const col = await getOffersCollection();
+  const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
+  const buckets = {
+    EMI: new Set(),
+    CreditCard: new Set(),
+    DebitCard: new Set(),
+    NetBanking: new Set(),
+    UPI: new Set(),
+    Wallet: new Set(),
+  };
+
+  for (const offer of offers) {
+    const pms = extractOfferPaymentMethods(offer); // includes inference if needed
+    for (const pm of pms) {
+      const canon = offerPmToCanonical(pm);
+      const bucket = canonicalTypeToFrontendBucket(canon);
+      if (!bucket) continue;
+
+      const bank = pickDisplayBankName(pm);
+      if (!bank) continue;
+
+      buckets[bucket].add(bank);
+    }
+  }
+
+  const options = {
+    EMI: Array.from(buckets.EMI).sort(),
+    CreditCard: Array.from(buckets.CreditCard).sort(),
+    DebitCard: Array.from(buckets.DebitCard).sort(),
+    NetBanking: Array.from(buckets.NetBanking).sort(),
+    UPI: Array.from(buckets.UPI).sort(),
+    Wallet: Array.from(buckets.Wallet).sort(),
+  };
+
+  return { usedFallback: false, options };
+}
+
+// --------------------
+// ✅ RESTORED: /payment-options
 // --------------------
 app.get("/payment-options", async (req, res) => {
-  // leaving your existing /payment-options logic untouched in your repo
-  res.status(501).json({ error: "payment-options is not included in this minimal file. Use your existing version." });
+  try {
+    const out = await computePaymentOptionsFromOffers();
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ usedFallback: false, error: e?.message || "Failed to load payment options" });
+  }
 });
 
+// --------------------
+// ✅ RESTORED: /debug/why-not-applied
+// --------------------
+app.get("/debug/why-not-applied", async (req, res) => {
+  try {
+    const portal = String(req.query.portal || "").trim();
+    const bank = String(req.query.bank || "").trim();
+    const type = String(req.query.type || "").trim(); // e.g. EMI
+    const amount = Number(req.query.amount || 0) || 0;
+
+    if (!portal || !bank || !type) {
+      return res.status(400).json({ error: "Missing portal/bank/type" });
+    }
+
+    const selectedPaymentMethods = [{ type, name: bank }];
+
+    const col = await getOffersCollection();
+    const offers = await col.find(
+      { "sourceMetadata.sourcePortal": portal },
+      { projection: { _id: 0 } }
+    ).toArray();
+
+    const stats = {
+      portal,
+      total: offers.length,
+      ok: 0,
+      notOk: 0,
+      isFlight: 0,
+      notExpired: 0,
+      matchesPayment: 0,
+      portalMatch: 0,
+      scopeOK: 0,
+      minTxnOK: 0,
+      wouldApplyNow: 0,
+    };
+
+    const samples = [];
+
+    for (const offer of offers) {
+      const failReasons = [];
+
+      const flight = isFlightOffer(offer);
+      if (flight) stats.isFlight++;
+      else failReasons.push("NOT_FLIGHT_OFFER");
+
+      const expired = isOfferExpired(offer);
+      if (!expired) stats.notExpired++;
+      else failReasons.push("EXPIRED");
+
+      const pMatch = offerAppliesToPortal(offer, portal);
+      if (pMatch) stats.portalMatch++;
+      else failReasons.push("PORTAL_MISMATCH");
+
+      const scope = offerScopeMatchesTrip(offer, true, "Economy");
+      if (scope) stats.scopeOK++;
+      else failReasons.push("SCOPE_MISMATCH");
+
+      const pay = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+      if (pay) stats.matchesPayment++;
+      else failReasons.push("PAYMENT_MISMATCH");
+
+      const minTxn = getMinTxnValue(offer);
+      if (!minTxn || amount >= minTxn) stats.minTxnOK++;
+      else failReasons.push("MIN_TXN_NOT_MET");
+
+      // Would apply now = all gates except improvement test
+      const wouldApplyNow = failReasons.length === 0;
+
+      if (wouldApplyNow) stats.wouldApplyNow++;
+
+      // ok = wouldApplyNow AND compute yields improvement
+      let ok = false;
+      if (wouldApplyNow) {
+        const discounted = computeDiscountedPrice(offer, amount, true);
+        ok = Number.isFinite(discounted) && discounted < amount;
+      }
+
+      if (ok) stats.ok++;
+      else stats.notOk++;
+
+      if (samples.length < 10 && (wouldApplyNow || ok)) {
+        samples.push({
+          title: offer?.title || null,
+          code: offer?.couponCode || offer?.code || null,
+          rawDiscount: offer?.rawDiscount || null,
+          minTransactionValue: minTxn || 0,
+          expired: !!expired,
+          isFlight: !!flight,
+          wouldApplyNow,
+          failReasons,
+        });
+      }
+    }
+
+    res.json({ selectedPaymentMethods, baseAmount: amount, stats, samples });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "debug failed" });
+  }
+});
+
+// --------------------
 // Search flights + apply offers
+// --------------------
 app.post("/search", async (req, res) => {
   const body = req.body || {};
   const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {} };
@@ -932,6 +1105,7 @@ app.post("/search", async (req, res) => {
 
     meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
+    meta.usedFallback = false;
 
     if (!from || !to || !outDate) {
       return res.status(400).json({
@@ -989,4 +1163,5 @@ app.post("/search", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
+
 
