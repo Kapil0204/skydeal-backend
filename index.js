@@ -431,14 +431,24 @@ function isFlightOffer(offer) {
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats) ? cats.map((c) => String(c || "").toLowerCase()).join(" | ") : "";
 
-  const NEG_RE = /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
-  if (NEG_RE.test(text) || NEG_RE.test(catBlob)) return false;
+  // Positive flight signals
+  const POS_RE =
+    /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b|\bair\s*ticket(s)?\b/;
 
-  const POS_RE = /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
-  if (POS_RE.test(text) || POS_RE.test(catBlob)) return true;
+  // Negative-only categories (reject ONLY if there is NO flight signal)
+  const NEG_RE =
+    /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
 
+  const hasFlightSignal = POS_RE.test(text) || POS_RE.test(catBlob);
+  if (hasFlightSignal) return true;
+
+  const hasOnlyNonFlightSignal = NEG_RE.test(text) || NEG_RE.test(catBlob);
+  if (hasOnlyNonFlightSignal) return false;
+
+  // Default: keep it (many offers don't explicitly say "flight" but are travel)
   return true;
 }
+
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
