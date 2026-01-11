@@ -278,7 +278,7 @@ function extractOfferConstraints(offer) {
 }
 
 /**
- * ✅ KEY FIX: Your docs store payment eligibility in `eligiblePaymentMethods`.
+ * Normalize eligiblePaymentMethods -> array of objects
  */
 function extractOfferPaymentMethods(offer) {
   if (!offer || typeof offer !== "object") return [];
@@ -290,9 +290,11 @@ function extractOfferPaymentMethods(offer) {
         type: pm.type || null,
         bank: pm.bank || null,
         network: pm.network || null,
+
         methodCanonical: pm.methodCanonical || null,
         bankCanonical: pm.bankCanonical || null,
         networkCanonical: pm.networkCanonical || null,
+
         cardVariant: pm.cardVariant || null,
         emiOnly: pm.emiOnly === true,
         tenureMonths: pm.tenureMonths ?? null,
@@ -309,9 +311,11 @@ function extractOfferPaymentMethods(offer) {
         type: pm.type || null,
         bank: pm.bank || pm.name || null,
         network: pm.network || null,
+
         methodCanonical: pm.methodCanonical || null,
         bankCanonical: pm.bankCanonical || null,
         networkCanonical: pm.networkCanonical || null,
+
         cardVariant: pm.cardVariant || null,
         emiOnly: pm.emiOnly === true,
         tenureMonths: pm.tenureMonths ?? null,
@@ -351,37 +355,25 @@ function offerAppliesToPortal(offer, portalName) {
   return false;
 }
 
+/**
+ * ✅ FIX: inclusive by default; exclude only when obvious non-flight.
+ * This stops generic CC/EMI offers from being dropped.
+ */
 function isFlightOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
 
-  // Prefer structured categories if available
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats) ? cats.map(c => String(c || "").toLowerCase()).join(" | ") : "";
 
-  // -----------------------------
-  // Strong negatives (if these appear anywhere, it's NOT a flight offer)
-  // -----------------------------
   const NEG_RE = /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
-
   if (NEG_RE.test(text) || NEG_RE.test(catBlob)) return false;
 
-  // -----------------------------
-  // Strong positives (explicit flight keywords)
-  // -----------------------------
   const POS_RE = /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
+  if (POS_RE.test(text) || POS_RE.test(catBlob)) return true;
 
-  if (POS_RE.test(text)) return true;
-  if (POS_RE.test(catBlob)) return true;
-
-  // -----------------------------
-  // ✅ KEY BEHAVIOR CHANGE:
-  // Many OTA "payment" offers are generic and don't say "flight".
-  // If we cannot prove it's non-flight (negatives above), we treat it as a flight offer.
-  // This prevents dropping legitimate CC/EMI discounts.
-  // -----------------------------
+  // If not clearly non-flight, treat it as flight (payment offers are generic)
   return true;
 }
-
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
@@ -437,49 +429,6 @@ function isOfferExpired(offer) {
   return latest.getTime() < Date.now();
 }
 
-// --------- Scope matching ---------
-function offerScopeMatchesTrip(offer, isDomestic) {
-  const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
-  );
-
-  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  const catBlob = Array.isArray(cats)
-    ? normalizeText(cats.map(c => String(c || "")).join(" "))
-    : "";
-
-  const hasInternational = blob.includes("international") || catBlob.includes("international");
-  const hasDomestic = blob.includes("domestic") || catBlob.includes("domestic");
-
-  if (isDomestic && hasInternational && !hasDomestic) return false;
-
-  if (isDomestic) {
-    const mentionsBusinessClass =
-      blob.includes("business class") || catBlob.includes("business class");
-    const mentionsInternationalFlights =
-      blob.includes("international flights") || catBlob.includes("international flights");
-
-    if (mentionsBusinessClass && (hasInternational || mentionsInternationalFlights) && !hasDomestic) {
-      return false;
-    }
-  }
-
-  const obviousInternational = [
-    "krabi", "siem reap", "cebu", "bangkok", "singapore", "dubai",
-    "kuala lumpur", "ho chi minh", "phuket", "bali",
-  ].map(normalizeText);
-
-  if (isDomestic) {
-    const combined = `${blob} ${catBlob}`;
-    if (obviousInternational.some(k => combined.includes(k)) && !combined.includes("domestic")) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// --------- Min transaction ---------
 function getMinTxnValue(offer) {
   const v =
     offer?.minTransactionValue ??
@@ -491,7 +440,7 @@ function getMinTxnValue(offer) {
 }
 
 // --------------------
-// Discount computation (consistent return shape)
+// Discount compute
 // --------------------
 function parsePercentFromRawDiscount(offer, isDomestic) {
   const txt = String(
@@ -501,7 +450,6 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
     offer?.rawText ||
     ""
   );
-
   if (!txt) return null;
 
   if (isDomestic) {
@@ -520,73 +468,41 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
 
 function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   const base = Number(baseAmount);
-  if (!Number.isFinite(base) || base <= 0) return { price: base, meta: null };
+  if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
-  // 1) parsed discountPercent
   let pct = null;
   if (offer?.discountPercent != null) {
     const n = Number(offer.discountPercent);
     if (Number.isFinite(n) && n > 0) pct = n;
   }
 
-  // 2) parse from rawDiscount if missing
   if (pct == null) {
     pct = parsePercentFromRawDiscount(offer, isDomestic);
   }
 
   if (pct != null) {
     const discounted = Math.round(base * (1 - pct / 100));
-    return { price: discounted < base ? discounted : base, meta: null };
+    return discounted < base ? discounted : base;
   }
 
-  // 3) flat discount support
   const flat = Number(offer?.flatDiscountAmount);
   if (Number.isFinite(flat) && flat > 0) {
     const discounted = Math.round(base - flat);
-    return { price: discounted < base ? discounted : base, meta: null };
+    return discounted < base ? discounted : base;
   }
 
-  // 4) Optional "up to" fallback estimation
-  if (process.env.ENABLE_ESTIMATED_DISCOUNTS === "true") {
-    if (
-      base > 0 &&
-      !offer.discountPercent &&
-      !offer.flatDiscountAmount &&
-      typeof offer.rawDiscount === "string"
-    ) {
-      const m = offer.rawDiscount.match(/up to\s*(\d+)\s*%/i);
-      if (m) {
-        const statedPct = Number(m[1]);
-        const effectivePct = Math.min(Math.floor(statedPct / 2), 10);
-        if (effectivePct > 0) {
-          const discounted = Math.floor(base * (1 - effectivePct / 100));
-          return {
-            price: discounted,
-            meta: {
-              estimated: true,
-              method: "UP_TO_PERCENT_FALLBACK",
-              appliedPercent: effectivePct,
-              statedPercent: statedPct,
-            },
-          };
-        }
-      }
-    }
-  }
-
-  return { price: base, meta: null };
+  return base;
 }
 
 // --------------------
-// Payment match (canonical)
+// Payment matching
 // --------------------
 function normalizeSelectedPM(pm) {
   const typeRaw = String(pm?.type || "").trim();
   const nameRaw = String(pm?.name || pm?.bank || "").trim();
-
   const t = typeRaw.toLowerCase();
 
-  const typeNorm =
+  let typeNorm =
     /emi/.test(t) ? "EMI" :
     /credit/.test(t) ? "CREDIT_CARD" :
     /debit/.test(t) ? "DEBIT_CARD" :
@@ -597,9 +513,9 @@ function normalizeSelectedPM(pm) {
 
   const bankCanonical = nameRaw
     ? nameRaw
-      .toUpperCase()
-      .replace(/[^A-Z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
     : null;
 
   return { typeNorm, bankCanonical, nameRaw };
@@ -615,21 +531,21 @@ function normalizeOfferPM(pm) {
   const typeNorm =
     methodCanonical ||
     (/credit/.test(typeRaw) ? "CREDIT_CARD" :
-      /debit/.test(typeRaw) ? "DEBIT_CARD" :
-        /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
-          /upi/.test(typeRaw) ? "UPI" :
-            /wallet/.test(typeRaw) ? "WALLET" :
-              /emi/.test(typeRaw) ? "EMI" :
-                null);
+     /debit/.test(typeRaw) ? "DEBIT_CARD" :
+     /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
+     /upi/.test(typeRaw) ? "UPI" :
+     /wallet/.test(typeRaw) ? "WALLET" :
+     /emi/.test(typeRaw) ? "EMI" :
+     null);
 
   const bankCanonical =
     pm?.bankCanonical
       ? String(pm.bankCanonical).toUpperCase()
       : (pm?.bank || pm?.name)
         ? String(pm.bank || pm.name)
-          .toUpperCase()
-          .replace(/[^A-Z0-9]+/g, "_")
-          .replace(/^_+|_+$/g, "")
+            .toUpperCase()
+            .replace(/[^A-Z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
         : null;
 
   return {
@@ -647,23 +563,16 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
-  const selNorm = sel
-    .map(normalizeSelectedPM)
-    .filter(x => x.typeNorm && x.bankCanonical);
-
+  const selNorm = sel.map(normalizeSelectedPM).filter(x => x.typeNorm && x.bankCanonical);
   if (selNorm.length === 0) return false;
 
-  const offerNorm = offerPMs
-    .map(normalizeOfferPM)
-    .filter(x => x.typeNorm && x.bankCanonical);
-
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter(x => x.typeNorm && x.bankCanonical);
   if (offerNorm.length === 0) return false;
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
       if (s.typeNorm === o.typeNorm && s.bankCanonical === o.bankCanonical) return true;
 
-      // EMI special-case: EMI selection can match EMI-only credit-card offers (same bank)
       if (
         s.typeNorm === "EMI" &&
         s.bankCanonical === o.bankCanonical &&
@@ -676,101 +585,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   return false;
 }
-
-// --------------------
-// Unified evaluator (the single truth)
-// --------------------
-function evaluateOfferForFlight({
-  offer,
-  portal,
-  discountBaseAmount,     // price we discount against (single pax flight price)
-  eligibilityAmount,      // amount to check minTxn against (total booking)
-  selectedPaymentMethods,
-  isDomestic
-}) {
-  if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
-
-  if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
-  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
-  if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
-  if (!offerScopeMatchesTrip(offer, isDomestic)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
-
-  const offerPMs = extractOfferPaymentMethods(offer);
-  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
-
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return { ok: false, reasons: ["NO_SELECTED_PAYMENT_METHODS"] };
-  if (!offerMatchesSelectedPayment(offer, sel)) return { ok: false, reasons: ["PAYMENT_MISMATCH"] };
-
-  const minTxn = getMinTxnValue(offer);
-  if (Number(eligibilityAmount) < minTxn) return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
-
-  const r = computeDiscountedPrice(offer, discountBaseAmount, isDomestic);
-  const discounted = Number(r?.price);
-
-  if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
-  if (discounted >= discountBaseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
-
-  return { ok: true, discounted, minTxn, meta: r?.meta || null };
-}
-
-// --------------------
-// Trip scope (Domestic vs International)
-// --------------------
-const INDIA_IATA = new Set([
-  // Major Indian airports (add more anytime)
-  "DEL","BOM","BLR","HYD","MAA","CCU","PNQ","GOI","COK","AMD","JAI","LKO","PAT","BBI",
-  "IXC","IXR","IXB","GAU","TRV","VNS","SXR","IXM","NAG","IDR","RPR","VTZ","BHU","UDR",
-]);
-
-function isDomesticRoute(from, to) {
-  const a = String(from || "").trim().toUpperCase();
-  const b = String(to || "").trim().toUpperCase();
-  if (!a || !b) return true; // safe default (keeps existing behavior)
-  return INDIA_IATA.has(a) && INDIA_IATA.has(b);
-}
-
-// --------------------
-// Best offer picker (fixed signature)
-// --------------------
-function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, trip) {
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return null;
-
-  const isDomestic = isDomesticRoute(trip?.from, trip?.to);
-
-  let best = null;
-
-  for (const offer of offers) {
-    const ev = evaluateOfferForFlight({
-      offer,
-      portal,
-      baseAmount,
-      selectedPaymentMethods: sel,
-      isDomestic,
-    });
-
-    if (!ev.ok) continue;
-
-    if (!best || ev.discounted < best.finalPrice) {
-      best = {
-        finalPrice: ev.discounted,
-        offer,
-        explain: ev.meta
-          ? {
-              type: "ESTIMATED_DISCOUNT",
-              message: `Estimated ${ev.meta.appliedPercent}% off (offer says up to ${ev.meta.statedPercent}%)`,
-              confidence: "LOW",
-              method: ev.meta.method,
-            }
-          : null,
-      };
-    }
-  }
-
-  return best;
-}
-
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
@@ -806,6 +620,114 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   return null;
 }
 
+/**
+ * ✅ FIX: Scope matching must not reject generic offers.
+ * Only reject when it clearly says "international flights" (not just "international").
+ */
+function offerScopeMatchesTrip(offer, isDomestic) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
+
+  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
+  const catBlob = Array.isArray(cats)
+    ? normalizeText(cats.map(c => String(c || "")).join(" "))
+    : "";
+
+  const combined = `${blob} ${catBlob}`.trim();
+
+  if (!isDomestic) return true; // Phase-1: no strict handling
+
+  const hasDomesticFlights = /\bdomestic\s+flight(s)?\b/.test(combined);
+  const hasInternationalFlights = /\binternational\s+flight(s)?\b/.test(combined);
+
+  // Only block when clearly international flights only
+  if (hasInternationalFlights && !hasDomesticFlights) return false;
+
+  // Keep obvious international city heuristic (optional)
+  const obviousInternational = [
+    "krabi", "siem reap", "cebu", "bangkok", "singapore", "dubai",
+    "kuala lumpur", "ho chi minh", "phuket", "bali",
+  ].map(normalizeText);
+
+  if (obviousInternational.some(k => combined.includes(k)) && !combined.includes("domestic")) {
+    return false;
+  }
+
+  return true;
+}
+
+// --------------------
+// Core evaluator (single source of truth)
+// --------------------
+function evaluateOfferForFlight({
+  offer,
+  portal,
+  baseAmount,            // fare price (single passenger)
+  eligibilityAmount,     // fare * passengers (used for minTxn)
+  selectedPaymentMethods,
+  isDomestic,
+}) {
+  if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
+
+  if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+  if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
+  if (!offerScopeMatchesTrip(offer, isDomestic)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+
+  const offerPMs = extractOfferPaymentMethods(offer);
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
+
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return { ok: false, reasons: ["NO_SELECTED_PAYMENT_METHODS"] };
+  if (!offerMatchesSelectedPayment(offer, sel)) return { ok: false, reasons: ["PAYMENT_MISMATCH"] };
+
+  const minTxn = getMinTxnValue(offer);
+  const amt = Number(eligibilityAmount ?? baseAmount);
+  if (Number.isFinite(minTxn) && minTxn > 0 && Number(amt) < minTxn) {
+    return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
+  }
+
+  const result = computeDiscountedPrice(offer, baseAmount, isDomestic);
+  const discounted = typeof result === "number" ? result : result?.price;
+
+  if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
+  if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
+
+  return { ok: true, discounted, minTxn };
+}
+
+function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount) {
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (sel.length === 0) return null;
+
+  let best = null;
+
+  for (const offer of offers) {
+    const isDomestic = true; // Phase-1 assumption
+
+    const ev = evaluateOfferForFlight({
+      offer,
+      portal,
+      baseAmount,
+      eligibilityAmount,
+      selectedPaymentMethods: sel,
+      isDomestic,
+    });
+
+    if (!ev.ok) continue;
+
+    if (!best || ev.discounted < best.finalPrice) {
+      best = {
+        finalPrice: ev.discounted,
+        offer,
+      };
+    }
+  }
+
+  return best;
+}
+
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit = 5) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return [];
@@ -819,18 +741,12 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, limit 
     if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
     const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
-    const flat =
-      offer?.flatDiscountAmount ??
-      offer?.parsedFields?.flatDiscountAmount ??
-      offer?.discountAmount ??
-      offer?.parsedFields?.discountAmount ??
-      null;
+    const flat = offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null;
 
     const hasDeterministicSignal =
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
-    // If deterministic, it could be applied, so exclude from "info offers"
     if (hasDeterministicSignal) continue;
 
     info.push({
@@ -854,19 +770,15 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
 
   const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
-
-    // Eligibility uses total booking amount (your intention)
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
-    // ✅ fixed signature
     const best = pickBestOfferForPortal(
-  offers,
-  portal,
-  portalBase,
-  selectedPaymentMethods,
-  { from: flight.from, to: flight.to }
-);
-
+      offers,
+      portal,
+      portalBase,
+      selectedPaymentMethods,
+      eligibilityAmount
+    );
 
     const matchedPaymentLabel = best
       ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
@@ -874,15 +786,15 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
 
     const bestDeal = best
       ? {
-        portal,
-        finalPrice: best.finalPrice,
-        basePrice: portalBase,
-        applied: true,
-        code: best.offer?.couponCode || best.offer?.code || best.offer?.parsedFields?.couponCode || best.offer?.parsedFields?.code || null,
-        title: best.offer?.title || null,
-        rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
-        constraints: extractOfferConstraints(best.offer),
-      }
+          portal,
+          finalPrice: best.finalPrice,
+          basePrice: portalBase,
+          applied: true,
+          code: best.offer?.couponCode || best.offer?.code || best.offer?.parsedFields?.couponCode || best.offer?.parsedFields?.code || null,
+          title: best.offer?.title || null,
+          rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
+          constraints: extractOfferConstraints(best.offer),
+        }
       : null;
 
     return {
@@ -913,25 +825,25 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
     portalPrices,
     bestDeal: bestPortal
       ? {
-        portal: bestPortal.portal,
-        finalPrice: bestPortal.finalPrice,
-        basePrice: bestPortal.basePrice,
-        applied: bestPortal.applied,
-        code: bestPortal.code,
-        title: bestPortal.title,
-        rawDiscount: bestPortal.rawDiscount,
-        constraints: bestPortal.constraints || null,
-        paymentLabel: bestPortal.paymentLabel || null,
-        explain: bestPortal?.applied
-          ? `Best price is on ${bestPortal.portal} because ${bestPortal.code || "an offer"} reduced ₹${bestPortal.basePrice} → ₹${bestPortal.finalPrice}`
-          : null,
-      }
+          portal: bestPortal.portal,
+          finalPrice: bestPortal.finalPrice,
+          basePrice: bestPortal.basePrice,
+          applied: bestPortal.applied,
+          code: bestPortal.code,
+          title: bestPortal.title,
+          rawDiscount: bestPortal.rawDiscount,
+          constraints: bestPortal.constraints || null,
+          paymentLabel: bestPortal.paymentLabel || null,
+          explain: bestPortal?.applied
+            ? `Best price is on ${bestPortal.portal} because ${bestPortal.code || "an offer"} reduced ₹${bestPortal.basePrice} → ₹${bestPortal.finalPrice}`
+            : null,
+        }
       : null,
   };
 }
 
 // --------------------
-// Debug helpers
+// Routes
 // --------------------
 function getCouponCode(offer) {
   return (
@@ -943,11 +855,6 @@ function getCouponCode(offer) {
   );
 }
 
-// --------------------
-// Routes
-// --------------------
-
-// Payment options must come from Mongo (no static fallback list)
 app.get("/payment-options", async (req, res) => {
   const meta = { usedFallback: false };
 
@@ -1048,8 +955,10 @@ app.get("/payment-options", async (req, res) => {
     const options = {};
     for (const [k, set] of Object.entries(groups)) {
       const arr = Array.from(set).filter(Boolean);
+
       const anyLabel = `Any ${k}`;
       const hasSpecific = arr.some(x => x !== anyLabel);
+
       options[k] = (hasSpecific ? arr.filter(x => x !== anyLabel) : arr)
         .sort((a, b) => a.localeCompare(b));
     }
@@ -1090,9 +999,11 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Load offers ONCE per request
     const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
+    // Outbound
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
@@ -1101,14 +1012,11 @@ app.post("/search", async (req, res) => {
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
     const outboundFlights = [];
-for (const f of outFlightsLimited) {
-  // Attach route context onto the flight object
-  outboundFlights.push(
-    await applyOffersToFlight({ ...f, from, to }, selectedPaymentMethods, offers, adults)
-  );
-}
+    for (const f of outFlightsLimited) {
+      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults));
+    }
 
-
+    // Return
     let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
       const retRes = await fetchOneWayTrip({ from: to, to: from, date: retDate, adults, cabin, currency });
@@ -1119,14 +1027,10 @@ for (const f of outFlightsLimited) {
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
 
       const enriched = [];
-for (const f of retFlightsLimited) {
-  // Return leg is reverse route: to -> from
-  enriched.push(
-    await applyOffersToFlight({ ...f, from: to, to: from }, selectedPaymentMethods, offers, adults)
-  );
-}
-returnFlights = enriched;
-
+      for (const f of retFlightsLimited) {
+        enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults));
+      }
+      returnFlights = enriched;
     }
 
     res.json({ meta, outboundFlights, returnFlights });
@@ -1140,7 +1044,6 @@ returnFlights = enriched;
   }
 });
 
-// Debug: payment match
 app.get("/debug/payment-match", async (req, res) => {
   try {
     const portal = String(req.query.portal || "Cleartrip");
@@ -1152,7 +1055,7 @@ app.get("/debug/payment-match", async (req, res) => {
     const col = await getOffersCollection();
     const offers = await col.find(
       { "sourceMetadata.sourcePortal": portal },
-      { projection: { _id: 0, title: 1, rawDiscount: 1, eligiblePaymentMethods: 1, offerCategories: 1, validityPeriod: 1 } }
+      { projection: { _id: 0, title: 1, rawDiscount: 1, eligiblePaymentMethods: 1, offerCategories: 1, validityPeriod: 1, sourceMetadata: 1 } }
     ).toArray();
 
     const sample = offers.slice(0, 20).map(o => ({
@@ -1161,6 +1064,8 @@ app.get("/debug/payment-match", async (req, res) => {
       matches: offerMatchesSelectedPayment(o, selectedPaymentMethods),
       isFlight: isFlightOffer(o),
       expired: isOfferExpired(o),
+      portalMatch: offerAppliesToPortal(o, portal),
+      scopeOK: offerScopeMatchesTrip(o, true),
     }));
 
     const matchCount = offers.filter(o => offerMatchesSelectedPayment(o, selectedPaymentMethods)).length;
@@ -1177,7 +1082,7 @@ app.get("/debug/payment-match", async (req, res) => {
   }
 });
 
-// Debug: why not applied (now uses evaluateOfferForFlight)
+// ✅ Debug now uses the SAME evaluator as /search
 app.get("/debug/why-not-applied", async (req, res) => {
   try {
     const portal = String(req.query.portal || "Goibibo");
@@ -1186,10 +1091,10 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const baseAmount = Number(req.query.amount || 9000) || 9000;
 
     const selectedPaymentMethods = [{ type, name: bank }];
-    const isDomestic = true;
 
     const col = await getOffersCollection();
 
+    // Only portal offers (same as your earlier debug)
     const offers = await col.find(
       { "sourceMetadata.sourcePortal": portal },
       {
@@ -1208,7 +1113,8 @@ app.get("/debug/why-not-applied", async (req, res) => {
           paymentMethods: 1,
           terms: 1,
           offerSummary: 1,
-          sourceMetadata: 1
+          sourceMetadata: 1,
+          sourcePortal: 1,
         }
       }
     ).toArray();
@@ -1216,18 +1122,22 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const stats = {
       portal,
       total: offers.length,
+      ok: 0,
+      notOk: 0,
       isFlight: 0,
       notExpired: 0,
       matchesPayment: 0,
+      portalMatch: 0,
+      scopeOK: 0,
       minTxnOK: 0,
-      wouldApplyNow: 0
+      wouldApplyNow: 0,
     };
 
     const samples = [];
 
     for (const o of offers) {
-      const flightOk = isFlightOffer(o);
-      if (flightOk) stats.isFlight++;
+      const isFlight = isFlightOffer(o);
+      if (isFlight) stats.isFlight++;
 
       const expired = isOfferExpired(o);
       if (!expired) stats.notExpired++;
@@ -1235,36 +1145,42 @@ app.get("/debug/why-not-applied", async (req, res) => {
       const payOk = offerMatchesSelectedPayment(o, selectedPaymentMethods);
       if (payOk) stats.matchesPayment++;
 
+      const pOk = offerAppliesToPortal(o, portal);
+      if (pOk) stats.portalMatch++;
+
+      const scOk = offerScopeMatchesTrip(o, true);
+      if (scOk) stats.scopeOK++;
+
       const minTxn = getMinTxnValue(o);
-      const minOk = Number(baseAmount) >= minTxn;
+      const minOk = !(minTxn > 0 && baseAmount < minTxn);
       if (minOk) stats.minTxnOK++;
 
       const ev = evaluateOfferForFlight({
         offer: o,
         portal,
-        discountBaseAmount: baseAmount,
+        baseAmount,
         eligibilityAmount: baseAmount,
         selectedPaymentMethods,
-        isDomestic
+        isDomestic: true,
       });
 
-      if (ev.ok) stats.wouldApplyNow++;
+      if (ev.ok) {
+        stats.ok++;
+        stats.wouldApplyNow++;
+      } else {
+        stats.notOk++;
+      }
 
       if (samples.length < 25 && payOk) {
         samples.push({
           title: o.title || null,
           code: getCouponCode(o),
-          couponCode: o.couponCode || null,
           rawDiscount: o.rawDiscount || null,
-          expired,
-          isFlight: flightOk,
           minTransactionValue: minTxn,
-          minTxnOK: minOk,
-          extractedPMs: extractOfferPaymentMethods(o),
+          expired,
+          isFlight,
           wouldApplyNow: ev.ok,
           failReasons: ev.ok ? [] : ev.reasons,
-          discountedPrice: ev.ok ? ev.discounted : null,
-          offerCategories: o.offerCategories || o?.parsedFields?.offerCategories || null,
         });
       }
     }
