@@ -431,23 +431,29 @@ function isFlightOffer(offer) {
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats) ? cats.map((c) => String(c || "").toLowerCase()).join(" | ") : "";
 
-  // Positive flight signals
+  const combined = `${text} ${catBlob}`;
+
+  // Strong positive signals
   const POS_RE =
-    /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b|\bair\s*ticket(s)?\b/;
+    /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b|\bair\s*ticket(s)?\b|\bflights?\s*&\s*hotels?\b/;
 
-  // Negative-only categories (reject ONLY if there is NO flight signal)
+  // Strong negative-only signals (hotel/bus/cab/train etc.)
   const NEG_RE =
-    /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
+    /\bhotel(s)?\b|\bdomestic\s+hotel(s)?\b|\binternational\s+hotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bholiday(s)?\b|\btourism\b|\battraction(s)?\b/;
 
-  const hasFlightSignal = POS_RE.test(text) || POS_RE.test(catBlob);
+  const hasFlightSignal = POS_RE.test(combined);
+  const hasNonFlightSignal = NEG_RE.test(combined);
+
+  // If it clearly mentions flights, allow even if it also mentions hotels
   if (hasFlightSignal) return true;
 
-  const hasOnlyNonFlightSignal = NEG_RE.test(text) || NEG_RE.test(catBlob);
-  if (hasOnlyNonFlightSignal) return false;
+  // If it doesn't mention flights but mentions hotels/bus/cab/train etc, reject
+  if (hasNonFlightSignal) return false;
 
-  // Default: keep it (many offers don't explicitly say "flight" but are travel)
-  return true;
+  // Otherwise: be conservative and reject (prevents "hotel offer applied to flight")
+  return false;
 }
+
 
 
 function isOfferExpired(offer) {
