@@ -1078,6 +1078,9 @@ app.post("/search", async (req, res) => {
     const currency = "INR";
 
     const selectedPaymentMethods = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
+    meta.selectedPaymentMethods = selectedPaymentMethods;
+meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
+
 
     if (!from || !to || !outDate) {
       return res.status(400).json({
