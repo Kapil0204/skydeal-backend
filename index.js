@@ -354,39 +354,34 @@ function offerAppliesToPortal(offer, portalName) {
 function isFlightOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
 
+  // Prefer structured categories if available
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  if (Array.isArray(cats) && cats.length) {
-    const catBlob = cats.map(c => String(c || "").toLowerCase()).join(" | ");
+  const catBlob = Array.isArray(cats) ? cats.map(c => String(c || "").toLowerCase()).join(" | ") : "";
 
-    if (/\bhotel(s)?\b/.test(catBlob)) return false;
-    if (/\bbus(es)?\b/.test(catBlob)) return false;
-    if (/\btourism\b/.test(catBlob)) return false;
-    if (/\battraction(s)?\b/.test(catBlob)) return false;
-    if (/\bholiday(s)?\b/.test(catBlob)) return false;
-    if (/\bcab(s)?\b/.test(catBlob)) return false;
-    if (/\btrain(s)?\b/.test(catBlob)) return false;
+  // -----------------------------
+  // Strong negatives (if these appear anywhere, it's NOT a flight offer)
+  // -----------------------------
+  const NEG_RE = /\bhotel(s)?\b|\bbus(es)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bcab(s)?\b|\btrain(s)?\b/;
 
-    if (/\bflight(s)?\b/.test(catBlob)) return true;
-    if (/\bairfare\b/.test(catBlob)) return true;
-    if (/\binternational\s+flight(s)?\b/.test(catBlob)) return true;
-    if (/\bdomestic\s+flight(s)?\b/.test(catBlob)) return true;
-  }
+  if (NEG_RE.test(text) || NEG_RE.test(catBlob)) return false;
 
-  if (/\bhotel(s)?\b/.test(text)) return false;
-  if (/\bbus(es)?\b/.test(text)) return false;
-  if (/\btourism\b/.test(text)) return false;
-  if (/\battraction(s)?\b/.test(text)) return false;
-  if (/\bholiday(s)?\b/.test(text)) return false;
-  if (/\bcab(s)?\b/.test(text)) return false;
-  if (/\btrain(s)?\b/.test(text)) return false;
+  // -----------------------------
+  // Strong positives (explicit flight keywords)
+  // -----------------------------
+  const POS_RE = /\bflight(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
 
-  if (/\bflight(s)?\b/.test(text)) return true;
-  if (/\bairfare\b/.test(text)) return true;
-  if (/\bdomestic\s+flight(s)?\b/.test(text)) return true;
-  if (/\binternational\s+flight(s)?\b/.test(text)) return true;
+  if (POS_RE.test(text)) return true;
+  if (POS_RE.test(catBlob)) return true;
 
-  return false;
+  // -----------------------------
+  // ✅ KEY BEHAVIOR CHANGE:
+  // Many OTA "payment" offers are generic and don't say "flight".
+  // If we cannot prove it's non-flight (negatives above), we treat it as a flight offer.
+  // This prevents dropping legitimate CC/EMI discounts.
+  // -----------------------------
+  return true;
 }
+
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
