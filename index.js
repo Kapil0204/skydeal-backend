@@ -485,12 +485,36 @@ function isHotelOnlyOffer(offer) {
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate || null;
+    const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate || null;
+
+  function parseDateLoose(x) {
+    const s = String(x || "").trim();
+    if (!s) return null;
+
+    // ISO / RFC
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+      const d = new Date(s);
+      return isNaN(d) ? null : d;
+    }
+
+    // DD/MM/YYYY or DD-MM-YYYY
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (m) {
+      const dd = Number(m[1]), mm = Number(m[2]), yy = Number(m[3]);
+      const d = new Date(Date.UTC(yy, mm - 1, dd));
+      return isNaN(d) ? null : d;
+    }
+
+    // "31 Dec 2025", "31st Dec 2025"
+    const d2 = new Date(s.replace(/(\d+)(st|nd|rd|th)/gi, "$1"));
+    return isNaN(d2) ? null : d2;
+  }
 
   if (end) {
-    const t = new Date(end);
-    if (!isNaN(t)) return t.getTime() < Date.now();
+    const t = parseDateLoose(end);
+    if (t) return t.getTime() < Date.now();
   }
+
 
   const blobs = [];
   if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
@@ -530,11 +554,40 @@ function isOfferExpired(offer) {
   return latest.getTime() < Date.now();
 }
 
+function inferMinTxnFromText(offer) {
+  const blob = String(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`
+  );
+
+  // Only trust amounts when they appear near min txn language
+  const patterns = [
+    /min(?:imum)?\s*(?:txn|transaction|booking|purchase)\s*(?:amount|value)?[^₹\d]{0,30}(?:₹|rs\.?|inr)?\s*([\d,]{3,})/i,
+    /valid\s*on\s*(?:minimum)?\s*(?:transaction|booking)\s*(?:amount|value)?[^₹\d]{0,30}(?:₹|rs\.?|inr)?\s*([\d,]{3,})/i,
+    /(?:minimum|min\.)\s*(?:amount|value)\s*[:\-]?\s*(?:₹|rs\.?|inr)?\s*([\d,]{3,})/i,
+  ];
+
+  for (const re of patterns) {
+    const m = blob.match(re);
+    if (m && m[1]) {
+      const n = Number(String(m[1]).replace(/,/g, ""));
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  return 0;
+}
+
 function getMinTxnValue(offer) {
   const v = offer?.minTransactionValue ?? offer?.parsedFields?.minTransactionValue ?? null;
   const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+
+  // If Mongo has a real value, trust it
+  if (Number.isFinite(n) && n > 0) return n;
+
+  // Otherwise infer from text (helps Goibibo-style offers)
+  const inferred = inferMinTxnFromText(offer);
+  return Number.isFinite(inferred) ? inferred : 0;
 }
+
 
 // --------------------
 // Discount compute
