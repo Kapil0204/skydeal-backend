@@ -470,8 +470,6 @@ function isFlightOffer(offer) {
   return false;
 }
 
-
-
 function isHotelOnlyOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
 
@@ -485,7 +483,13 @@ function isHotelOnlyOffer(offer) {
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-    const end = offer?.validityPeriod?.endDate || offer?.parsedFields?.validityPeriod?.endDate || null;
+  // ✅ FIX #1: Prefer structured booking validity end-date (validityPeriod.to)
+  const toDate =
+    offer?.validityPeriod?.to ||
+    offer?.parsedFields?.validityPeriod?.to ||
+    offer?.validityPeriod?.endDate ||
+    offer?.parsedFields?.validityPeriod?.endDate ||
+    null;
 
   function parseDateLoose(x) {
     const s = String(x || "").trim();
@@ -510,12 +514,21 @@ function isOfferExpired(offer) {
     return isNaN(d2) ? null : d2;
   }
 
-  if (end) {
-    const t = parseDateLoose(end);
-    if (t) return t.getTime() < Date.now();
+  if (toDate) {
+    const t = parseDateLoose(toDate);
+    if (t) {
+      // Compare with TODAY (booking validity), normalize to day boundary
+      const end = new Date(t);
+      end.setHours(23, 59, 59, 999);
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      return end.getTime() < today.getTime();
+    }
   }
 
-
+  // (kept) fallback to text-based date inference if no structured validity end-date
   const blobs = [];
   if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
   if (offer?.parsedFields?.validityPeriod?.raw) blobs.push(String(offer.parsedFields.validityPeriod.raw));
@@ -551,7 +564,15 @@ function isOfferExpired(offer) {
   }
 
   if (!latest) return false;
-  return latest.getTime() < Date.now();
+
+  // Compare with TODAY (booking validity)
+  const end = new Date(latest);
+  end.setHours(23, 59, 59, 999);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return end.getTime() < today.getTime();
 }
 
 function inferMinTxnFromText(offer) {
@@ -566,28 +587,64 @@ function inferMinTxnFromText(offer) {
     /(?:minimum|min\.)\s*(?:amount|value)\s*[:\-]?\s*(?:₹|rs\.?|inr)?\s*([\d,]{3,})/i,
   ];
 
+  // ✅ FIX #2: Flight-safe inference:
+  // If coupon appears across verticals (Flights + Hotels), don't accidentally pick hotel min amount.
+  // We only accept a match if a nearby window mentions "flight(s)" and does NOT mention "hotel(s)".
+  const lower = blob.toLowerCase();
   for (const re of patterns) {
-    const m = blob.match(re);
+    const m = re.exec(blob);
     if (m && m[1]) {
+      const idx = m.index != null ? m.index : -1;
+      const winStart = Math.max(0, idx - 120);
+      const winEnd = Math.min(lower.length, idx + 200);
+      const windowTxt = lower.slice(winStart, winEnd);
+
+      const hasFlightNearby = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(windowTxt);
+      const hasHotelNearby = /\bhotel(s)?\b/.test(windowTxt);
+
+      if (!hasFlightNearby || hasHotelNearby) continue;
+
       const n = Number(String(m[1]).replace(/,/g, ""));
       if (Number.isFinite(n) && n > 0) return n;
     }
   }
+
   return 0;
 }
 
 function getMinTxnValue(offer) {
+  // ✅ FIX #2: Prefer tiered min transaction values (bestTierForDisplay / discountTiers)
+  const tierMin =
+    offer?.bestTierForDisplay?.minTransactionValue ??
+    offer?.parsedFields?.bestTierForDisplay?.minTransactionValue ??
+    null;
+
+  const tierMinNum = Number(tierMin);
+  if (Number.isFinite(tierMinNum) && tierMinNum > 0) return tierMinNum;
+
+  const tiers =
+    offer?.discountTiers ??
+    offer?.parsedFields?.discountTiers ??
+    null;
+
+  if (Array.isArray(tiers) && tiers.length > 0) {
+    const mins = tiers
+      .map((t) => Number(t?.minTransactionValue))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    if (mins.length > 0) return Math.min(...mins);
+  }
+
   const v = offer?.minTransactionValue ?? offer?.parsedFields?.minTransactionValue ?? null;
   const n = Number(v);
 
   // If Mongo has a real value, trust it
   if (Number.isFinite(n) && n > 0) return n;
 
-  // Otherwise infer from text (helps Goibibo-style offers)
+  // Otherwise infer from text (flight-safe; prevents picking hotel minimum)
   const inferred = inferMinTxnFromText(offer);
   return Number.isFinite(inferred) ? inferred : 0;
 }
-
 
 // --------------------
 // Discount compute
@@ -837,7 +894,6 @@ function evaluateOfferForFlight({
   if (mentionsNonFlight && !mentionsFlight) {
     return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
   }
-
 
   // ✅ NEW: reject explicit hotel-only offers (prevents hotel offers applying to flights)
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
@@ -1293,3 +1349,4 @@ app.post("/search", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
+
