@@ -1248,7 +1248,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
       if (ok) stats.ok++;
       else stats.notOk++;
 
-      if (samples.length < 10 && (wouldApplyNow || ok)) {
+      if (samples.length < 10 && (wouldApplyNow || ok || expired)) { 
         samples.push({
           title: offer?.title || null,
           code: offer?.couponCode || offer?.code || null,
