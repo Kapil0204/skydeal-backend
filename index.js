@@ -39,7 +39,7 @@ function toISO(d) {
   const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); // dd/mm/yyyy
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   const t = new Date(d);
-  if (!isNaN(t)) return t.toISOString().slice(0, 10);
+  if (!isNaN(t)) return t.toISOString().slice(0, limit);
   return "";
 }
 
@@ -1003,7 +1003,7 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
   let best = null;
 
-  for (const offer of offers) {
+  for (const offer of filteredOffers) {
     const isDomestic = true; // Phase-1 assumption
 
     const ev = evaluateOfferForFlight({
@@ -1245,6 +1245,8 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const bank = String(req.query.bank || "").trim();
     const type = String(req.query.type || "").trim(); // e.g. EMI
     const amount = Number(req.query.amount || 0) || 0;
+    const q = req.query.q ? String(req.query.q).trim() : null;
+const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
     if (!portal || !bank || !type) {
       return res.status(400).json({ error: "Missing portal/bank/type" });
@@ -1257,6 +1259,12 @@ app.get("/debug/why-not-applied", async (req, res) => {
       { "sourceMetadata.sourcePortal": portal },
       { projection: { _id: 0 } }
     ).toArray();
+    const filteredOffers = q
+  ? offers.filter((o) => {
+      const blob = `${o?.title || ""} ${o?.rawDiscount || ""} ${o?.couponCode || o?.code || ""} ${o?.offerSummary?.headline || ""}`;
+      return blob.toLowerCase().includes(q.toLowerCase());
+    })
+  : offers;
 
     const stats = {
       portal,
@@ -1271,11 +1279,12 @@ app.get("/debug/why-not-applied", async (req, res) => {
       minTxnOK: 0,
       wouldApplyNow: 0,
       hotelOnly: 0, // ✅ NEW stat
+      inferredOnly: 0,
     };
 
     const samples = [];
 
-    for (const offer of offers) {
+    for (const offer of filteredOffers) {
       const failReasons = [];
 
       const flight = isFlightOffer(offer);
@@ -1327,7 +1336,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
       if (ok) stats.ok++;
       else stats.notOk++;
 
-      if (samples.length < 10 && (wouldApplyNow || ok || expired)) { 
+      if (samples.length < limit && (wouldApplyNow || ok || expired)) { 
         samples.push({
           title: offer?.title || null,
           code: offer?.couponCode || offer?.code || null,
@@ -1337,13 +1346,21 @@ app.get("/debug/why-not-applied", async (req, res) => {
           isFlight: !!flight,
                 inferredOnly: 0,
           hotelOnly: !!hotelOnly,
+          inferredOnly: inferredOnly,
           wouldApplyNow,
           failReasons,
         });
       }
     }
 
-    res.json({ selectedPaymentMethods, baseAmount: amount, stats, samples });
+    res.json({
+  selectedPaymentMethods,
+  baseAmount: amount,
+  q,
+  evaluatedCount: filteredOffers.length,
+  stats,
+  samples
+});
   } catch (e) {
     res.status(500).json({ error: e?.message || "debug failed" });
   }
@@ -1384,6 +1401,16 @@ app.post("/search", async (req, res) => {
     // Load offers ONCE per request
     const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    let filteredOffers = offers;
+
+if (q) {
+  const regex = new RegExp(q, "i");
+  filteredOffers = offers.filter((o) =>
+    regex.test(o.title || "") ||
+    regex.test(o.rawDiscount || "") ||
+    regex.test(o.couponCode || "")
+  );
+}
 
     // Outbound
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
