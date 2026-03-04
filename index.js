@@ -358,6 +358,67 @@ function inferPaymentMethodsFromText(offer) {
   }
   return out;
 }
+function extractOfferPaymentMethodsNoInference(offer) {
+  if (!offer || typeof offer !== "object") return [];
+
+  let out = [];
+
+  if (Array.isArray(offer.eligiblePaymentMethods) && offer.eligiblePaymentMethods.length > 0) {
+    out = offer.eligiblePaymentMethods
+      .filter((pm) => pm && typeof pm === "object")
+      .map((pm) => ({
+        type: pm.type || null,
+        bank: pm.bank || null,
+        network: pm.network || null,
+        methodCanonical: pm.methodCanonical || null,
+        bankCanonical: pm.bankCanonical || null,
+        networkCanonical: pm.networkCanonical || null,
+        cardVariant: pm.cardVariant || null,
+        emiOnly: pm.emiOnly === true,
+        tenureMonths: pm.tenureMonths ?? null,
+        conditions: pm.conditions || null,
+        raw: pm.raw || null,
+        inferred: pm.inferred === true, // if DB ever has it
+      }))
+      // ✅ HARD FILTER: remove null-only PM rows like your Malaysia example
+      .filter((pm) => {
+        const hasAny =
+          (pm.type && String(pm.type).trim() !== "") ||
+          (pm.methodCanonical && String(pm.methodCanonical).trim() !== "") ||
+          (pm.bank && String(pm.bank).trim() !== "") ||
+          (pm.bankCanonical && String(pm.bankCanonical).trim() !== "");
+        return hasAny;
+      });
+  } else if (Array.isArray(offer.paymentMethods) && offer.paymentMethods.length > 0) {
+    out = offer.paymentMethods
+      .filter((pm) => pm && typeof pm === "object")
+      .map((pm) => ({
+        type: pm.type || null,
+        bank: pm.bank || pm.name || null,
+        network: pm.network || null,
+        methodCanonical: pm.methodCanonical || null,
+        bankCanonical: pm.bankCanonical || null,
+        networkCanonical: pm.networkCanonical || null,
+        cardVariant: pm.cardVariant || null,
+        emiOnly: pm.emiOnly === true,
+        tenureMonths: pm.tenureMonths ?? null,
+        conditions: pm.conditions || null,
+        raw: pm.raw || null,
+        inferred: pm.inferred === true,
+      }))
+      .filter((pm) => {
+        const hasAny =
+          (pm.type && String(pm.type).trim() !== "") ||
+          (pm.methodCanonical && String(pm.methodCanonical).trim() !== "") ||
+          (pm.bank && String(pm.bank).trim() !== "") ||
+          (pm.bankCanonical && String(pm.bankCanonical).trim() !== "");
+        return hasAny;
+      });
+  }
+
+  // ❌ IMPORTANT: no inferPaymentMethodsFromText() here
+  return out || [];
+}
 
 function extractOfferPaymentMethods(offer) {
   if (!offer || typeof offer !== "object") return [];
@@ -782,7 +843,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return false;
 
-  const offerPMs = extractOfferPaymentMethods(offer);
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
 
   const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
@@ -818,7 +879,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
 
-  const offerPMs = extractOfferPaymentMethods(offer);
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
   if (offerPMs.length === 0) return null;
 
   const sel = selectedPaymentMethods.map((x) => {
@@ -913,7 +974,7 @@ function evaluateOfferForFlight({
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
-  const offerPMs = extractOfferPaymentMethods(offer);
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
     // ✅ Audit-1 safeguard:
   // If an offer has ONLY inferred payment methods (no explicit PMs in JSON),
