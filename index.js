@@ -1268,7 +1268,8 @@ const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
     const stats = {
       portal,
-      total: offers.length,
+      portalTotal: offers.length,
+      total: filteredOffers.length,
       ok: 0,
       notOk: 0,
       isFlight: 0,
