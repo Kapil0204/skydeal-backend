@@ -854,12 +854,10 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      if (o.bankCanonical) {
-        if (s.bankCanonical !== o.bankCanonical) continue;
-      } else {
-        const blob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""}`.toUpperCase();
-        if (!blob.includes(String(s.nameRaw || "").toUpperCase().split(" ")[0])) continue;
-      }
+            // ✅ Phase-1 strict rule: only bank-specific offers can match
+      // If offer doesn't specify a bank, we don't apply it to a selected bank.
+      if (!o.bankCanonical) continue;
+      if (s.bankCanonical !== o.bankCanonical) continue;
 
       if (s.typeNorm === o.typeNorm) return true;
 
