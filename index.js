@@ -522,8 +522,10 @@ function isFlightOffer(offer) {
     /\bhotel(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivities?\b|\bvisa\b|\bforex\b/;
 
   // Strong flight signals (must appear in CORE text)
+    // Strong flight signals (must appear in CORE text)
+  // ✅ Added airline+fare combo to catch titles like "Malaysia Airlines Exclusive Fares"
   const FLIGHT_CORE_RE =
-    /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b/;
+    /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b|\bdomestic\s+flight(s)?\b|\binternational\s+flight(s)?\b|\bairlines?\b.*\bfare(s)?\b|\bfare(s)?\b.*\bairlines?\b/;
 
   const coreHasFlight = FLIGHT_CORE_RE.test(core);
   const coreHasNonFlight = NON_FLIGHT_RE.test(core);
