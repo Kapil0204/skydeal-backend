@@ -294,9 +294,18 @@ function extractOfferConstraints(offer) {
  * ===========================
  */
 function inferPaymentMethodsFromText(offer) {
-  const blob = String(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`
-  ).toLowerCase();
+    // IMPORTANT: inference must be CORE-only.
+  // rawText/terms often contain template noise (nav/footer) and causes false bank matches.
+  const offerSummary =
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : (offer?.parsedFields?.offerSummary ? JSON.stringify(offer.parsedFields.offerSummary) : "");
+
+  const blob = String(`${offer?.title || ""} ${offer?.rawDiscount || ""} ${offerSummary}`)
+    .toLowerCase()
+    .slice(0, 8000);
 
   const inferredTypes = new Set();
   if (/\bno[\s-]?cost\s*emi\b|\bemi\b/.test(blob)) inferredTypes.add("EMI");
@@ -370,6 +379,7 @@ function extractOfferPaymentMethods(offer) {
         tenureMonths: pm.tenureMonths ?? null,
         conditions: pm.conditions || null,
         raw: pm.raw || null,
+        nferred: false, // ✅ explicit, not inferred
       }))
       .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   } else if (Array.isArray(offer.paymentMethods) && offer.paymentMethods.length > 0) {
@@ -387,6 +397,7 @@ function extractOfferPaymentMethods(offer) {
         tenureMonths: pm.tenureMonths ?? null,
         conditions: pm.conditions || null,
         raw: pm.raw || null,
+        inferred: false, // ✅ explicit, not inferred
       }))
       .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   }
@@ -904,6 +915,11 @@ function evaluateOfferForFlight({
 
   const offerPMs = extractOfferPaymentMethods(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
+    // ✅ Audit-1 safeguard:
+  // If an offer has ONLY inferred payment methods (no explicit PMs in JSON),
+  // never apply it as a price-reducing offer. Keep it eligible for infoOffers only.
+  const hasExplicitPM = offerPMs.some((pm) => pm && pm.inferred !== true);
+  if (!hasExplicitPM) return { ok: false, reasons: ["PAYMENT_INFERRED_ONLY"] };
 
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return { ok: false, reasons: ["NO_SELECTED_PAYMENT_METHODS"] };
@@ -1227,6 +1243,10 @@ app.get("/debug/why-not-applied", async (req, res) => {
       const pay = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
       if (pay) stats.matchesPayment++;
       else failReasons.push("PAYMENT_MISMATCH");
+      const offerPMs = extractOfferPaymentMethods(offer);
+      const inferredOnly = Array.isArray(offerPMs) && offerPMs.length > 0 && offerPMs.every((pm) => pm?.inferred === true);
+      if (inferredOnly) stats.inferredOnly++;
+      if (inferredOnly) failReasons.push("PAYMENT_INFERRED_ONLY");
 
       const minTxn = getMinTxnValue(offer);
       if (!minTxn || amount >= minTxn) stats.minTxnOK++;
@@ -1256,6 +1276,7 @@ app.get("/debug/why-not-applied", async (req, res) => {
           minTransactionValue: minTxn || 0,
           expired: !!expired,
           isFlight: !!flight,
+                inferredOnly: 0,
           hotelOnly: !!hotelOnly,
           wouldApplyNow,
           failReasons,
