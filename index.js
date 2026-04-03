@@ -39,7 +39,7 @@ function toISO(d) {
   const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); // dd/mm/yyyy
   if (m) return `${m[3]}-${m[2]}-${m[1]}`;
   const t = new Date(d);
-  if (!isNaN(t)) return t.toISOString().slice(0, limit);
+  if (!isNaN(t)) return t.toISOString().slice(0, 10);
   return "";
 }
 
@@ -1005,7 +1005,7 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
   let best = null;
 
-  for (const offer of filteredOffers) {
+  for (const offer of offers) {
     const isDomestic = true; // Phase-1 assumption
 
     const ev = evaluateOfferForFlight({
@@ -1402,18 +1402,8 @@ app.post("/search", async (req, res) => {
     }
 
     // Load offers ONCE per request
-    const col = await getOffersCollection();
+        const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
-    let filteredOffers = offers;
-
-if (q) {
-  const regex = new RegExp(q, "i");
-  filteredOffers = offers.filter((o) =>
-    regex.test(o.title || "") ||
-    regex.test(o.rawDiscount || "") ||
-    regex.test(o.couponCode || "")
-  );
-}
 
     // Outbound
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
