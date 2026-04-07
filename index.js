@@ -605,13 +605,13 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
 function getOfferTypeLabel(kind) {
   if (kind === "payment") return "Payment offer";
   if (kind === "airline") return "Airline offer";
-  return "Portal offer";
+  return "Portal offer (no payment required)";
 }
 
 function getOfferChannelLabel(offer) {
   const c = extractOfferConstraints(offer);
-  if (c.appOnly) return "App-only";
-  if (c.websiteOnly) return "Website-only";
+  if (c.appOnly) return "Book on app";
+  if (c.websiteOnly) return "Book on website";
   return null;
 }
 
@@ -1182,8 +1182,12 @@ const matchedPaymentLabel =
       rawDiscount: bestDeal?.rawDiscount || null,
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
-      paymentLabel: best && best.offerKind === "payment"
-  ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods))
+      paymentLabel: best
+  ? (
+      best.offerKind === "payment"
+        ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods))
+        : "No payment restriction"
+    )
   : null,
 offerTypeLabel: bestDeal?.offerTypeLabel || null,
 channelLabel: bestDeal?.channelLabel || null,
@@ -1286,7 +1290,23 @@ function normalizeBankDisplayName(raw) {
   if (u === "J&K BANK" || u === "J AND K BANK") return "J&K Bank";
   if (u === "BANK OF INDIA") return "Bank of India";
   if (u === "DBS") return "DBS";
-  if (u === "RUPAY" || u === "RUPAY SELECT" || u === "RUPAY PLATINUM") return "RuPay";
+    if (u === "CRED UPI") return "CRED";
+  if (u === "UPI PAYMENTS" || u === "UPI") return "UPI";
+    if (u === "RUPAY" || u === "RUPAY SELECT" || u === "RUPAY PLATINUM") return "RuPay";
+
+  // Reject obvious non-bank / instruction-like junk
+  if (
+    /transaction only/i.test(s) ||
+    /debit\/credit card/i.test(s) ||
+    /net banking/i.test(s) ||
+    /wallets?/i.test(s) ||
+    /upi/i.test(s) ||
+    /master cards?/i.test(s) ||
+    /eligible cards?/i.test(s) ||
+    /payment option/i.test(s)
+  ) {
+    return null;
+  }
 
   return s.replace(/\s+/g, " ").trim();
 }
