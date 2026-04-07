@@ -440,7 +440,7 @@ function extractOfferPaymentMethods(offer) {
         tenureMonths: pm.tenureMonths ?? null,
         conditions: pm.conditions || null,
         raw: pm.raw || null,
-        nferred: false, // ✅ explicit, not inferred
+        inferred: false, // ✅ explicit, not inferred
       }))
       .filter((pm) => pm.type || pm.methodCanonical || pm.bank || pm.bankCanonical);
   } else if (Array.isArray(offer.paymentMethods) && offer.paymentMethods.length > 0) {
@@ -1055,53 +1055,7 @@ function evaluateOfferForFlight({
     channelLabel: getOfferChannelLabel(offer),
   };
 }
-  if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
-  // ✅ Gate 1: must be a flight offer
-  if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
-  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
-
-    // HARD BLOCK: non-flight verticals must never apply to flight booking
-  // unless "flight/air ticket/airfare" is explicitly mentioned.
-  const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
-  const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
-  const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
-
-  if (mentionsNonFlight && !mentionsFlight) {
-    return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
-  }
-
-  // ✅ NEW: reject explicit hotel-only offers (prevents hotel offers applying to flights)
-  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
-
-  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
-  if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
-  if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
-
-  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
-  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return { ok: false, reasons: ["NO_PAYMENT_METHODS_IN_OFFER"] };
-    // ✅ Audit-1 safeguard:
-  // If an offer has ONLY inferred payment methods (no explicit PMs in JSON),
-  // never apply it as a price-reducing offer. Keep it eligible for infoOffers only.
-  const hasExplicitPM = offerPMs.some((pm) => pm && pm.inferred !== true);
-  if (!hasExplicitPM) return { ok: false, reasons: ["PAYMENT_INFERRED_ONLY"] };
-
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return { ok: false, reasons: ["NO_SELECTED_PAYMENT_METHODS"] };
-  if (!offerMatchesSelectedPayment(offer, sel)) return { ok: false, reasons: ["PAYMENT_MISMATCH"] };
-
-  const minTxn = getMinTxnValue(offer);
-  const amt = Number(eligibilityAmount ?? baseAmount);
-  if (Number.isFinite(minTxn) && minTxn > 0 && Number(amt) < minTxn) {
-    return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
-  }
-
-  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
-  if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
-  if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
-
-  return { ok: true, discounted, minTxn };
-}
 
 function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin, flightAirlineName) {
   let best = null;
