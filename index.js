@@ -554,6 +554,67 @@ function isHotelOnlyOffer(offer) {
   return mentionsHotel && !mentionsFlight;
 }
 
+function isFirstTimeOrNewUserOffer(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  return (
+    /\bnew\s*user(s)?\b/.test(blob) ||
+    /\bnew\s*customer(s)?\b/.test(blob) ||
+    /\bfirst\s*(booking|transaction|order|purchase|trip|flight)\b/.test(blob) ||
+    /\bfirst[-\s]*time\b/.test(blob) ||
+    /\bfirst\s*app\s*booking\b/.test(blob) ||
+    /\bfirst\s*ever\b/.test(blob)
+  );
+}
+
+function hasExplicitOfferPaymentMethods(offer) {
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  return Array.isArray(offerPMs) && offerPMs.length > 0;
+}
+
+function offerMentionsAirline(offer, airlineName) {
+  const airline = normalizeText(airlineName || "");
+  if (!airline) return false;
+
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  return blob.includes(airline);
+}
+
+function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
+  const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+
+  if (hasExplicitPM) {
+    if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
+      return { kind: null, reason: "PAYMENT_MISMATCH" };
+    }
+    return { kind: "payment" };
+  }
+
+  if (offerMentionsAirline(offer, flightAirlineName)) {
+    return { kind: "airline" };
+  }
+
+  return { kind: "portal" };
+}
+
+function getOfferTypeLabel(kind) {
+  if (kind === "payment") return "Payment offer";
+  if (kind === "airline") return "Airline offer";
+  return "Portal offer";
+}
+
+function getOfferChannelLabel(offer) {
+  const c = extractOfferConstraints(offer);
+  if (c.appOnly) return "App-only";
+  if (c.websiteOnly) return "Website-only";
+  return null;
+}
+
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
@@ -950,7 +1011,50 @@ function evaluateOfferForFlight({
   selectedPaymentMethods,
   isDomestic,
   cabin,
+  flightAirlineName,
 }) {
+  if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
+
+  if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
+
+  const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
+  const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
+  const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
+
+  if (mentionsNonFlight && !mentionsFlight) {
+    return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
+  }
+
+  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
+  if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
+
+  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+  if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
+  if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+
+  const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
+  if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
+
+  const minTxn = getMinTxnValue(offer);
+  const amt = Number(eligibilityAmount ?? baseAmount);
+  if (Number.isFinite(minTxn) && minTxn > 0 && Number(amt) < minTxn) {
+    return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
+  }
+
+  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+  if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
+  if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
+
+  return {
+    ok: true,
+    discounted,
+    minTxn,
+    offerKind: kindInfo.kind,
+    offerTypeLabel: getOfferTypeLabel(kindInfo.kind),
+    channelLabel: getOfferChannelLabel(offer),
+  };
+}
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
   // ✅ Gate 1: must be a flight offer
@@ -999,10 +1103,7 @@ function evaluateOfferForFlight({
   return { ok: true, discounted, minTxn };
 }
 
-function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin) {
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return null;
-
+function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin, flightAirlineName) {
   let best = null;
 
   for (const offer of offers) {
@@ -1013,9 +1114,10 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
       portal,
       baseAmount,
       eligibilityAmount,
-      selectedPaymentMethods: sel,
+      selectedPaymentMethods,
       isDomestic,
       cabin,
+      flightAirlineName,
     });
 
     if (!ev.ok) continue;
@@ -1024,6 +1126,9 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
       best = {
         finalPrice: ev.discounted,
         offer,
+        offerKind: ev.offerKind,
+        offerTypeLabel: ev.offerTypeLabel,
+        channelLabel: ev.channelLabel,
       };
     }
   }
@@ -1079,33 +1184,39 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
     const best = pickBestOfferForPortal(
-      offers,
-      portal,
-      portalBase,
-      selectedPaymentMethods,
-      eligibilityAmount,
-      cabin
-    );
+  offers,
+  portal,
+  portalBase,
+  selectedPaymentMethods,
+  eligibilityAmount,
+  cabin,
+  flight.airlineName
+);
 
-    const matchedPaymentLabel = best ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null) : null;
-
+const matchedPaymentLabel =
+  best && best.offerKind === "payment"
+    ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
+    : null;
+    
     const bestDeal = best
-      ? {
-          portal,
-          finalPrice: best.finalPrice,
-          basePrice: portalBase,
-          applied: true,
-          code:
-            best.offer?.couponCode ||
-            best.offer?.code ||
-            best.offer?.parsedFields?.couponCode ||
-            best.offer?.parsedFields?.code ||
-            null,
-          title: best.offer?.title || null,
-          rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
-          constraints: extractOfferConstraints(best.offer),
-        }
-      : null;
+  ? {
+      portal,
+      finalPrice: best.finalPrice,
+      basePrice: portalBase,
+      applied: true,
+      code:
+        best.offer?.couponCode ||
+        best.offer?.code ||
+        best.offer?.parsedFields?.couponCode ||
+        best.offer?.parsedFields?.code ||
+        null,
+      title: best.offer?.title || null,
+      rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
+      constraints: extractOfferConstraints(best.offer),
+      offerTypeLabel: best.offerTypeLabel || null,
+      channelLabel: best.channelLabel || null,
+    }
+  : null;
 
     return {
       portal,
@@ -1117,8 +1228,14 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
       rawDiscount: bestDeal?.rawDiscount || null,
       terms: best?.offer?.terms || null,
       constraints: bestDeal?.constraints || null,
-      paymentLabel: best ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods)) : null,
-      explain: best ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}` : null,
+      paymentLabel: best && best.offerKind === "payment"
+  ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods))
+  : null,
+offerTypeLabel: bestDeal?.offerTypeLabel || null,
+channelLabel: bestDeal?.channelLabel || null,
+explain: best
+  ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
+  : null,
       infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
       debugCounts: {
         offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
@@ -1142,7 +1259,9 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
           rawDiscount: bestPortal.rawDiscount,
           constraints: bestPortal.constraints || null,
           paymentLabel: bestPortal.paymentLabel || null,
-          explain: bestPortal?.applied
+offerTypeLabel: bestPortal.offerTypeLabel || null,
+channelLabel: bestPortal.channelLabel || null,
+explain: bestPortal?.applied
             ? `Best price is on ${bestPortal.portal} because ${bestPortal.code || "an offer"} reduced ₹${bestPortal.basePrice} → ₹${bestPortal.finalPrice}`
             : null,
         }
