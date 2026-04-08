@@ -635,16 +635,17 @@ function getOfferChannelLabel(offer) {
 }
 function offerRequiresRoundTrip(offer) {
   const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""}`
   );
 
-  const hasRoundTrip =
-    /\bround trip\b|\bround-trip\b|\broundtrip\b|\breturn booking(s)?\b|\breturn flight(s)?\b/.test(blob);
-
-  const hasOneWay =
-    /\bone way\b|\bone-way\b|\boneway\b/.test(blob);
-
-  return hasRoundTrip && !hasOneWay;
+  return (
+    blob.includes("return flight") ||
+    blob.includes("return flights") ||
+    blob.includes("return booking") ||
+    blob.includes("round trip") ||
+    blob.includes("round-trip") ||
+    blob.includes("roundtrip")
+  );
 }
 
 function offerRequiresOneWayOnly(offer) {
@@ -1081,13 +1082,13 @@ function evaluateOfferForFlight({
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
-  if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
+ if (tripType === "one-way") {
+  const isReturnOffer = offerRequiresRoundTrip(offer);
+
+  if (isReturnOffer) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
   }
-
-  if (tripType === "round-trip" && offerRequiresOneWayOnly(offer)) {
-    return { ok: false, reasons: ["ONE_WAY_ONLY"] };
-  }
+}
 
   const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
   if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
