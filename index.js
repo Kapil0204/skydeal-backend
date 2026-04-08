@@ -573,6 +573,9 @@ function hasExplicitOfferPaymentMethods(offer) {
   const offerPMs = extractOfferPaymentMethodsNoInference(offer);
   return Array.isArray(offerPMs) && offerPMs.length > 0;
 }
+function isNoPaymentOffer(offer) {
+  return !hasExplicitOfferPaymentMethods(offer);
+}
 
 function offerTargetsThisAirline(offer, airlineName) {
   const airline = normalizeText(airlineName || "");
@@ -609,15 +612,16 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
 
   if (hasExplicitPM) {
-    if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
-      return { kind: null, reason: "PAYMENT_MISMATCH" };
+    if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
+      return { kind: "payment" };
     }
-    return { kind: "payment" };
+    return { kind: null, reason: "PAYMENT_MISMATCH" };
   }
 
-    if (offerTargetsThisAirline(offer, flightAirlineName)) {
+  if (offerTargetsThisAirline(offer, flightAirlineName)) {
     return { kind: "airline" };
   }
+
   return { kind: "portal" };
 }
 
@@ -665,7 +669,6 @@ function offerRequiresOneWayOnly(offer) {
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  // ✅ FIX #1: Prefer structured booking validity end-date (validityPeriod.to)
   const toDate =
     offer?.validityPeriod?.to ||
     offer?.parsedFields?.validityPeriod?.to ||
@@ -677,13 +680,11 @@ function isOfferExpired(offer) {
     const s = String(x || "").trim();
     if (!s) return null;
 
-    // ISO / RFC
     if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
       const d = new Date(s);
       return isNaN(d) ? null : d;
     }
 
-    // DD/MM/YYYY or DD-MM-YYYY
     const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
     if (m) {
       const dd = Number(m[1]), mm = Number(m[2]), yy = Number(m[3]);
@@ -691,15 +692,14 @@ function isOfferExpired(offer) {
       return isNaN(d) ? null : d;
     }
 
-    // "31 Dec 2025", "31st Dec 2025"
     const d2 = new Date(s.replace(/(\d+)(st|nd|rd|th)/gi, "$1"));
     return isNaN(d2) ? null : d2;
   }
 
+  // 1) Strong structured validity first
   if (toDate) {
     const t = parseDateLoose(toDate);
     if (t) {
-      // Compare with TODAY (booking validity), normalize to day boundary
       const end = new Date(t);
       end.setHours(23, 59, 59, 999);
 
@@ -710,22 +710,19 @@ function isOfferExpired(offer) {
     }
   }
 
-  // (kept) fallback to text-based date inference if no structured validity end-date
+  // 2) If no structured validity exists, only trust text fallback
+  // when the text around the date clearly indicates BOOKING validity
   const blobs = [];
   if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
   if (offer?.parsedFields?.validityPeriod?.raw) blobs.push(String(offer.parsedFields.validityPeriod.raw));
-
-  const keyTerms = offer?.offerSummary?.keyTerms || offer?.parsedFields?.offerSummary?.keyTerms;
-  if (Array.isArray(keyTerms)) blobs.push(keyTerms.join(" | "));
-
   if (offer?.terms?.raw) blobs.push(String(offer.terms.raw));
   if (offer?.parsedFields?.terms?.raw) blobs.push(String(offer.parsedFields.terms.raw));
-
   blobs.push(String(offer?.title || ""));
   blobs.push(String(offer?.rawDiscount || ""));
   blobs.push(String(offer?.rawText || ""));
 
   const text = blobs.filter(Boolean).join(" \n ");
+  const lower = text.toLowerCase();
 
   const monthNames =
     "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
@@ -733,21 +730,51 @@ function isOfferExpired(offer) {
   const re2 = new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${monthNames}\\s+\\d{4}\\b`, "ig");
   const re3 = /\b\d{4}-\d{2}-\d{2}\b/g;
 
-  const candidates = [...(text.match(re1) || []), ...(text.match(re2) || []), ...(text.match(re3) || [])];
+  const candidates = [
+    ...(text.match(re1) || []),
+    ...(text.match(re2) || []),
+    ...(text.match(re3) || [])
+  ];
 
   if (candidates.length === 0) return false;
 
+  const bookingValidityHints = [
+    "valid till",
+    "valid until",
+    "validity",
+    "booking period",
+    "book by",
+    "offer valid till",
+    "offer valid until",
+    "campaign period",
+    "booking till",
+    "expires on",
+    "expiring on",
+    "offer ends"
+  ];
+
   let latest = null;
+
   for (const s of candidates) {
-    const d = new Date(s.replace(/(\d+)(st|nd|rd|th)/gi, "$1"));
+    const idx = lower.indexOf(String(s).toLowerCase());
+    const winStart = Math.max(0, idx - 80);
+    const winEnd = Math.min(lower.length, idx + 120);
+    const windowTxt = lower.slice(winStart, winEnd);
+
+    const looksLikeBookingValidity = bookingValidityHints.some((hint) => windowTxt.includes(hint));
+    if (!looksLikeBookingValidity) continue;
+
+    const d = new Date(String(s).replace(/(\d+)(st|nd|rd|th)/gi, "$1"));
     if (!isNaN(d)) {
       if (!latest || d.getTime() > latest.getTime()) latest = d;
     }
   }
 
-  if (!latest) return false;
+  if (!latest) {
+    // If no clear booking-validity date was found, do NOT mark expired.
+    return false;
+  }
 
-  // Compare with TODAY (booking validity)
   const end = new Date(latest);
   end.setHours(23, 59, 59, 999);
 
@@ -1114,13 +1141,24 @@ function evaluateOfferForFlight({
 }
 
 
-function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin, flightAirlineName, tripType) {
-  let best = null;
+function pickBestOfferForPortal(
+  offers,
+  portal,
+  baseAmount,
+  selectedPaymentMethods,
+  eligibilityAmount,
+  cabin,
+  flightAirlineName,
+  tripType
+) {
+  const paymentCandidates = [];
+  const portalCandidates = [];
+  const airlineCandidates = [];
 
   for (const offer of offers) {
-    const isDomestic = true; // Phase-1 assumption
+    const isDomestic = true; // current phase assumption
 
-        const ev = evaluateOfferForFlight({
+    const ev = evaluateOfferForFlight({
       offer,
       portal,
       baseAmount,
@@ -1134,18 +1172,36 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
 
     if (!ev.ok) continue;
 
-    if (!best || ev.discounted < best.finalPrice) {
-      best = {
-        finalPrice: ev.discounted,
-        offer,
-        offerKind: ev.offerKind,
-        offerTypeLabel: ev.offerTypeLabel,
-        channelLabel: ev.channelLabel,
-      };
+    const row = {
+      finalPrice: ev.discounted,
+      offer,
+      offerKind: ev.offerKind,
+      offerTypeLabel: ev.offerTypeLabel,
+      channelLabel: ev.channelLabel,
+    };
+
+    if (ev.offerKind === "payment") {
+      paymentCandidates.push(row);
+    } else if (ev.offerKind === "airline") {
+      airlineCandidates.push(row);
+    } else {
+      portalCandidates.push(row);
     }
   }
 
-  return best;
+  const byBestPrice = (a, b) => a.finalPrice - b.finalPrice;
+
+  paymentCandidates.sort(byBestPrice);
+  portalCandidates.sort(byBestPrice);
+  airlineCandidates.sort(byBestPrice);
+
+  const all = [
+    ...paymentCandidates,
+    ...portalCandidates,
+    ...airlineCandidates,
+  ].sort(byBestPrice);
+
+  return all[0] || null;
 }
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, limit = 5) {
