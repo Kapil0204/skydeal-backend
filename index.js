@@ -574,15 +574,35 @@ function hasExplicitOfferPaymentMethods(offer) {
   return Array.isArray(offerPMs) && offerPMs.length > 0;
 }
 
-function offerMentionsAirline(offer, airlineName) {
+function offerTargetsThisAirline(offer, airlineName) {
   const airline = normalizeText(airlineName || "");
   if (!airline) return false;
 
+  const routeRestrictions = Array.isArray(offer?.terms?.routeOrAirlineRestrictions)
+    ? offer.terms.routeOrAirlineRestrictions.join(" ")
+    : "";
+
+  const parsedRouteRestrictions = Array.isArray(offer?.parsedFields?.terms?.routeOrAirlineRestrictions)
+    ? offer.parsedFields.terms.routeOrAirlineRestrictions.join(" ")
+    : "";
+
   const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""} ${routeRestrictions} ${parsedRouteRestrictions}`
   );
 
-  return blob.includes(airline);
+  if (blob.includes(airline)) return true;
+
+  // Airline aliases / codes
+  if (airline.includes("air india express") && (/\bair india express\b/.test(blob) || /\baix\b/.test(blob))) return true;
+  if (airline.includes("air india") && /\bair india\b/.test(blob)) return true;
+  if (airline.includes("indigo") && (/\bindigo\b/.test(blob) || /\b6e\b/.test(blob))) return true;
+  if (airline.includes("spicejet") && (/\bspicejet\b/.test(blob) || /\bsg\b/.test(blob))) return true;
+  if (airline.includes("akasa") && (/\bakasa\b/.test(blob) || /\bqp\b/.test(blob))) return true;
+  if (airline.includes("alliance air") && /\balliance air\b/.test(blob)) return true;
+  if (airline.includes("star air") && /\bstar air\b/.test(blob)) return true;
+  if (airline.includes("fly91") && /\bfly91\b/.test(blob)) return true;
+
+  return false;
 }
 
 function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
@@ -595,10 +615,9 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
     return { kind: "payment" };
   }
 
-  if (offerMentionsAirline(offer, flightAirlineName)) {
+    if (offerTargetsThisAirline(offer, flightAirlineName)) {
     return { kind: "airline" };
   }
-
   return { kind: "portal" };
 }
 
@@ -613,6 +632,33 @@ function getOfferChannelLabel(offer) {
   if (c.appOnly) return "Book on app";
   if (c.websiteOnly) return "Book on website";
   return null;
+}
+function offerRequiresRoundTrip(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const hasRoundTrip =
+    /\bround trip\b|\bround-trip\b|\broundtrip\b|\breturn booking(s)?\b|\breturn flight(s)?\b/.test(blob);
+
+  const hasOneWay =
+    /\bone way\b|\bone-way\b|\boneway\b/.test(blob);
+
+  return hasRoundTrip && !hasOneWay;
+}
+
+function offerRequiresOneWayOnly(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const hasOneWay =
+    /\bone way\b|\bone-way\b|\boneway\b/.test(blob);
+
+  const hasRoundTrip =
+    /\bround trip\b|\bround-trip\b|\broundtrip\b|\breturn booking(s)?\b|\breturn flight(s)?\b/.test(blob);
+
+  return hasOneWay && !hasRoundTrip;
 }
 
 function isOfferExpired(offer) {
@@ -1012,6 +1058,7 @@ function evaluateOfferForFlight({
   isDomestic,
   cabin,
   flightAirlineName,
+  tripType,
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
@@ -1029,9 +1076,17 @@ function evaluateOfferForFlight({
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+    if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+
+  if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
+    return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
+  }
+
+  if (tripType === "round-trip" && offerRequiresOneWayOnly(offer)) {
+    return { ok: false, reasons: ["ONE_WAY_ONLY"] };
+  }
 
   const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
   if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
@@ -1057,13 +1112,13 @@ function evaluateOfferForFlight({
 }
 
 
-function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin, flightAirlineName) {
+function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMethods, eligibilityAmount, cabin, flightAirlineName, tripType) {
   let best = null;
 
   for (const offer of offers) {
     const isDomestic = true; // Phase-1 assumption
 
-    const ev = evaluateOfferForFlight({
+        const ev = evaluateOfferForFlight({
       offer,
       portal,
       baseAmount,
@@ -1072,6 +1127,7 @@ function pickBestOfferForPortal(offers, portal, baseAmount, selectedPaymentMetho
       isDomestic,
       cabin,
       flightAirlineName,
+      tripType,
     });
 
     if (!ev.ok) continue;
@@ -1130,21 +1186,22 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
   return info;
 }
 
-async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1, cabin = "Economy") {
+async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1, cabin = "Economy", tripType = "one-way") {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
-    const best = pickBestOfferForPortal(
+        const best = pickBestOfferForPortal(
   offers,
   portal,
   portalBase,
   selectedPaymentMethods,
   eligibilityAmount,
   cabin,
-  flight.airlineName
+  flight.airlineName,
+  tripType
 );
 
 const matchedPaymentLabel =
@@ -1550,7 +1607,7 @@ app.post("/search", async (req, res) => {
 
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
-      outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin));
+            outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin, tripType));
     }
 
     // Return
@@ -1565,7 +1622,7 @@ app.post("/search", async (req, res) => {
 
       const enriched = [];
       for (const f of retFlightsLimited) {
-        enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin));
+                enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin, tripType));
       }
       returnFlights = enriched;
     }
