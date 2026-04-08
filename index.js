@@ -637,6 +637,21 @@ function getOfferChannelLabel(offer) {
   if (c.websiteOnly) return "Book on website";
   return null;
 }
+function offerCannotBeClubbed(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  return (
+    /\bcannot be clubbed\b/.test(blob) ||
+    /\bcan not be clubbed\b/.test(blob) ||
+    /\bnot be clubbed\b/.test(blob) ||
+    /\bnot valid with any other offer\b/.test(blob) ||
+    /\bcannot be combined\b/.test(blob) ||
+    /\bnot combinable\b/.test(blob) ||
+    /\bnot applicable with any other offer\b/.test(blob)
+  );
+}
 function offerRequiresRoundTrip(offer) {
   const blob = normalizeText(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""}`
@@ -976,39 +991,18 @@ function normalizeOfferPM(pm) {
   };
 }
 
-function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return false;
+function offerMatchesSelectedPayment(offerPMs, selectedPMs) {
+  // ✅ NEW: If offer has NO payment requirement → always eligible
+  if (!offerPMs || offerPMs.length === 0) return true;
 
-  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
-  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
+  if (!selectedPMs || selectedPMs.length === 0) return false;
 
-  const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
-  if (selNorm.length === 0) return false;
-
-  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm);
-  if (offerNorm.length === 0) return false;
-
-  for (const s of selNorm) {
-    for (const o of offerNorm) {
-            // ✅ Phase-1 strict rule: only bank-specific offers can match
-      // If offer doesn't specify a bank, we don't apply it to a selected bank.
-      if (!o.bankCanonical) continue;
-      if (s.bankCanonical !== o.bankCanonical) continue;
-
-      if (s.typeNorm === o.typeNorm) return true;
-
-      if (
-        s.typeNorm === "EMI" &&
-        o.typeNorm === "CREDIT_CARD" &&
-        (o.emiOnly === true || o.raw.includes("emi"))
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return offerPMs.some(opm =>
+    selectedPMs.some(spm =>
+      (opm.bank === spm.bank || !opm.bank) &&
+      (opm.type === spm.type || !opm.type)
+    )
+  );
 }
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
@@ -1173,12 +1167,13 @@ function pickBestOfferForPortal(
     if (!ev.ok) continue;
 
     const row = {
-      finalPrice: ev.discounted,
-      offer,
-      offerKind: ev.offerKind,
-      offerTypeLabel: ev.offerTypeLabel,
-      channelLabel: ev.channelLabel,
-    };
+  finalPrice: ev.discounted,
+  offer,
+  offerKind: ev.offerKind,
+  offerTypeLabel: ev.offerTypeLabel,
+  channelLabel: ev.channelLabel,
+  nonClubbable: offerCannotBeClubbed(offer),
+};
 
     if (ev.offerKind === "payment") {
       paymentCandidates.push(row);
@@ -1191,18 +1186,20 @@ function pickBestOfferForPortal(
 
   const byBestPrice = (a, b) => a.finalPrice - b.finalPrice;
 
-  paymentCandidates.sort(byBestPrice);
-  portalCandidates.sort(byBestPrice);
-  airlineCandidates.sort(byBestPrice);
+paymentCandidates.sort(byBestPrice);
+portalCandidates.sort(byBestPrice);
+airlineCandidates.sort(byBestPrice);
 
-  const all = [
-    ...paymentCandidates,
-    ...portalCandidates,
-    ...airlineCandidates,
-  ].sort(byBestPrice);
+const all = [
+  ...paymentCandidates,
+  ...portalCandidates,
+  ...airlineCandidates,
+].sort(byBestPrice);
 
-  return all[0] || null;
-}
+// Phase-1 non-clubbing rule:
+// always return only ONE best offer per portal.
+// If multiple candidates exist, cheapest valid one wins.
+return all.length > 0 ? all[0] : null;
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, limit = 5) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
