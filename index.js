@@ -1050,6 +1050,7 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 // Core evaluator
 // --------------------
 function evaluateOfferForFlight({
+  console.log("DEBUG tripType:", tripType, "| offer:", offer?.title);
   offer,
   portal,
   baseAmount,
