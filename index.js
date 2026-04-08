@@ -890,10 +890,27 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
 
   return null;
 }
+function offerIsPerPassenger(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
 
-function computeDiscountedPrice(offer, baseAmount, isDomestic) {
+  return (
+    /\bper passenger\b/.test(blob) ||
+    /\bper pax\b/.test(blob) ||
+    /\bfor each passenger\b/.test(blob) ||
+    /\bfor every passenger\b/.test(blob) ||
+    /\bper person\b/.test(blob)
+  );
+}
+
+function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   const base = Number(baseAmount);
+  const pax = Math.max(1, Number(passengers) || 1);
+
   if (!Number.isFinite(base) || base <= 0) return baseAmount;
+
+  const perPassenger = offerIsPerPassenger(offer);
 
   let pct = null;
   if (offer?.discountPercent != null) {
@@ -906,13 +923,25 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic) {
   }
 
   if (pct != null) {
-    const discounted = Math.round(base * (1 - pct / 100));
+    let discountAmount;
+
+    if (perPassenger) {
+      const perPaxBase = base / pax;
+      discountAmount = Math.round(perPaxBase * (pct / 100) * pax);
+    } else {
+      discountAmount = Math.round(base * (pct / 100));
+    }
+
+    const discounted = Math.round(base - discountAmount);
     return discounted < base ? discounted : base;
   }
 
-  const flat = Number(offer?.flatDiscountAmount);
+  const flat =
+    Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount);
+
   if (Number.isFinite(flat) && flat > 0) {
-    const discounted = Math.round(base - flat);
+    const discountAmount = perPassenger ? Math.round(flat * pax) : Math.round(flat);
+    const discounted = Math.round(base - discountAmount);
     return discounted < base ? discounted : base;
   }
 
@@ -1081,6 +1110,7 @@ function evaluateOfferForFlight({
   cabin,
   flightAirlineName,
   tripType,
+  passengers,
 }) {
   console.log("DEBUG tripType:", tripType, "| offer:", offer && offer.title);
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
@@ -1120,7 +1150,7 @@ function evaluateOfferForFlight({
     return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
   }
 
-  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic);
+  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic, passengers);
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
   if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
 
@@ -1143,7 +1173,8 @@ function pickBestOfferForPortal(
   eligibilityAmount,
   cabin,
   flightAirlineName,
-  tripType
+  tripType,
+  passengers
 ) {
   const paymentCandidates = [];
   const portalCandidates = [];
@@ -1153,16 +1184,17 @@ function pickBestOfferForPortal(
     const isDomestic = true; // current phase assumption
 
     const ev = evaluateOfferForFlight({
-      offer,
-      portal,
-      baseAmount,
-      eligibilityAmount,
-      selectedPaymentMethods,
-      isDomestic,
-      cabin,
-      flightAirlineName,
-      tripType,
-    });
+  offer,
+  portal,
+  baseAmount,
+  eligibilityAmount,
+  selectedPaymentMethods,
+  isDomestic,
+  cabin,
+  flightAirlineName,
+  tripType,
+  passengers,
+});
 
     if (!ev.ok) continue;
 
@@ -1257,6 +1289,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
   cabin,
   flight.airlineName,
   tripType
+  passengers
 );
 
 const matchedPaymentLabel =
