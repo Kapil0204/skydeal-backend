@@ -108,24 +108,60 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
 
   const tried = [{ url }];
 
-  try {
-    const r = await axios.get(url, { timeout: 25000 });
-    return { status: r.status, data: r.data, tried };
-  } catch (e) {
-    const st = e?.response?.status || 0;
-    const body =
-      typeof e?.response?.data === "string"
-        ? e.response.data
-        : e?.response?.data
-          ? JSON.stringify(e.response.data)
-          : "";
-    tried[0].status = st;
-    tried[0].body = body.slice(0, 800);
+  async function tryOnce() {
+    return axios.get(url, { timeout: 25000 });
+  }
 
-    const err = new Error(`FlightAPI request failed (${st || "no-status"})`);
-    err.status = st || 500;
-    err.tried = tried;
-    throw err;
+  try {
+    const r = await tryOnce();
+    return { status: r.status, data: r.data, tried };
+  } catch (e1) {
+    const st1 = e1?.response?.status || 0;
+    const body1 =
+      typeof e1?.response?.data === "string"
+        ? e1.response.data
+        : e1?.response?.data
+          ? JSON.stringify(e1.response.data)
+          : "";
+
+    tried[0].status = st1;
+    tried[0].body = body1.slice(0, 800);
+
+    const shouldRetry = st1 === 400 || st1 >= 500 || st1 === 0;
+
+    if (!shouldRetry) {
+      const err = new Error(`FlightAPI request failed (${st1 || "no-status"})`);
+      err.status = st1 || 500;
+      err.tried = tried;
+      throw err;
+    }
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      const r2 = await tryOnce();
+      tried.push({ url, status: r2.status, retry: true });
+      return { status: r2.status, data: r2.data, tried };
+    } catch (e2) {
+      const st2 = e2?.response?.status || 0;
+      const body2 =
+        typeof e2?.response?.data === "string"
+          ? e2.response.data
+          : e2?.response?.data
+            ? JSON.stringify(e2.response.data)
+            : "";
+
+      tried.push({
+        url,
+        retry: true,
+        status: st2,
+        body: body2.slice(0, 800),
+      });
+
+      const err = new Error(`FlightAPI request failed (${st2 || st1 || "no-status"})`);
+      err.status = st2 || st1 || 500;
+      err.tried = tried;
+      throw err;
+    }
   }
 }
 
@@ -1133,7 +1169,7 @@ function evaluateOfferForFlight({
   tripType,
   passengers,
 }) {
-  console.log("DEBUG tripType:", tripType, "| offer:", offer && offer.title);
+  
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
@@ -1552,11 +1588,12 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const q = req.query.q ? String(req.query.q).trim() : null;
 const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
-    if (!portal || !bank || !type) {
-      return res.status(400).json({ error: "Missing portal/bank/type" });
-    }
+    if (!portal) {
+  return res.status(400).json({ error: "Missing portal" });
+}
 
-    const selectedPaymentMethods = [{ type, name: bank }];
+    const selectedPaymentMethods =
+  bank && type ? [{ type, name: bank }] : [];
 
     const col = await getOffersCollection();
     const offers = await col.find(
@@ -1610,6 +1647,9 @@ const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
       else failReasons.push("PORTAL_MISMATCH");
 
       const scope = offerScopeMatchesTrip(offer, true, "Economy");
+      const roundTripBlocked = offerRequiresRoundTrip(offer);
+if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
+      
       if (scope) stats.scopeOK++;
       else failReasons.push("SCOPE_MISMATCH");
 
@@ -1652,6 +1692,7 @@ const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
                 inferredOnly: 0,
           hotelOnly: !!hotelOnly,
           inferredOnly: inferredOnly,
+          roundTripBlocked: !!roundTripBlocked,
           wouldApplyNow,
           failReasons,
         });
