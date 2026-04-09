@@ -647,6 +647,10 @@ function offerTargetsThisAirline(offer, airlineName) {
 function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
 
+  if (!selectedPaymentMethods || selectedPaymentMethods.length === 0) {
+  return { kind: "GENERIC" };
+}
+
   if (hasExplicitPM) {
     if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
       return { kind: "payment" };
@@ -717,15 +721,19 @@ function offerRequiresOneWayOnly(offer) {
   return hasOneWay && !hasRoundTrip;
 }
 
-function isOfferExpired(offer) {
-  if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  const toDate =
-    offer?.validityPeriod?.to ||
-    offer?.parsedFields?.validityPeriod?.to ||
-    offer?.validityPeriod?.endDate ||
-    offer?.parsedFields?.validityPeriod?.endDate ||
-    null;
+  function isOfferExpired(offer) {
+  const to = offer?.validityPeriod?.to;
+  
+  // ✅ If no expiry found → DO NOT mark expired
+  if (!to) return false;
+
+  const now = new Date();
+  const expiry = new Date(to);
+
+  return expiry < now;
+}
+
 
   function parseDateLoose(x) {
     const s = String(x || "").trim();
