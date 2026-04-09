@@ -1020,18 +1020,39 @@ function normalizeOfferPM(pm) {
   };
 }
 
-function offerMatchesSelectedPayment(offerPMs, selectedPMs) {
-  // ✅ NEW: If offer has NO payment requirement → always eligible
+function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
+  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+
+  // If offer has NO payment requirement → always eligible
   if (!offerPMs || offerPMs.length === 0) return true;
 
-  if (!selectedPMs || selectedPMs.length === 0) return false;
+  if (sel.length === 0) return false;
 
-  return offerPMs.some(opm =>
-    selectedPMs.some(spm =>
-      (opm.bank === spm.bank || !opm.bank) &&
-      (opm.type === spm.type || !opm.type)
-    )
-  );
+  const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
+  if (selNorm.length === 0) return false;
+
+  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm);
+  if (offerNorm.length === 0) return false;
+
+  for (const s of selNorm) {
+    for (const o of offerNorm) {
+      if (!o.bankCanonical) continue;
+      if (s.bankCanonical !== o.bankCanonical) continue;
+
+      if (s.typeNorm === o.typeNorm) return true;
+
+      if (
+        s.typeNorm === "EMI" &&
+        o.typeNorm === "CREDIT_CARD" &&
+        (o.emiOnly === true || o.raw.includes("emi"))
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
@@ -1232,6 +1253,7 @@ const all = [
 // always return only ONE best offer per portal.
 // If multiple candidates exist, cheapest valid one wins.
 return all.length > 0 ? all[0] : null;
+}
 
 function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, limit = 5) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
@@ -1288,7 +1310,7 @@ async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passe
   eligibilityAmount,
   cabin,
   flight.airlineName,
-  tripType
+  tripType,
   passengers
 );
 
