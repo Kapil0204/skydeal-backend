@@ -1063,7 +1063,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
   // If offer has NO payment requirement → always eligible
   if (!offerPMs || offerPMs.length === 0) return true;
 
-  if (sel.length === 0) return false;
+  if (sel.length === 0) return true;
 
   const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
   if (selNorm.length === 0) return false;
@@ -1169,7 +1169,7 @@ function evaluateOfferForFlight({
   tripType,
   passengers,
 }) {
-  
+
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
@@ -1186,25 +1186,37 @@ function evaluateOfferForFlight({
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-    if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
- if (tripType === "one-way") {
-  const isReturnOffer = offerRequiresRoundTrip(offer);
-
-  if (isReturnOffer) {
-    return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
+  if (tripType === "one-way") {
+    const isReturnOffer = offerRequiresRoundTrip(offer);
+    if (isReturnOffer) {
+      return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
+    }
   }
-}
 
   const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
   if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
 
+  // ✅ FIXED MIN TRANSACTION LOGIC (PASSENGER-AWARE)
   const minTxn = getMinTxnValue(offer);
-  const amt = Number(eligibilityAmount ?? baseAmount);
-  if (Number.isFinite(minTxn) && minTxn > 0 && Number(amt) < minTxn) {
-    return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
+  const totalAmount = Number(eligibilityAmount ?? baseAmount);
+  const pax = Math.max(1, Number(passengers) || 1);
+  const perPassengerAmount = totalAmount / pax;
+  const isPerPax = offerIsPerPassenger(offer);
+
+  if (Number.isFinite(minTxn) && minTxn > 0) {
+    if (isPerPax) {
+      if (perPassengerAmount < minTxn) {
+        return { ok: false, reasons: ["MIN_TXN_NOT_MET_PER_PAX"], minTxn };
+      }
+    } else {
+      if (totalAmount < minTxn) {
+        return { ok: false, reasons: ["MIN_TXN_NOT_MET"], minTxn };
+      }
+    }
   }
 
   const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic, passengers);
