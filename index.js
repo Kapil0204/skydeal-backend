@@ -1084,34 +1084,49 @@ function normalizeOfferPM(pm) {
   };
 }
 
-function offerMatchesSelectedPayment(offer, selectedPaymentMethods) {
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
+  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
 
-  // If offer has NO payment requirement → always eligible
-  if (!offerPMs || offerPMs.length === 0) return true;
+  if (!Array.isArray(pm) || pm.length === 0) {
+    return true; // no payment restriction
+  }
 
-  if (sel.length === 0) return true;
+  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) {
+    return false;
+  }
 
-  const selNorm = sel.map(normalizeSelectedPM).filter((x) => x.typeNorm && x.bankCanonical);
-  if (selNorm.length === 0) return false;
+  for (const sel of selectedPaymentMethods) {
+    const selType = (sel?.type || "").toLowerCase();
+    const selName = (sel?.name || "").toLowerCase();
 
-  const offerNorm = offerPMs.map(normalizeOfferPM).filter((x) => x.typeNorm);
-  if (offerNorm.length === 0) return false;
+    for (const method of pm) {
+      const type = (method?.type || "").toLowerCase();
+      const bank = (method?.bank || "").toLowerCase();
 
-  for (const s of selNorm) {
-    for (const o of offerNorm) {
-      if (!o.bankCanonical) continue;
-      if (s.bankCanonical !== o.bankCanonical) continue;
+      // STRICT MATCH CONDITIONS
 
-      if (s.typeNorm === o.typeNorm) return true;
+      // 1. UPI match
+      if (selType === "upi") {
+        if (type.includes("upi") || bank.includes("cred")) {
+          return true;
+        }
+        continue;
+      }
 
-      if (
-        s.typeNorm === "EMI" &&
-        o.typeNorm === "CREDIT_CARD" &&
-        (o.emiOnly === true || o.raw.includes("emi"))
-      ) {
-        return true;
+      // 2. Card match
+      if (selType.includes("card")) {
+        if (type.includes("card") && bank && selName.includes(bank)) {
+          return true;
+        }
+        continue;
+      }
+
+      // 3. EMI match
+      if (selType === "emi") {
+        if (type.includes("emi") && (!bank || selName.includes(bank))) {
+          return true;
+        }
+        continue;
       }
     }
   }
