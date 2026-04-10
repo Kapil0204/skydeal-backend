@@ -1180,7 +1180,6 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 
 // --------------------
 // Core evaluator
-// --------------------
 function evaluateOfferForFlight({
   offer,
   portal,
@@ -1193,7 +1192,6 @@ function evaluateOfferForFlight({
   tripType,
   passengers,
 }) {
-
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
@@ -1214,23 +1212,23 @@ function evaluateOfferForFlight({
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
-  if (tripType === "one-way") {
-    const isReturnOffer = offerRequiresRoundTrip(offer);
-    if (isReturnOffer) {
-      return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
-    }
+  if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
+    return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
   }
 
-  // 🚨 HARD GUARD: prevent payment offers when no payment selected
-const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
-const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
+  // Hard guard: payment-required offers must not apply when user selected no payment method
+  const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+  const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
-if (hasExplicitPM && !hasSelectedPM) {
-  return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
-}
-  if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
+  if (hasExplicitPM && !hasSelectedPM) {
+    return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
+  }
 
-  // ✅ FIXED MIN TRANSACTION LOGIC (PASSENGER-AWARE)
+  const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
+  if (!kindInfo.kind) {
+    return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
+  }
+
   const minTxn = getMinTxnValue(offer);
   const totalAmount = Number(eligibilityAmount ?? baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
@@ -1262,7 +1260,6 @@ if (hasExplicitPM && !hasSelectedPM) {
     channelLabel: getOfferChannelLabel(offer),
   };
 }
-
 
 function pickBestOfferForPortal(
   offers,
