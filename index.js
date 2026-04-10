@@ -606,28 +606,20 @@ function isFirstTimeOrNewUserOffer(offer) {
 }
 
 function hasExplicitOfferPaymentMethods(offer) {
-  const pms =
-    offer?.paymentMethods ||
-    offer?.parsedFields?.paymentMethods ||
-    [];
+  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
 
-  if (Array.isArray(pms) && pms.length > 0) return true;
+  if (!Array.isArray(pm) || pm.length === 0) {
+    // fallback: detect from raw text
+    const blob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""}`.toLowerCase();
 
-  // 🔥 FALLBACK: detect from raw text (VERY IMPORTANT)
-  const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || ""}`.toLowerCase();
+    if (/\bcredit card\b|\bdebit card\b|\bemi\b|\bbank\b/.test(blob)) {
+      return true;
+    }
 
-  const bankKeywords = [
-    "axis", "hdfc", "icici", "sbi", "kotak", "amex", "indusind"
-  ];
+    return false;
+  }
 
-  const paymentKeywords = [
-    "credit card", "debit card", "emi", "net banking", "card"
-  ];
-
-  const mentionsBank = bankKeywords.some(b => text.includes(b));
-  const mentionsPayment = paymentKeywords.some(p => text.includes(p));
-
-  return mentionsBank && mentionsPayment;
+  return pm.length > 0;
 }
 function isNoPaymentOffer(offer) {
   return !hasExplicitOfferPaymentMethods(offer);
@@ -664,35 +656,46 @@ function offerTargetsThisAirline(offer, airlineName) {
   return false;
 }
 
-function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
-  const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
-  const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
+function getOfferKindForFlight(offer, selectedPaymentMethods = [], airlineName = "") {
+  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
 
-  // If the offer explicitly requires a payment method, user must select one.
-  if (hasExplicitPM) {
-    if (!hasSelectedPM) {
-      return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
-    }
+  const hasPM = hasExplicitOfferPaymentMethods(offer);
+  const hasSelected = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
-    if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
-      return { kind: "payment" };
-    }
-
-    return { kind: null, reason: "PAYMENT_MISMATCH" };
+  // 🚨 HARD RULE
+  if (hasPM && !hasSelected) {
+    return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
   }
 
-  // No explicit payment requirement → airline-specific or generic portal offer
-  if (offerTargetsThisAirline(offer, flightAirlineName)) {
-    return { kind: "airline" };
+  // If no payment condition → pure portal offer
+  if (!hasPM) {
+    return { kind: "PORTAL" };
   }
 
-  return { kind: "portal" };
+  // Normalize selected methods
+  const selected = selectedPaymentMethods.map(p => p.toLowerCase());
+
+  for (const method of pm) {
+    const type = (method?.type || "").toLowerCase();
+    const bank = (method?.bank || "").toLowerCase();
+
+    const match = selected.some(sel =>
+      sel.includes(type) || sel.includes(bank)
+    );
+
+    if (match) {
+      return { kind: "PAYMENT" };
+    }
+  }
+
+  return { kind: null, reason: "PAYMENT_MISMATCH" };
 }
 
 function getOfferTypeLabel(kind) {
-  if (kind === "payment") return "Payment offer";
-  if (kind === "airline") return "Airline offer";
-  return "Portal offer (no payment required)";
+  if (kind === "PAYMENT") return "Payment offer";
+  if (kind === "AIRLINE") return "Airline offer";
+  if (kind === "PORTAL") return "Portal offer (no payment required)";
+  return null;
 }
 
 function getOfferChannelLabel(offer) {
@@ -1427,7 +1430,7 @@ const matchedPaymentLabel =
       paymentLabel: best
   ? (
       best.offerKind === "payment"
-        ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods))
+        ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods) || "Payment required")
         : "No payment restriction"
     )
   : null,
