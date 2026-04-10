@@ -646,18 +646,22 @@ function offerTargetsThisAirline(offer, airlineName) {
 
 function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+  const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
-  if (!selectedPaymentMethods || selectedPaymentMethods.length === 0) {
-  return { kind: "GENERIC" };
-}
-
+  // If the offer explicitly requires a payment method, user must select one.
   if (hasExplicitPM) {
+    if (!hasSelectedPM) {
+      return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
+    }
+
     if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
       return { kind: "payment" };
     }
+
     return { kind: null, reason: "PAYMENT_MISMATCH" };
   }
 
+  // No explicit payment requirement → airline-specific or generic portal offer
   if (offerTargetsThisAirline(offer, flightAirlineName)) {
     return { kind: "airline" };
   }
