@@ -693,9 +693,9 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
 }
 
 function getOfferTypeLabel(kind) {
-  if (kind === "PAYMENT") return "Payment offer";
-  if (kind === "AIRLINE") return "Airline offer";
-  if (kind === "PORTAL") return "Portal offer (no payment required)";
+  if (kind === "payment") return "Payment offer";
+  if (kind === "airline") return "Airline offer";
+  if (kind === "portal") return "Portal offer (no payment required)";
   return null;
 }
 
@@ -1085,48 +1085,66 @@ function normalizeOfferPM(pm) {
 }
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
-  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
 
-  if (!Array.isArray(pm) || pm.length === 0) {
-    return true; // no payment restriction
+  // If no explicit payment methods are stored, treat as no-payment-restriction
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) {
+    return true;
   }
 
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) {
     return false;
   }
 
-  for (const sel of selectedPaymentMethods) {
-    const selType = (sel?.type || "").toLowerCase();
-    const selName = (sel?.name || "").toLowerCase();
+  const selNorm = selectedPaymentMethods
+    .map(normalizeSelectedPM)
+    .filter((x) => x.typeNorm);
 
-    for (const method of pm) {
-      const type = (method?.type || "").toLowerCase();
-      const bank = (method?.bank || "").toLowerCase();
+  if (selNorm.length === 0) return false;
 
-      // STRICT MATCH CONDITIONS
+  const offerNorm = offerPMs
+    .map(normalizeOfferPM)
+    .filter((x) => x.typeNorm);
 
-      // 1. UPI match
-      if (selType === "upi") {
-        if (type.includes("upi") || bank.includes("cred")) {
-          return true;
+  if (offerNorm.length === 0) return false;
+
+  for (const s of selNorm) {
+    for (const o of offerNorm) {
+      // UPI: require UPI type; if a bank/canonical is present, match it too
+      if (s.typeNorm === "UPI") {
+        if (o.typeNorm !== "UPI") continue;
+
+        // If offer specifically mentions CRED, selected bank must match CRED
+        if (o.bankCanonical) {
+          if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
+          continue;
         }
-        continue;
+
+        return true;
       }
 
-      // 2. Card match
-      if (selType.includes("card")) {
-        if (type.includes("card") && bank && selName.includes(bank)) {
-          return true;
+      // EMI: require EMI type and bank match when available
+      if (s.typeNorm === "EMI") {
+        if (o.typeNorm !== "EMI" && !(o.typeNorm === "CREDIT_CARD" && o.emiOnly === true)) {
+          continue;
         }
-        continue;
+
+        if (o.bankCanonical) {
+          if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
+          continue;
+        }
+
+        return true;
       }
 
-      // 3. EMI match
-      if (selType === "emi") {
-        if (type.includes("emi") && (!bank || selName.includes(bank))) {
-          return true;
+      // Credit card / debit card / net banking / wallet
+      if (s.typeNorm === o.typeNorm) {
+        if (o.bankCanonical) {
+          if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
+          continue;
         }
-        continue;
+
+        return true;
       }
     }
   }
