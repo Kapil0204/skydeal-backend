@@ -722,18 +722,15 @@ function offerRequiresOneWayOnly(offer) {
 }
 
 
-  function isOfferExpired(offer) {
-  const to = offer?.validityPeriod?.to;
-  
-  // ✅ If no expiry found → DO NOT mark expired
-  if (!to) return false;
+function isOfferExpired(offer) {
+  if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
-  const now = new Date();
-  const expiry = new Date(to);
-
-  return expiry < now;
-}
-
+  const toDate =
+    offer?.validityPeriod?.to ||
+    offer?.parsedFields?.validityPeriod?.to ||
+    offer?.validityPeriod?.endDate ||
+    offer?.parsedFields?.validityPeriod?.endDate ||
+    null;
 
   function parseDateLoose(x) {
     const s = String(x || "").trim();
@@ -770,7 +767,6 @@ function offerRequiresOneWayOnly(offer) {
   }
 
   // 2) If no structured validity exists, only trust text fallback
-  // when the text around the date clearly indicates BOOKING validity
   const blobs = [];
   if (offer?.validityPeriod?.raw) blobs.push(String(offer.validityPeriod.raw));
   if (offer?.parsedFields?.validityPeriod?.raw) blobs.push(String(offer.parsedFields.validityPeriod.raw));
@@ -792,7 +788,7 @@ function offerRequiresOneWayOnly(offer) {
   const candidates = [
     ...(text.match(re1) || []),
     ...(text.match(re2) || []),
-    ...(text.match(re3) || [])
+    ...(text.match(re3) || []),
   ];
 
   if (candidates.length === 0) return false;
@@ -809,7 +805,7 @@ function offerRequiresOneWayOnly(offer) {
     "booking till",
     "expires on",
     "expiring on",
-    "offer ends"
+    "offer ends",
   ];
 
   let latest = null;
@@ -829,10 +825,7 @@ function offerRequiresOneWayOnly(offer) {
     }
   }
 
-  if (!latest) {
-    // If no clear booking-validity date was found, do NOT mark expired.
-    return false;
-  }
+  if (!latest) return false;
 
   const end = new Date(latest);
   end.setHours(23, 59, 59, 999);
@@ -842,7 +835,6 @@ function offerRequiresOneWayOnly(offer) {
 
   return end.getTime() < today.getTime();
 }
-
 function inferMinTxnFromText(offer) {
   const blob = String(
     `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`
