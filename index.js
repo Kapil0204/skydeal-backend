@@ -606,8 +606,28 @@ function isFirstTimeOrNewUserOffer(offer) {
 }
 
 function hasExplicitOfferPaymentMethods(offer) {
-  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
-  return Array.isArray(offerPMs) && offerPMs.length > 0;
+  const pms =
+    offer?.paymentMethods ||
+    offer?.parsedFields?.paymentMethods ||
+    [];
+
+  if (Array.isArray(pms) && pms.length > 0) return true;
+
+  // 🔥 FALLBACK: detect from raw text (VERY IMPORTANT)
+  const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || ""}`.toLowerCase();
+
+  const bankKeywords = [
+    "axis", "hdfc", "icici", "sbi", "kotak", "amex", "indusind"
+  ];
+
+  const paymentKeywords = [
+    "credit card", "debit card", "emi", "net banking", "card"
+  ];
+
+  const mentionsBank = bankKeywords.some(b => text.includes(b));
+  const mentionsPayment = paymentKeywords.some(p => text.includes(p));
+
+  return mentionsBank && mentionsPayment;
 }
 function isNoPaymentOffer(offer) {
   return !hasExplicitOfferPaymentMethods(offer);
@@ -1201,7 +1221,13 @@ function evaluateOfferForFlight({
     }
   }
 
-  const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
+  // 🚨 HARD GUARD: prevent payment offers when no payment selected
+const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
+
+if (hasExplicitPM && !hasSelectedPM) {
+  return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
+}
   if (!kindInfo.kind) return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
 
   // ✅ FIXED MIN TRANSACTION LOGIC (PASSENGER-AWARE)
