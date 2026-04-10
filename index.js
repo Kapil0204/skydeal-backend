@@ -667,39 +667,29 @@ function offerTargetsThisAirline(offer, airlineName) {
   return false;
 }
 
-function getOfferKindForFlight(offer, selectedPaymentMethods = [], airlineName = "") {
-  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
+function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
+  const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+  const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
-  const hasPM = hasExplicitOfferPaymentMethods(offer);
-  const hasSelected = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
-
-  // 🚨 HARD RULE
-  if (hasPM && !hasSelected) {
-    return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
-  }
-
-  // If no payment condition → pure portal offer
-  if (!hasPM) {
-    return { kind: "PORTAL" };
-  }
-
-  // Normalize selected methods
-  const selected = selectedPaymentMethods.map(p => p.toLowerCase());
-
-  for (const method of pm) {
-    const type = (method?.type || "").toLowerCase();
-    const bank = (method?.bank || "").toLowerCase();
-
-    const match = selected.some(sel =>
-      sel.includes(type) || sel.includes(bank)
-    );
-
-    if (match) {
-      return { kind: "PAYMENT" };
+  // 1) Payment-required offers must not apply when user selected nothing
+  if (hasExplicitPM) {
+    if (!hasSelectedPM) {
+      return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
     }
+
+    if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
+      return { kind: "payment" };
+    }
+
+    return { kind: null, reason: "PAYMENT_MISMATCH" };
   }
 
-  return { kind: null, reason: "PAYMENT_MISMATCH" };
+  // 2) No explicit payment requirement → airline or portal
+  if (offerTargetsThisAirline(offer, flightAirlineName)) {
+    return { kind: "airline" };
+  }
+
+  return { kind: "portal" };
 }
 
 function getOfferTypeLabel(kind) {
