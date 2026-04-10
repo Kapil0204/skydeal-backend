@@ -606,20 +606,31 @@ function isFirstTimeOrNewUserOffer(offer) {
 }
 
 function hasExplicitOfferPaymentMethods(offer) {
-  const pm = offer?.parsedFields?.paymentMethods || offer?.paymentMethods || [];
+  const pms =
+    offer?.parsedFields?.paymentMethods ||
+    offer?.paymentMethods ||
+    offer?.eligiblePaymentMethods ||
+    offer?.parsedFields?.eligiblePaymentMethods ||
+    [];
 
-  if (!Array.isArray(pm) || pm.length === 0) {
-    // fallback: detect from raw text
-    const blob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""}`.toLowerCase();
+  if (Array.isArray(pms) && pms.length > 0) return true;
 
-    if (/\bcredit card\b|\bdebit card\b|\bemi\b|\bbank\b/.test(blob)) {
-      return true;
-    }
+  const blob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`.toLowerCase();
 
-    return false;
-  }
+  const bankKeywords = [
+    "axis", "hdfc", "icici", "sbi", "kotak", "amex", "indusind",
+    "hsbc", "idfc", "yes bank", "rbl", "au bank", "federal", "canara",
+    "bank of baroda", "central bank", "onecard", "cred"
+  ];
 
-  return pm.length > 0;
+  const paymentKeywords = [
+    "credit card", "debit card", "emi", "upi", "wallet", "net banking", "netbanking", "card"
+  ];
+
+  const mentionsBank = bankKeywords.some((b) => blob.includes(b));
+  const mentionsPayment = paymentKeywords.some((p) => blob.includes(p));
+
+  return mentionsBank || mentionsPayment;
 }
 function isNoPaymentOffer(offer) {
   return !hasExplicitOfferPaymentMethods(offer);
