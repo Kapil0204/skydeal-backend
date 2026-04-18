@@ -672,12 +672,13 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
   const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
   // 1) Payment-required offers must not apply when user selected nothing
-  if (hasExplicitPM) {
+     if (hasExplicitPM) {
     if (!hasSelectedPM) {
       return { kind: null, reason: "PAYMENT_REQUIRED_NOT_SELECTED" };
     }
 
-    if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) {
+    const matches = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+    if (matches) {
       return { kind: "payment" };
     }
 
@@ -1085,13 +1086,6 @@ function normalizeOfferPM(pm) {
 }
 
 function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
-  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
-
-  // If no explicit payment methods are stored, treat as no-payment-restriction
-  if (!Array.isArray(offerPMs) || offerPMs.length === 0) {
-    return true;
-  }
-
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) {
     return false;
   }
@@ -1102,6 +1096,40 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
   if (selNorm.length === 0) return false;
 
+  // -----------------------------
+  // 1) Hard bank guard from code/title/raw text
+  // -----------------------------
+  const inferredBankFromCodeOrText = bankCanonicalFromAny(
+    [
+      offer?.couponCode || offer?.code || "",
+      offer?.title || "",
+      offer?.rawDiscount || "",
+      offer?.rawText || "",
+    ].join(" ")
+  );
+
+  const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
+
+  // If coupon/title clearly signals a bank, selected bank must match it.
+  if (
+    inferredBankFromCodeOrText &&
+    selectedBanks.length > 0 &&
+    !selectedBanks.includes(inferredBankFromCodeOrText)
+  ) {
+    return false;
+  }
+
+  // -----------------------------
+  // 2) Structured PM match only
+  // -----------------------------
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+
+  // CRITICAL FIX:
+  // If a payment offer has no structured PM rows, do NOT allow it to match everyone.
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) {
+    return false;
+  }
+
   const offerNorm = offerPMs
     .map(normalizeOfferPM)
     .filter((x) => x.typeNorm);
@@ -1110,20 +1138,20 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
   for (const s of selNorm) {
     for (const o of offerNorm) {
-      // UPI: require UPI type; if a bank/canonical is present, match it too
+      // UPI
       if (s.typeNorm === "UPI") {
         if (o.typeNorm !== "UPI") continue;
 
-        // If offer specifically mentions CRED, selected bank must match CRED
         if (o.bankCanonical) {
           if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
           continue;
         }
 
-        return true;
+        // no bank on offer side => do not allow loose pass
+        continue;
       }
 
-      // EMI: require EMI type and bank match when available
+      // EMI
       if (s.typeNorm === "EMI") {
         if (o.typeNorm !== "EMI" && !(o.typeNorm === "CREDIT_CARD" && o.emiOnly === true)) {
           continue;
@@ -1134,17 +1162,19 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        return true;
+        // no bank on offer side => do not allow loose pass
+        continue;
       }
 
-      // Credit card / debit card / net banking / wallet
+      // Credit / Debit / NetBanking / Wallet
       if (s.typeNorm === o.typeNorm) {
         if (o.bankCanonical) {
           if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
           continue;
         }
 
-        return true;
+        // no bank on offer side => do not allow loose pass
+        continue;
       }
     }
   }
