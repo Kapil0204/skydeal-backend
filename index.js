@@ -2145,7 +2145,7 @@ channelLabel: bestDeal?.channelLabel || null,
 explain: best
   ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
   : null,
-        const bestOfferId =
+    } const bestOfferId =
   best?.offer?._id?.toString?.() ||
   best?.offer?.couponCode ||
   best?.offer?.code ||
