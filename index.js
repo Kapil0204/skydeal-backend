@@ -2145,25 +2145,59 @@ channelLabel: bestDeal?.channelLabel || null,
 explain: best
   ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
   : null,
-            infoOffers: [
-        ...buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
-        ...otherMatchedOffers.map((row) => ({
-          title: row.offer?.title || null,
-          couponCode:
-            row.offer?.couponCode ||
-            row.offer?.code ||
-            row.offer?.parsedFields?.couponCode ||
-            row.offer?.parsedFields?.code ||
-            null,
-          rawDiscount: row.offer?.rawDiscount || row.offer?.parsedFields?.rawDiscount || null,
-          offerSummary: row.offer?.offerSummary || row.offer?.parsedFields?.offerSummary || null,
-          terms: row.offer?.terms || row.offer?.parsedFields?.terms || null,
-          paymentHint: getMatchedSelectedPaymentLabel(row.offer, selectedPaymentMethods) || null,
-          sourcePortal: row.offer?.sourceMetadata?.sourcePortal || row.offer?.sourcePortal || null,
-          requiresSpecificCardType: false,
-          infoLabel: "Another applicable offer",
-        })),
-      ],
+        const bestOfferId =
+  best?.offer?._id?.toString?.() ||
+  best?.offer?.couponCode ||
+  best?.offer?.code ||
+  null;
+
+const otherMatchedOffersClean = otherMatchedOffers.filter((row) => {
+  const id =
+    row.offer?._id?.toString?.() ||
+    row.offer?.couponCode ||
+    row.offer?.code ||
+    null;
+
+  return id !== bestOfferId;
+});
+
+return {
+  portal,
+  price: best ? best.finalPrice : portalBase,
+  basePrice: portalBase,
+  applied: !!best,
+  code:
+    best?.offer?.couponCode ||
+    best?.offer?.code ||
+    best?.offer?.parsedFields?.couponCode ||
+    best?.offer?.parsedFields?.code ||
+    null,
+  title:
+    best?.offer?.title ||
+    best?.offer?.parsedFields?.title ||
+    null,
+  finalPrice: best ? best.finalPrice : portalBase,
+
+  infoOffers: [
+    ...buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
+    ...otherMatchedOffersClean.map((row) => ({
+      title: row.offer?.title || null,
+      couponCode:
+        row.offer?.couponCode ||
+        row.offer?.code ||
+        row.offer?.parsedFields?.couponCode ||
+        row.offer?.parsedFields?.code ||
+        null,
+      rawDiscount: row.offer?.rawDiscount || row.offer?.parsedFields?.rawDiscount || null,
+      offerSummary: row.offer?.offerSummary || row.offer?.parsedFields?.offerSummary || null,
+      terms: row.offer?.terms || row.offer?.parsedFields?.terms || null,
+      paymentHint: getMatchedSelectedPaymentLabel(row.offer, selectedPaymentMethods) || null,
+      sourcePortal: row.offer?.sourceMetadata?.sourcePortal || row.offer?.sourcePortal || null,
+      requiresSpecificCardType: false,
+      infoLabel: "Another applicable offer",
+    })),
+  ],
+};
       debugCounts: {
         offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
       },
