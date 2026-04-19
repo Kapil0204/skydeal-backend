@@ -1273,17 +1273,28 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
 // scope/cabin sanity
 function offerScopeMatchesTrip(offer, isDomestic, cabin) {
-  const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
-  );
+  // IMPORTANT:
+  // Only trust CORE fields for domestic/international scope.
+  // rawText/terms often contain mixed portal/template noise and can mention both domestic + international.
+  const title = String(offer?.title || "");
+  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+  const offerSummary =
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : (offer?.parsedFields?.offerSummary ? JSON.stringify(offer.parsedFields.offerSummary) : "");
+
+  const core = normalizeText(`${title} ${rawDiscount} ${offerSummary}`);
 
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
   const catBlob = Array.isArray(cats)
     ? normalizeText(cats.map((c) => String(c || "")).join(" "))
     : "";
 
-  const combined = `${blob} ${catBlob}`.trim();
+  const combined = `${core} ${catBlob}`.trim();
 
+  // Reject clear non-flight verticals unless flights are explicitly mentioned in core/categories
   const hasFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(combined);
   const hasNonFlightVertical =
     /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(combined);
