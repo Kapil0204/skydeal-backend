@@ -29,6 +29,28 @@ const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 // Feature flags
 const ENABLE_ESTIMATED_DISCOUNTS =
   String(process.env.ENABLE_ESTIMATED_DISCOUNTS || "false").toLowerCase() === "true";
+// --------------------
+// Route geography helpers
+// --------------------
+const INDIAN_IATA_AIRPORTS = new Set([
+  "AMD","ATQ","BBI","BDQ","BHO","BHU","BLR","BOM","CCJ","CCU","CJB","COK","DED","DEL","DMU",
+  "GAU","GOI","GOP","GWL","HBX","HYD","IDR","IXA","IXB","IXC","IXD","IXE","IXG","IXJ","IXL",
+  "IXM","IXR","IXS","IXU","JAI","JDH","JGA","JLR","JRG","JSA","IXY","JGB","KNU","LKO","MAA",
+  "MYQ","NAG","PAT","PNQ","RJA","RPR","SAG","SLV","SXR","STV","SXV","TRV","TRZ","UDR","VGA",
+  "VNS","VTZ","PNY","AGX","DIB","IMF","SHL","AIP","NDC","TIR","RDP","JRH","TEZ","TCR","TCR",
+  "COH","DHM","KUU","LEH","SBI","TCR","UDR","BEP","HJR","JLG","AJL","IXK","ISK","JAI","NMI"
+]);
+
+function isIndianAirportIata(iata) {
+  return INDIAN_IATA_AIRPORTS.has(String(iata || "").trim().toUpperCase());
+}
+
+function isDomesticRoute(from, to) {
+  const a = String(from || "").trim().toUpperCase();
+  const b = String(to || "").trim().toUpperCase();
+  if (!a || !b) return true; // safe default
+  return isIndianAirportIata(a) && isIndianAirportIata(b);
+}
 
 // --------------------
 // Helpers: Date + Cabin
@@ -1663,14 +1685,14 @@ function pickBestOfferForPortal(
   cabin,
   flightAirlineName,
   tripType,
-  passengers
+  passengers,
+  isDomestic
 ) {
   const paymentCandidates = [];
   const portalCandidates = [];
   const airlineCandidates = [];
 
   for (const offer of offers) {
-    const isDomestic = true; // current phase assumption
 
     const ev = evaluateOfferForFlight({
   offer,
@@ -1764,24 +1786,33 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
   return info;
 }
 
-async function applyOffersToFlight(flight, selectedPaymentMethods, offers, passengers = 1, cabin = "Economy", tripType = "one-way") {
+async function applyOffersToFlight(
+  flight,
+  selectedPaymentMethods,
+  offers,
+  passengers = 1,
+  cabin = "Economy",
+  tripType = "one-way",
+  isDomestic = true
+) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
   const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
-        const best = pickBestOfferForPortal(
-  offers,
-  portal,
-  portalBase,
-  selectedPaymentMethods,
-  eligibilityAmount,
-  cabin,
-  flight.airlineName,
-  tripType,
-  passengers
-);
+      const best = pickBestOfferForPortal(
+      offers,
+      portal,
+      portalBase,
+      selectedPaymentMethods,
+      eligibilityAmount,
+      cabin,
+      flight.airlineName,
+      tripType,
+      passengers,
+      isDomestic
+    );
 
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
@@ -2191,9 +2222,21 @@ app.post("/search", async (req, res) => {
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
+        const routeIsDomestic = isDomesticRoute(from, to);
+
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
-            outboundFlights.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin, tripType));
+      outboundFlights.push(
+        await applyOffersToFlight(
+          f,
+          selectedPaymentMethods,
+          offers,
+          adults,
+          cabin,
+          tripType,
+          routeIsDomestic
+        )
+      );
     }
 
     // Return
@@ -2206,12 +2249,23 @@ app.post("/search", async (req, res) => {
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
 
+           const returnRouteIsDomestic = isDomesticRoute(to, from);
+
       const enriched = [];
       for (const f of retFlightsLimited) {
-                enriched.push(await applyOffersToFlight(f, selectedPaymentMethods, offers, adults, cabin, tripType));
+        enriched.push(
+          await applyOffersToFlight(
+            f,
+            selectedPaymentMethods,
+            offers,
+            adults,
+            cabin,
+            tripType,
+            returnRouteIsDomestic
+          )
+        );
       }
       returnFlights = enriched;
-    }
 
     res.json({ meta, outboundFlights, returnFlights });
   } catch (e) {
