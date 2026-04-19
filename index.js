@@ -2061,22 +2061,42 @@ async function applyOffersToFlight(
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
-  const portalPrices = OTAS.map((portal) => {
+    const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
-      const best = pickBestOfferForPortal(
-      offers,
-      portal,
-      portalBase,
-      selectedPaymentMethods,
-      eligibilityAmount,
-      cabin,
-      flight.airlineName,
-      tripType,
-      passengers,
-      isDomestic
-    );
+    const matchingCandidates = [];
+
+    for (const offer of offers) {
+      const ev = evaluateOfferForFlight({
+        offer,
+        portal,
+        baseAmount: portalBase,
+        eligibilityAmount,
+        selectedPaymentMethods,
+        isDomestic,
+        cabin,
+        flightAirlineName: flight.airlineName,
+        tripType,
+        passengers,
+      });
+
+      if (!ev.ok) continue;
+
+      matchingCandidates.push({
+        offer,
+        finalPrice: ev.discounted,
+        offerKind: ev.offerKind,
+        offerTypeLabel: ev.offerTypeLabel,
+        channelLabel: ev.channelLabel,
+        maxDiscountAmount: ev.maxDiscountAmount ?? null,
+      });
+    }
+
+    matchingCandidates.sort((a, b) => a.finalPrice - b.finalPrice);
+
+    const best = matchingCandidates.length > 0 ? matchingCandidates[0] : null;
+    const otherMatchedOffers = matchingCandidates.slice(1);
 
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
@@ -2125,7 +2145,25 @@ channelLabel: bestDeal?.channelLabel || null,
 explain: best
   ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
   : null,
-      infoOffers: buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
+            infoOffers: [
+        ...buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
+        ...otherMatchedOffers.map((row) => ({
+          title: row.offer?.title || null,
+          couponCode:
+            row.offer?.couponCode ||
+            row.offer?.code ||
+            row.offer?.parsedFields?.couponCode ||
+            row.offer?.parsedFields?.code ||
+            null,
+          rawDiscount: row.offer?.rawDiscount || row.offer?.parsedFields?.rawDiscount || null,
+          offerSummary: row.offer?.offerSummary || row.offer?.parsedFields?.offerSummary || null,
+          terms: row.offer?.terms || row.offer?.parsedFields?.terms || null,
+          paymentHint: getMatchedSelectedPaymentLabel(row.offer, selectedPaymentMethods) || null,
+          sourcePortal: row.offer?.sourceMetadata?.sourcePortal || row.offer?.sourcePortal || null,
+          requiresSpecificCardType: false,
+          infoLabel: "Another applicable offer",
+        })),
+      ],
       debugCounts: {
         offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
       },
