@@ -749,7 +749,66 @@ function offerRequiresOneWayOnly(offer) {
 
   return hasOneWay && !hasRoundTrip;
 }
+function getPassengerRestrictionResult(offer, passengers = 1) {
+  const pax = Math.max(1, Number(passengers) || 1);
 
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  // Solo / single passenger only
+  if (
+    /\bsolo traveler only\b/.test(blob) ||
+    /\bsolo traveller only\b/.test(blob) ||
+    /\bsingle passenger only\b/.test(blob) ||
+    /\bone passenger only\b/.test(blob) ||
+    /\bonly for 1 passenger\b/.test(blob)
+  ) {
+    if (pax !== 1) {
+      return { ok: false, reason: "PASSENGER_COUNT_RESTRICTED_SOLO_ONLY" };
+    }
+  }
+
+  // Minimum passenger count
+  const minMatch =
+    blob.match(/\bminimum\s+(\d+)\s+passenger(s)?\b/) ||
+    blob.match(/\bmin(?:imum)?\s+(\d+)\s+passenger(s)?\b/) ||
+    blob.match(/\bvalid only for (\d+)\+\s*passenger(s)?\b/) ||
+    blob.match(/\bfor (\d+)\+\s*passenger(s)?\b/);
+
+  if (minMatch && minMatch[1]) {
+    const minPax = Number(minMatch[1]);
+    if (Number.isFinite(minPax) && pax < minPax) {
+      return { ok: false, reason: "PASSENGER_COUNT_BELOW_MINIMUM", minPassengers: minPax };
+    }
+  }
+
+  // Maximum passenger count
+  const maxMatch =
+    blob.match(/\bmaximum\s+(\d+)\s+passenger(s)?\b/) ||
+    blob.match(/\bmax(?:imum)?\s+(\d+)\s+passenger(s)?\b/) ||
+    blob.match(/\bup to (\d+)\s+passenger(s)? only\b/);
+
+  if (maxMatch && maxMatch[1]) {
+    const maxPax = Number(maxMatch[1]);
+    if (Number.isFinite(maxPax) && pax > maxPax) {
+      return { ok: false, reason: "PASSENGER_COUNT_ABOVE_MAXIMUM", maxPassengers: maxPax };
+    }
+  }
+
+  // Infant restrictions
+  if (
+    /\binfant not allowed\b/.test(blob) ||
+    /\bnot valid with infant\b/.test(blob) ||
+    /\bexcluding infant\b/.test(blob)
+  ) {
+    // current request model does not separately carry infants
+    // keep this as informational only for now
+    return { ok: true, warning: "INFANT_RESTRICTION_PRESENT_BUT_NOT_ENFORCED" };
+  }
+
+  return { ok: true };
+}
 
 function isOfferExpired(offer) {
   if (typeof offer?.isExpired === "boolean") return offer.isExpired;
@@ -1380,7 +1439,13 @@ function evaluateOfferForFlight({
   if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
   }
-
+  const passengerRestriction = getPassengerRestrictionResult(offer, passengers);
+  if (!passengerRestriction.ok) {
+    return {
+      ok: false,
+      reasons: [passengerRestriction.reason || "PASSENGER_COUNT_RESTRICTED"],
+    };
+  }
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
   const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
@@ -1869,6 +1934,8 @@ if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       if (inferredOnly) failReasons.push("PAYMENT_INFERRED_ONLY");
 
       const minTxn = getMinTxnValue(offer);
+      const paxRestriction = getPassengerRestrictionResult(offer, 1);
+      if (!paxRestriction.ok) failReasons.push(paxRestriction.reason || "PASSENGER_COUNT_RESTRICTED");
       if (!minTxn || amount >= minTxn) stats.minTxnOK++;
       else failReasons.push("MIN_TXN_NOT_MET");
 
