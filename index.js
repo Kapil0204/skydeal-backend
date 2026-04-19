@@ -969,7 +969,9 @@ function offerIsPerPassenger(offer) {
   );
 }
 
-function getOfferMaxDiscountAmount(offer) {
+function getOfferMaxDiscountAmount(offer, passengers = 1) {
+  const pax = Math.max(1, Number(passengers) || 1);
+
   const direct =
     offer?.maxDiscountAmount ??
     offer?.parsedFields?.maxDiscountAmount ??
@@ -978,7 +980,10 @@ function getOfferMaxDiscountAmount(offer) {
     null;
 
   const directNum = Number(direct);
-  if (Number.isFinite(directNum) && directNum > 0) return directNum;
+
+  if (Number.isFinite(directNum) && directNum > 0) {
+    return offerIsPerPassenger(offer) ? directNum * pax : directNum;
+  }
 
   const tiers =
     offer?.discountTiers ??
@@ -990,7 +995,10 @@ function getOfferMaxDiscountAmount(offer) {
       .map((t) => Number(t?.maxDiscountAmount))
       .filter((n) => Number.isFinite(n) && n > 0);
 
-    if (caps.length > 0) return Math.max(...caps);
+    if (caps.length > 0) {
+      const bestCap = Math.max(...caps);
+      return offerIsPerPassenger(offer) ? bestCap * pax : bestCap;
+    }
   }
 
   const blob = String(
@@ -1004,15 +1012,11 @@ function getOfferMaxDiscountAmount(offer) {
 
   if (m && m[1]) {
     const n = Number(String(m[1]).replace(/,/g, ""));
-    if (Number.isFinite(n) && n > 0) return n;
+    if (Number.isFinite(n) && n > 0) {
+      return offerIsPerPassenger(offer) ? n * pax : n;
+    }
   }
 
-  const isPerPax = offerIsPerPassenger(offer);
-
-if (isPerPax && Number.isFinite(directNum) && directNum > 0) {
-  const pax = Number(globalThis.__CURRENT_PASSENGERS__ || 1);
-  return directNum * pax;
-}
   return null;
 }
 
@@ -1023,7 +1027,7 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
   const perPassenger = offerIsPerPassenger(offer);
-  const maxCap = getOfferMaxDiscountAmount(offer);
+  const maxCap = getOfferMaxDiscountAmount(offer, passengers);
 
   let pct = null;
   if (offer?.discountPercent != null) {
