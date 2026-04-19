@@ -1318,9 +1318,14 @@ function normalizeSelectedPM(pm) {
     /freecharge/i.test(providerRaw) ? "FREECHARGE" :
     null;
 
-  const cardFamilyRaw = String(pm?.cardFamily || pm?.cardVariant || "").trim();
+    const cardFamilyRaw = String(pm?.cardFamily || pm?.cardVariant || "").trim();
   const cardFamilyCanonical =
     /flipkart\s*axis/i.test(cardFamilyRaw) ? "FLIPKART_AXIS" :
+    /axis\s*atlas/i.test(cardFamilyRaw) ? "AXIS_ATLAS" :
+    /axis\s*ace/i.test(cardFamilyRaw) ? "AXIS_ACE" :
+    /axis\s*neo/i.test(cardFamilyRaw) ? "AXIS_NEO" :
+    /axis\s*rewards/i.test(cardFamilyRaw) ? "AXIS_REWARDS" :
+    /axis\s*vistara/i.test(cardFamilyRaw) ? "AXIS_VISTARA" :
     /amazon\s*pay\s*icici/i.test(cardFamilyRaw) ? "AMAZON_PAY_ICICI" :
     /tata\s*neu/i.test(cardFamilyRaw) ? "TATA_NEU" :
     /swiggy\s*hdfc/i.test(cardFamilyRaw) ? "SWIGGY_HDFC" :
@@ -1329,8 +1334,13 @@ function normalizeSelectedPM(pm) {
     /regalia/i.test(cardFamilyRaw) ? "REGALIA" :
     /millennia/i.test(cardFamilyRaw) ? "MILLENNIA" :
     /sbi\s*cashback/i.test(cardFamilyRaw) ? "SBI_CASHBACK" :
+    /simplyclick/i.test(cardFamilyRaw) ? "SIMPLYCLICK" :
+    /simplysave/i.test(cardFamilyRaw) ? "SIMPLYSAVE" :
+    /coral/i.test(cardFamilyRaw) ? "CORAL" :
+    /rubyx/i.test(cardFamilyRaw) ? "RUBYX" :
+    /sapphiro/i.test(cardFamilyRaw) ? "SAPPHIRO" :
+    /emeralde/i.test(cardFamilyRaw) ? "EMERALDE" :
     null;
-
   const isCorporate =
     pm?.isCorporate === true ? true :
     pm?.isCorporate === false ? false :
@@ -1439,14 +1449,29 @@ function extractOfferCardFamilyRestrictions(offer, pm = null) {
   const allowed = new Set();
 
   if (/\bflipkart\s*axis\b/.test(blob)) allowed.add("FLIPKART_AXIS");
+  if (/\baxis\s*atlas\b/.test(blob)) allowed.add("AXIS_ATLAS");
+  if (/\baxis\s*ace\b/.test(blob)) allowed.add("AXIS_ACE");
+  if (/\baxis\s*neo\b/.test(blob)) allowed.add("AXIS_NEO");
+  if (/\baxis\s*rewards\b/.test(blob)) allowed.add("AXIS_REWARDS");
+  if (/\baxis\s*vistara\b/.test(blob)) allowed.add("AXIS_VISTARA");
+
   if (/\bamazon\s*pay\s*icici\b/.test(blob)) allowed.add("AMAZON_PAY_ICICI");
   if (/\btata\s*neu\b/.test(blob)) allowed.add("TATA_NEU");
   if (/\bswiggy\s*hdfc\b/.test(blob)) allowed.add("SWIGGY_HDFC");
+
   if (/\bdiners\b/.test(blob)) allowed.add("DINERS");
   if (/\binfinia\b/.test(blob)) allowed.add("INFINIA");
   if (/\bregalia\b/.test(blob)) allowed.add("REGALIA");
   if (/\bmillennia\b/.test(blob)) allowed.add("MILLENNIA");
+
   if (/\bsbi\s*cashback\b/.test(blob)) allowed.add("SBI_CASHBACK");
+  if (/\bsimplyclick\b/.test(blob)) allowed.add("SIMPLYCLICK");
+  if (/\bsimplysave\b/.test(blob)) allowed.add("SIMPLYSAVE");
+
+  if (/\bcoral\b/.test(blob)) allowed.add("CORAL");
+  if (/\brubyx\b/.test(blob)) allowed.add("RUBYX");
+  if (/\bsapphiro\b/.test(blob)) allowed.add("SAPPHIRO");
+  if (/\bemeralde\b/.test(blob)) allowed.add("EMERALDE");
 
   return Array.from(allowed);
 }
@@ -1652,13 +1677,13 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        if (
-          Array.isArray(o.allowedCardFamilies) &&
-          o.allowedCardFamilies.length > 0 &&
-          s.cardFamilyCanonical &&
-          !o.allowedCardFamilies.includes(s.cardFamilyCanonical)
-        ) {
-          continue;
+                // Card-family logic:
+        // 1) If offer is family-specific and user explicitly selected a conflicting family => reject
+        // 2) If user did not specify family, do NOT auto-approve based on family alone; let generic bank logic decide
+        if (Array.isArray(o.allowedCardFamilies) && o.allowedCardFamilies.length > 0) {
+          if (s.cardFamilyCanonical && !o.allowedCardFamilies.includes(s.cardFamilyCanonical)) {
+            continue;
+          }
         }
 
         if (
