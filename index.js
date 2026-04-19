@@ -1399,7 +1399,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
   const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
 
-  // If coupon/title clearly signals a bank, selected bank must match it.
   if (
     inferredBankFromCodeOrText &&
     selectedBanks.length > 0 &&
@@ -1413,13 +1412,11 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
   // -----------------------------
   const offerPMs = extractOfferPaymentMethodsNoInference(offer);
 
-  // CRITICAL FIX:
-  // If a payment offer has no structured PM rows, do NOT allow it to match everyone.
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) {
     return false;
   }
 
-    const offerNorm = offerPMs
+  const offerNorm = offerPMs
     .map((pm) => normalizeOfferPM(pm, offer))
     .filter((x) => x.typeNorm);
 
@@ -1428,7 +1425,18 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
   for (const s of selNorm) {
     for (const o of offerNorm) {
       // UPI
-            // EMI
+      if (s.typeNorm === "UPI") {
+        if (o.typeNorm !== "UPI") continue;
+
+        if (o.bankCanonical) {
+          if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
+          continue;
+        }
+
+        continue;
+      }
+
+      // EMI
       if (s.typeNorm === "EMI") {
         if (o.typeNorm !== "EMI" && !(o.typeNorm === "CREDIT_CARD" && o.emiOnly === true)) {
           continue;
@@ -1458,22 +1466,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        // no bank on offer side => do not allow loose pass
-        continue;
-      }
-
-      // EMI
-      if (s.typeNorm === "EMI") {
-        if (o.typeNorm !== "EMI" && !(o.typeNorm === "CREDIT_CARD" && o.emiOnly === true)) {
-          continue;
-        }
-
-        if (o.bankCanonical) {
-          if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
-          continue;
-        }
-
-        // no bank on offer side => do not allow loose pass
         continue;
       }
 
@@ -1484,7 +1476,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        // no bank on offer side => do not allow loose pass
         continue;
       }
     }
