@@ -1677,11 +1677,14 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-                // Card-family logic:
+        // Card-family logic:
         // 1) If offer is family-specific and user explicitly selected a conflicting family => reject
-        // 2) If user did not specify family, do NOT auto-approve based on family alone; let generic bank logic decide
+        // 2) If offer is family-specific and user selected only the generic bank card (no family) => do NOT apply
         if (Array.isArray(o.allowedCardFamilies) && o.allowedCardFamilies.length > 0) {
-          if (s.cardFamilyCanonical && !o.allowedCardFamilies.includes(s.cardFamilyCanonical)) {
+          if (!s.cardFamilyCanonical) {
+            continue;
+          }
+          if (!o.allowedCardFamilies.includes(s.cardFamilyCanonical)) {
             continue;
           }
         }
@@ -1741,6 +1744,41 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
   }
 
   return null;
+}
+function isSpecificFamilyOfferForGenericSelectedBank(offer, selectedPaymentMethods = []) {
+  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return false;
+
+  const selNorm = selectedPaymentMethods
+    .map(normalizeSelectedPM)
+    .filter((x) => x.typeNorm);
+
+  if (selNorm.length === 0) return false;
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return false;
+
+  const offerNorm = offerPMs
+    .map((pm) => normalizeOfferPM(pm, offer))
+    .filter((x) => x.typeNorm);
+
+  if (offerNorm.length === 0) return false;
+
+  for (const s of selNorm) {
+    for (const o of offerNorm) {
+      if (s.typeNorm !== o.typeNorm) continue;
+      if (o.bankCanonical && s.bankCanonical && o.bankCanonical !== s.bankCanonical) continue;
+
+      if (
+        Array.isArray(o.allowedCardFamilies) &&
+        o.allowedCardFamilies.length > 0 &&
+        !s.cardFamilyCanonical
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 // scope/cabin sanity
@@ -1978,8 +2016,12 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
     if (isHotelOnlyOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
-    if (!offerScopeMatchesTrip(offer, true, cabin)) continue;
-    if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+       if (!offerScopeMatchesTrip(offer, true, cabin)) continue;
+
+    const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+    const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(offer, selectedPaymentMethods);
+
+    if (!matchesNormally && !isSpecificFamilyInfoOnly) continue;
 
     const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
     const flat = offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null;
@@ -1988,9 +2030,9 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
-    if (hasDeterministicSignal) continue;
+    if (hasDeterministicSignal && !isSpecificFamilyInfoOnly) continue;
 
-    info.push({
+        info.push({
       title: offer?.title || null,
       couponCode: offer?.couponCode || offer?.code || offer?.parsedFields?.couponCode || offer?.parsedFields?.code || null,
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
@@ -1998,6 +2040,8 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
       paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
+      requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
+      infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
     });
 
     if (info.length >= limit) break;
