@@ -693,10 +693,12 @@ function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName)
   return { kind: "portal" };
 }
 
-function getOfferTypeLabel(kind) {
-  if (kind === "payment") return "Payment offer";
-  if (kind === "airline") return "Airline offer";
-  if (kind === "portal") return "Portal offer (no payment required)";
+function getOfferTypeLabel(kind, offer = null) {
+  const suffix = offer && isCashbackStyleOffer(offer) ? " (cashback)" : "";
+
+  if (kind === "payment") return `Payment offer${suffix}`;
+  if (kind === "airline") return `Airline offer${suffix}`;
+  if (kind === "portal") return `Portal offer (no payment required)${suffix}`;
   return null;
 }
 
@@ -1028,6 +1030,39 @@ function offerIsPerPassenger(offer) {
   );
 }
 
+function isCashbackStyleOffer(offer) {
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  // Strong cashback / deferred-benefit signals
+  if (
+    /\bcashback\b/.test(blob) ||
+    /\bback as cashback\b/.test(blob) ||
+    /\bget .* cashback\b/.test(blob) ||
+    /\bbonus\b/.test(blob) ||
+    /\breward point(s)?\b/.test(blob) ||
+    /\bsupercoin(s)?\b/.test(blob) ||
+    /\bwallet credit\b/.test(blob) ||
+    /\bcredited later\b/.test(blob) ||
+    /\bcredited within\b/.test(blob) ||
+    /\bcredit shell\b/.test(blob)
+  ) {
+    return true;
+  }
+
+  // If text explicitly says instant discount, it is NOT cashback-style
+  if (
+    /\binstant discount\b/.test(blob) ||
+    /\bflat .* off\b/.test(blob) ||
+    /\bup to .* off\b/.test(blob) ||
+    /\bdiscount\b/.test(blob)
+  ) {
+    return false;
+  }
+
+  return false;
+}
 function getOfferMaxDiscountAmount(offer, passengers = 1) {
   const pax = Math.max(1, Number(passengers) || 1);
 
@@ -1083,7 +1118,12 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   const base = Number(baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
 
-  if (!Number.isFinite(base) || base <= 0) return baseAmount;
+    if (!Number.isFinite(base) || base <= 0) return baseAmount;
+
+  // Cashback / reward-style offers should not reduce upfront payable price
+  if (isCashbackStyleOffer(offer)) {
+    return base;
+  }
 
   const perPassenger = offerIsPerPassenger(offer);
   const maxCap = getOfferMaxDiscountAmount(offer, passengers);
@@ -1558,13 +1598,13 @@ function evaluateOfferForFlight({
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
   if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
 
-  return {
+    return {
     ok: true,
     discounted,
     minTxn,
     maxDiscountAmount,
     offerKind: kindInfo.kind,
-    offerTypeLabel: getOfferTypeLabel(kindInfo.kind),
+    offerTypeLabel: getOfferTypeLabel(kindInfo.kind, offer),
     channelLabel: getOfferChannelLabel(offer),
   };
 }
