@@ -1185,10 +1185,56 @@ function normalizeSelectedPM(pm) {
     null;
 
   const bankCanonical = bankCanonicalFromAny(nameRaw);
-  return { typeNorm, bankCanonical, nameRaw };
+
+  const tenureMonths =
+    Number(pm?.tenureMonths) ||
+    Number(pm?.emiTenureMonths) ||
+    null;
+
+  return { typeNorm, bankCanonical, nameRaw, tenureMonths };
+}
+function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
+  const sources = [
+    pm?.conditions || "",
+    pm?.raw || "",
+    offer?.title || "",
+    offer?.rawDiscount || "",
+    offer?.offerSummary || "",
+    offer?.rawText || "",
+    offer?.terms?.raw || offer?.terms || "",
+  ]
+    .map((x) => String(x || ""))
+    .join(" ");
+
+  const blob = normalizeText(sources);
+
+  if (!/\bemi\b/.test(blob)) return [];
+
+  const found = new Set();
+
+  // patterns like "3 & 6 months", "3 and 6 months", "3/6 months"
+  const pairRegex = /(\d{1,2})\s*(?:&|and|\/)\s*(\d{1,2})\s*month(s)?/gi;
+  let m;
+  while ((m = pairRegex.exec(blob)) !== null) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (Number.isFinite(a)) found.add(a);
+    if (Number.isFinite(b)) found.add(b);
+  }
+
+  // patterns like "6 months EMI", "9 month tenure", "12 months only"
+  const singleRegex = /(\d{1,2})\s*month(s)?/gi;
+  while ((m = singleRegex.exec(blob)) !== null) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n)) found.add(n);
+  }
+
+  // remove silly values
+  const out = Array.from(found).filter((n) => n >= 2 && n <= 60).sort((a, b) => a - b);
+  return out;
 }
 
-function normalizeOfferPM(pm) {
+function normalizeOfferPM(pm, offer = null) {
   const methodCanonical = pm?.methodCanonical ? String(pm.methodCanonical).toUpperCase() : null;
   const typeRaw = String(pm?.type || "").toLowerCase();
 
@@ -1205,11 +1251,19 @@ function normalizeOfferPM(pm) {
   const bankFromFields = pm?.bankCanonical || pm?.bank || pm?.name || pm?.raw || "";
   const bankCanonical = bankCanonicalFromAny(bankFromFields);
 
+  const explicitTenure =
+    Number(pm?.tenureMonths) ||
+    null;
+
+  const inferredTenures = extractAllowedEmiTenuresFromOffer(offer, pm);
+
   return {
     typeNorm,
     bankCanonical,
     emiOnly: pm?.emiOnly === true,
     raw: String(pm?.raw || "").toLowerCase(),
+    tenureMonths: explicitTenure,
+    allowedTenures: inferredTenures,
   };
 }
 
@@ -1258,8 +1312,8 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
     return false;
   }
 
-  const offerNorm = offerPMs
-    .map(normalizeOfferPM)
+    const offerNorm = offerPMs
+    .map((pm) => normalizeOfferPM(pm, offer))
     .filter((x) => x.typeNorm);
 
   if (offerNorm.length === 0) return false;
@@ -1267,8 +1321,30 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
   for (const s of selNorm) {
     for (const o of offerNorm) {
       // UPI
-      if (s.typeNorm === "UPI") {
-        if (o.typeNorm !== "UPI") continue;
+            // EMI
+      if (s.typeNorm === "EMI") {
+        if (o.typeNorm !== "EMI" && !(o.typeNorm === "CREDIT_CARD" && o.emiOnly === true)) {
+          continue;
+        }
+
+        // If offer specifies allowed tenures and user provided one, it must match
+        if (
+          Number.isFinite(s.tenureMonths) &&
+          Array.isArray(o.allowedTenures) &&
+          o.allowedTenures.length > 0 &&
+          !o.allowedTenures.includes(Number(s.tenureMonths))
+        ) {
+          continue;
+        }
+
+        // If offer has explicit single tenureMonths on PM row and user provided one, it must match
+        if (
+          Number.isFinite(s.tenureMonths) &&
+          Number.isFinite(o.tenureMonths) &&
+          Number(s.tenureMonths) !== Number(o.tenureMonths)
+        ) {
+          continue;
+        }
 
         if (o.bankCanonical) {
           if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
