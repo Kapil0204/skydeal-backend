@@ -580,6 +580,61 @@ function isFlightOffer(offer) {
   return false;
 }
 
+function offerScopeMatchesTrip(offer, isDomestic, cabin) {
+  const title = String(offer?.title || "");
+  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+  const offerSummary =
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : (offer?.parsedFields?.offerSummary ? JSON.stringify(offer.parsedFields.offerSummary) : "");
+
+  const core = normalizeText(`${title} ${rawDiscount} ${offerSummary}`);
+
+  const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
+  const catBlob = Array.isArray(cats)
+    ? normalizeText(cats.map((c) => String(c || "")).join(" "))
+    : "";
+
+  const combined = `${core} ${catBlob}`.trim();
+
+  const hasFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(combined);
+  const hasNonFlightVertical =
+    /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(combined);
+
+  if (hasNonFlightVertical && !hasFlight) return false;
+
+  const cabinShort = normalizeCabinShort(cabin);
+
+  if (
+    (cabinShort === "economy" || cabinShort === "premium") &&
+    /\bbusiness\s+class\b|\bfirst\s+class\b/.test(combined)
+  ) {
+    return false;
+  }
+
+  const mentionsDomesticFlights =
+    /\bdomestic\s+flight(s)?\b/.test(combined) ||
+    (/\bdomestic\b/.test(combined) && /\bflight(s)?\b/.test(combined));
+
+  const mentionsInternationalFlights =
+    /\binternational\s+flight(s)?\b/.test(combined) ||
+    (/\binternational\b/.test(combined) && /\bflight(s)?\b/.test(combined));
+
+  if (isDomestic) {
+    if (mentionsInternationalFlights && !mentionsDomesticFlights) {
+      return false;
+    }
+  } else {
+    if (mentionsDomesticFlights && !mentionsInternationalFlights) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function isHotelOnlyOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
 
