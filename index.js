@@ -1273,11 +1273,17 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
 // scope/cabin sanity
 function offerScopeMatchesTrip(offer, isDomestic, cabin) {
-  const blob = normalizeText(`${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`);
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.offerSummary || ""} ${offer?.terms || ""}`
+  );
+
   const cats = offer?.offerCategories || offer?.parsedFields?.offerCategories;
-  const catBlob = Array.isArray(cats) ? normalizeText(cats.map((c) => String(c || "")).join(" ")) : "";
+  const catBlob = Array.isArray(cats)
+    ? normalizeText(cats.map((c) => String(c || "")).join(" "))
+    : "";
+
   const combined = `${blob} ${catBlob}`.trim();
-    // ✅ Extra safety: reject non-flight verticals unless flight is explicitly mentioned
+
   const hasFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(combined);
   const hasNonFlightVertical =
     /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(combined);
@@ -1286,17 +1292,29 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 
   const cabinShort = normalizeCabinShort(cabin);
 
-  if ((cabinShort === "economy" || cabinShort === "premium") && /\bbusiness\s+class\b|\bfirst\s+class\b/.test(combined)) {
+  if (
+    (cabinShort === "economy" || cabinShort === "premium") &&
+    /\bbusiness\s+class\b|\bfirst\s+class\b/.test(combined)
+  ) {
     return false;
   }
 
+  const mentionsDomesticFlights =
+    /\bdomestic\s+flight(s)?\b/.test(combined) ||
+    (/\bdomestic\b/.test(combined) && /\bflight(s)?\b/.test(combined));
+
+  const mentionsInternationalFlights =
+    /\binternational\s+flight(s)?\b/.test(combined) ||
+    (/\binternational\b/.test(combined) && /\bflight(s)?\b/.test(combined));
+
   if (isDomestic) {
-    const hasDomesticFlights = /\bdomestic\s+flight(s)?\b/.test(combined);
-    const hasInternationalFlights = /\binternational\s+flight(s)?\b/.test(combined);
-
-    if (hasInternationalFlights && !hasDomesticFlights) return false;
-
-    if (/\binternational\b/.test(combined) && !/\bdomestic\b/.test(combined) && /\bflight(s)?\b/.test(combined)) {
+    // Domestic search must reject international-only flight offers
+    if (mentionsInternationalFlights && !mentionsDomesticFlights) {
+      return false;
+    }
+  } else {
+    // International search must reject domestic-only flight offers
+    if (mentionsDomesticFlights && !mentionsInternationalFlights) {
       return false;
     }
   }
