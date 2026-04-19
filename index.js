@@ -1007,6 +1007,12 @@ function getOfferMaxDiscountAmount(offer) {
     if (Number.isFinite(n) && n > 0) return n;
   }
 
+  const isPerPax = offerIsPerPassenger(offer);
+
+if (isPerPax && Number.isFinite(directNum) && directNum > 0) {
+  const pax = Number(globalThis.__CURRENT_PASSENGERS__ || 1);
+  return directNum * pax;
+}
   return null;
 }
 
