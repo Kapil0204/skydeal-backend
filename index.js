@@ -1298,7 +1298,54 @@ function normalizeSelectedPM(pm) {
     Number(pm?.emiTenureMonths) ||
     null;
 
-  return { typeNorm, bankCanonical, nameRaw, tenureMonths };
+  const networkRaw = String(pm?.network || "").trim();
+  const networkCanonical =
+    /visa/i.test(networkRaw) ? "VISA" :
+    /master/i.test(networkRaw) ? "MASTERCARD" :
+    /rupay/i.test(networkRaw) ? "RUPAY" :
+    /american express|amex/i.test(networkRaw) ? "AMERICAN_EXPRESS" :
+    null;
+
+  const providerRaw = String(pm?.provider || "").trim();
+  const providerCanonical =
+    /cred/i.test(providerRaw) ? "CRED" :
+    /google\s*pay|gpay/i.test(providerRaw) ? "GOOGLE_PAY" :
+    /phonepe/i.test(providerRaw) ? "PHONEPE" :
+    /paytm/i.test(providerRaw) ? "PAYTM" :
+    /bhim/i.test(providerRaw) ? "BHIM" :
+    /amazon\s*pay/i.test(providerRaw) ? "AMAZON_PAY" :
+    /mobikwik/i.test(providerRaw) ? "MOBIKWIK" :
+    /freecharge/i.test(providerRaw) ? "FREECHARGE" :
+    null;
+
+  const cardFamilyRaw = String(pm?.cardFamily || pm?.cardVariant || "").trim();
+  const cardFamilyCanonical =
+    /flipkart\s*axis/i.test(cardFamilyRaw) ? "FLIPKART_AXIS" :
+    /amazon\s*pay\s*icici/i.test(cardFamilyRaw) ? "AMAZON_PAY_ICICI" :
+    /tata\s*neu/i.test(cardFamilyRaw) ? "TATA_NEU" :
+    /swiggy\s*hdfc/i.test(cardFamilyRaw) ? "SWIGGY_HDFC" :
+    /diners/i.test(cardFamilyRaw) ? "DINERS" :
+    /infinia/i.test(cardFamilyRaw) ? "INFINIA" :
+    /regalia/i.test(cardFamilyRaw) ? "REGALIA" :
+    /millennia/i.test(cardFamilyRaw) ? "MILLENNIA" :
+    /sbi\s*cashback/i.test(cardFamilyRaw) ? "SBI_CASHBACK" :
+    null;
+
+  const isCorporate =
+    pm?.isCorporate === true ? true :
+    pm?.isCorporate === false ? false :
+    null;
+
+  return {
+    typeNorm,
+    bankCanonical,
+    nameRaw,
+    tenureMonths,
+    networkCanonical,
+    providerCanonical,
+    cardFamilyCanonical,
+    isCorporate
+  };
 }
 function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
   const sources = [
@@ -1341,6 +1388,89 @@ function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
   return out;
 }
 
+function extractOfferNetworkRestrictions(offer, pm = null) {
+  const blob = normalizeText(
+    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const allowed = new Set();
+  const excluded = new Set();
+
+  if (/\bvisa\b/.test(blob)) allowed.add("VISA");
+  if (/\bmastercard\b|\bmaster card\b/.test(blob)) allowed.add("MASTERCARD");
+  if (/\brupay\b/.test(blob)) allowed.add("RUPAY");
+  if (/\bamerican express\b|\bamex\b/.test(blob)) allowed.add("AMERICAN_EXPRESS");
+
+  if (/\bnot valid on visa\b|\bexcluding visa\b/.test(blob)) excluded.add("VISA");
+  if (/\bnot valid on mastercard\b|\bexcluding mastercard\b|\bexcluding master card\b/.test(blob)) excluded.add("MASTERCARD");
+  if (/\bnot valid on rupay\b|\bexcluding rupay\b/.test(blob)) excluded.add("RUPAY");
+  if (/\bnot valid on american express\b|\bnot valid on amex\b|\bexcluding amex\b/.test(blob)) excluded.add("AMERICAN_EXPRESS");
+
+  return {
+    allowed: Array.from(allowed),
+    excluded: Array.from(excluded)
+  };
+}
+
+function extractOfferProviderRestrictions(offer, pm = null) {
+  const blob = normalizeText(
+    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const allowed = new Set();
+
+  if (/\bcred\b/.test(blob)) allowed.add("CRED");
+  if (/\bgoogle pay\b|\bgpay\b/.test(blob)) allowed.add("GOOGLE_PAY");
+  if (/\bphonepe\b/.test(blob)) allowed.add("PHONEPE");
+  if (/\bpaytm\b/.test(blob)) allowed.add("PAYTM");
+  if (/\bbhim\b/.test(blob)) allowed.add("BHIM");
+  if (/\bamazon pay\b/.test(blob)) allowed.add("AMAZON_PAY");
+  if (/\bmobikwik\b/.test(blob)) allowed.add("MOBIKWIK");
+  if (/\bfreecharge\b/.test(blob)) allowed.add("FREECHARGE");
+
+  return Array.from(allowed);
+}
+
+function extractOfferCardFamilyRestrictions(offer, pm = null) {
+  const blob = normalizeText(
+    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const allowed = new Set();
+
+  if (/\bflipkart\s*axis\b/.test(blob)) allowed.add("FLIPKART_AXIS");
+  if (/\bamazon\s*pay\s*icici\b/.test(blob)) allowed.add("AMAZON_PAY_ICICI");
+  if (/\btata\s*neu\b/.test(blob)) allowed.add("TATA_NEU");
+  if (/\bswiggy\s*hdfc\b/.test(blob)) allowed.add("SWIGGY_HDFC");
+  if (/\bdiners\b/.test(blob)) allowed.add("DINERS");
+  if (/\binfinia\b/.test(blob)) allowed.add("INFINIA");
+  if (/\bregalia\b/.test(blob)) allowed.add("REGALIA");
+  if (/\bmillennia\b/.test(blob)) allowed.add("MILLENNIA");
+  if (/\bsbi\s*cashback\b/.test(blob)) allowed.add("SBI_CASHBACK");
+
+  return Array.from(allowed);
+}
+
+function extractOfferCorporateRestriction(offer, pm = null) {
+  const blob = normalizeText(
+    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  );
+
+  const excludesCorporate =
+    /\bnot valid on corporate\b/.test(blob) ||
+    /\bnot applicable on corporate\b/.test(blob) ||
+    /\bexcluding corporate\b/.test(blob) ||
+    /\bnot valid on commercial\b/.test(blob) ||
+    /\bnot applicable on commercial\b/.test(blob) ||
+    /\bexcluding commercial\b/.test(blob);
+
+  const corporateOnly =
+    /\bcorporate cards only\b/.test(blob) ||
+    /\bcommercial cards only\b/.test(blob);
+
+  return { excludesCorporate, corporateOnly };
+}
+
 function normalizeOfferPM(pm, offer = null) {
   const methodCanonical = pm?.methodCanonical ? String(pm.methodCanonical).toUpperCase() : null;
   const typeRaw = String(pm?.type || "").toLowerCase();
@@ -1363,6 +1493,10 @@ function normalizeOfferPM(pm, offer = null) {
     null;
 
   const inferredTenures = extractAllowedEmiTenuresFromOffer(offer, pm);
+  const networkRestrictions = extractOfferNetworkRestrictions(offer, pm);
+  const providerRestrictions = extractOfferProviderRestrictions(offer, pm);
+  const cardFamilyRestrictions = extractOfferCardFamilyRestrictions(offer, pm);
+  const corporateRestriction = extractOfferCorporateRestriction(offer, pm);
 
   return {
     typeNorm,
@@ -1371,6 +1505,12 @@ function normalizeOfferPM(pm, offer = null) {
     raw: String(pm?.raw || "").toLowerCase(),
     tenureMonths: explicitTenure,
     allowedTenures: inferredTenures,
+    allowedNetworks: networkRestrictions.allowed,
+    excludedNetworks: networkRestrictions.excluded,
+    allowedProviders: providerRestrictions,
+    allowedCardFamilies: cardFamilyRestrictions,
+    excludesCorporate: corporateRestriction.excludesCorporate,
+    corporateOnly: corporateRestriction.corporateOnly
   };
 }
 
@@ -1422,17 +1562,28 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
   if (offerNorm.length === 0) return false;
 
-  for (const s of selNorm) {
+   for (const s of selNorm) {
     for (const o of offerNorm) {
       // UPI
       if (s.typeNorm === "UPI") {
         if (o.typeNorm !== "UPI") continue;
+
+        if (
+          Array.isArray(o.allowedProviders) &&
+          o.allowedProviders.length > 0 &&
+          s.providerCanonical &&
+          !o.allowedProviders.includes(s.providerCanonical)
+        ) {
+          continue;
+        }
 
         if (o.bankCanonical) {
           if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
           continue;
         }
 
+        // Generic UPI offer with no bank restriction
+        if (!o.bankCanonical) return true;
         continue;
       }
 
@@ -1442,7 +1593,6 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        // If offer specifies allowed tenures and user provided one, it must match
         if (
           Number.isFinite(s.tenureMonths) &&
           Array.isArray(o.allowedTenures) &&
@@ -1452,11 +1602,24 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        // If offer has explicit single tenureMonths on PM row and user provided one, it must match
         if (
           Number.isFinite(s.tenureMonths) &&
           Number.isFinite(o.tenureMonths) &&
           Number(s.tenureMonths) !== Number(o.tenureMonths)
+        ) {
+          continue;
+        }
+
+        if (
+          o.excludesCorporate === true &&
+          s.isCorporate === true
+        ) {
+          continue;
+        }
+
+        if (
+          o.corporateOnly === true &&
+          s.isCorporate === false
         ) {
           continue;
         }
@@ -1471,6 +1634,47 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
       // Credit / Debit / NetBanking / Wallet
       if (s.typeNorm === o.typeNorm) {
+        if (
+          Array.isArray(o.allowedNetworks) &&
+          o.allowedNetworks.length > 0 &&
+          s.networkCanonical &&
+          !o.allowedNetworks.includes(s.networkCanonical)
+        ) {
+          continue;
+        }
+
+        if (
+          Array.isArray(o.excludedNetworks) &&
+          o.excludedNetworks.length > 0 &&
+          s.networkCanonical &&
+          o.excludedNetworks.includes(s.networkCanonical)
+        ) {
+          continue;
+        }
+
+        if (
+          Array.isArray(o.allowedCardFamilies) &&
+          o.allowedCardFamilies.length > 0 &&
+          s.cardFamilyCanonical &&
+          !o.allowedCardFamilies.includes(s.cardFamilyCanonical)
+        ) {
+          continue;
+        }
+
+        if (
+          o.excludesCorporate === true &&
+          s.isCorporate === true
+        ) {
+          continue;
+        }
+
+        if (
+          o.corporateOnly === true &&
+          s.isCorporate === false
+        ) {
+          continue;
+        }
+
         if (o.bankCanonical) {
           if (s.bankCanonical && s.bankCanonical === o.bankCanonical) return true;
           continue;
