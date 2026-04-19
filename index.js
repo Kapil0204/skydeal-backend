@@ -969,6 +969,47 @@ function offerIsPerPassenger(offer) {
   );
 }
 
+function getOfferMaxDiscountAmount(offer) {
+  const direct =
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    offer?.bestTierForDisplay?.maxDiscountAmount ??
+    offer?.parsedFields?.bestTierForDisplay?.maxDiscountAmount ??
+    null;
+
+  const directNum = Number(direct);
+  if (Number.isFinite(directNum) && directNum > 0) return directNum;
+
+  const tiers =
+    offer?.discountTiers ??
+    offer?.parsedFields?.discountTiers ??
+    null;
+
+  if (Array.isArray(tiers) && tiers.length > 0) {
+    const caps = tiers
+      .map((t) => Number(t?.maxDiscountAmount))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    if (caps.length > 0) return Math.max(...caps);
+  }
+
+  const blob = String(
+    `${offer?.rawDiscount || ""} ${offer?.title || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""}`
+  );
+
+  const m =
+    blob.match(/\bup to\s*(?:rs\.?|inr|₹)\s*([\d,]{3,})/i) ||
+    blob.match(/\bcapped at\s*(?:rs\.?|inr|₹)\s*([\d,]{3,})/i) ||
+    blob.match(/\bmax(?:imum)?\s*(?:discount)?\s*(?:of)?\s*(?:rs\.?|inr|₹)\s*([\d,]{3,})/i);
+
+  if (m && m[1]) {
+    const n = Number(String(m[1]).replace(/,/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  return null;
+}
+
 function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   const base = Number(baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
@@ -976,6 +1017,7 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
   const perPassenger = offerIsPerPassenger(offer);
+  const maxCap = getOfferMaxDiscountAmount(offer);
 
   let pct = null;
   if (offer?.discountPercent != null) {
@@ -988,24 +1030,41 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   }
 
   if (pct != null) {
-    let discountAmount;
+    let discountAmount = 0;
 
     if (perPassenger) {
       const perPaxBase = base / pax;
-      discountAmount = Math.round(perPaxBase * (pct / 100) * pax);
+      let perPaxDiscount = Math.round(perPaxBase * (pct / 100));
+
+      if (Number.isFinite(maxCap) && maxCap > 0) {
+        perPaxDiscount = Math.min(perPaxDiscount, maxCap);
+      }
+
+      discountAmount = perPaxDiscount * pax;
     } else {
       discountAmount = Math.round(base * (pct / 100));
+
+      if (Number.isFinite(maxCap) && maxCap > 0) {
+        discountAmount = Math.min(discountAmount, maxCap);
+      }
     }
 
     const discounted = Math.round(base - discountAmount);
     return discounted < base ? discounted : base;
   }
 
-  const flat =
-    Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount);
+  const flat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount
+  );
 
   if (Number.isFinite(flat) && flat > 0) {
-    const discountAmount = perPassenger ? Math.round(flat * pax) : Math.round(flat);
+    let discountAmount = perPassenger ? Math.round(flat * pax) : Math.round(flat);
+
+    if (!perPassenger && Number.isFinite(maxCap) && maxCap > 0) {
+      discountAmount = Math.min(discountAmount, maxCap);
+    }
+
     const discounted = Math.round(base - discountAmount);
     return discounted < base ? discounted : base;
   }
@@ -1315,6 +1374,7 @@ function evaluateOfferForFlight({
   }
 
   const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic, passengers);
+const maxDiscountAmount = getOfferMaxDiscountAmount(offer);
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
   if (discounted >= baseAmount) return { ok: false, reasons: ["NO_IMPROVEMENT"] };
 
