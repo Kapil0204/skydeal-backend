@@ -2240,16 +2240,23 @@ app.post("/search", async (req, res) => {
     }
 
     // Return
-    let returnFlights = [];
+       let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
-      const retRes = await fetchOneWayTrip({ from: to, to: from, date: retDate, adults, cabin, currency });
+      const retRes = await fetchOneWayTrip({
+        from: to,
+        to: from,
+        date: retDate,
+        adults,
+        cabin,
+        currency
+      });
       meta.retStatus = retRes.status;
       meta.request.retTried = retRes.tried;
 
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
 
-           const returnRouteIsDomestic = isDomesticRoute(to, from);
+      const returnRouteIsDomestic = isDomesticRoute(to, from);
 
       const enriched = [];
       for (const f of retFlightsLimited) {
@@ -2266,6 +2273,7 @@ app.post("/search", async (req, res) => {
         );
       }
       returnFlights = enriched;
+    }
 
     res.json({ meta, outboundFlights, returnFlights });
   } catch (e) {
