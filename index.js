@@ -1347,13 +1347,15 @@ function evaluateOfferForFlight({
   const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
   if (hasExplicitPM && !hasSelectedPM) {
-    return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
-  }
-
-  const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
-  if (!kindInfo.kind) {
-    return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
-  }
+      return {
+    ok: true,
+    discounted,
+    minTxn,
+    maxDiscountAmount,
+    offerKind: kindInfo.kind,
+    offerTypeLabel: getOfferTypeLabel(kindInfo.kind),
+    channelLabel: getOfferChannelLabel(offer),
+  };
 
   const minTxn = getMinTxnValue(offer);
   const totalAmount = Number(eligibilityAmount ?? baseAmount);
@@ -1428,6 +1430,7 @@ function pickBestOfferForPortal(
   offerTypeLabel: ev.offerTypeLabel,
   channelLabel: ev.channelLabel,
   nonClubbable: offerCannotBeClubbed(offer),
+  maxDiscountAmount: ev.maxDiscountAmount ?? null,
 };
 
     if (ev.offerKind === "payment") {
