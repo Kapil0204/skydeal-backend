@@ -2097,13 +2097,12 @@ async function applyOffersToFlight(
 
     const best = matchingCandidates.length > 0 ? matchingCandidates[0] : null;
     const otherMatchedOffers = matchingCandidates.slice(1);
-
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
     ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
     : null;
-    
-    const bestDeal = best
+
+const bestDeal = best
   ? {
       portal,
       finalPrice: best.finalPrice,
@@ -2123,29 +2122,7 @@ const matchedPaymentLabel =
     }
   : null;
 
-    return {
-      portal,
-      basePrice: portalBase,
-      finalPrice: best ? best.finalPrice : portalBase,
-      applied: !!best,
-      code: bestDeal?.code || null,
-      title: bestDeal?.title || null,
-      rawDiscount: bestDeal?.rawDiscount || null,
-      terms: best?.offer?.terms || null,
-      constraints: bestDeal?.constraints || null,
-      paymentLabel: best
-  ? (
-      best.offerKind === "payment"
-        ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods) || "Payment required")
-        : "No payment restriction"
-    )
-  : null,
-offerTypeLabel: bestDeal?.offerTypeLabel || null,
-channelLabel: bestDeal?.channelLabel || null,
-explain: best
-  ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
-  : null,
-    } const bestOfferId =
+const bestOfferId =
   best?.offer?._id?.toString?.() ||
   best?.offer?.couponCode ||
   best?.offer?.code ||
@@ -2163,21 +2140,26 @@ const otherMatchedOffersClean = otherMatchedOffers.filter((row) => {
 
 return {
   portal,
-  price: best ? best.finalPrice : portalBase,
   basePrice: portalBase,
-  applied: !!best,
-  code:
-    best?.offer?.couponCode ||
-    best?.offer?.code ||
-    best?.offer?.parsedFields?.couponCode ||
-    best?.offer?.parsedFields?.code ||
-    null,
-  title:
-    best?.offer?.title ||
-    best?.offer?.parsedFields?.title ||
-    null,
   finalPrice: best ? best.finalPrice : portalBase,
-
+  applied: !!best,
+  code: bestDeal?.code || null,
+  title: bestDeal?.title || null,
+  rawDiscount: bestDeal?.rawDiscount || null,
+  terms: best?.offer?.terms || null,
+  constraints: bestDeal?.constraints || null,
+  paymentLabel: best
+    ? (
+        best.offerKind === "payment"
+          ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods) || "Payment required")
+          : "No payment restriction"
+      )
+    : null,
+  offerTypeLabel: bestDeal?.offerTypeLabel || null,
+  channelLabel: bestDeal?.channelLabel || null,
+  explain: best
+    ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
+    : null,
   infoOffers: [
     ...buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
     ...otherMatchedOffersClean.map((row) => ({
@@ -2197,11 +2179,11 @@ return {
       infoLabel: "Another applicable offer",
     })),
   ],
+  debugCounts: {
+    offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
+  },
 };
-      debugCounts: {
-        offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
-      },
-    };
+
   });
 
   const bestPortal = portalPrices.reduce((acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc), null);
