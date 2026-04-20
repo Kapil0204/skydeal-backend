@@ -2028,15 +2028,22 @@ function buildInfoOffersForPortal(
 
     if (!matchesNormally && !isSpecificFamilyInfoOnly) continue;
 
-    const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
+        const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
     const flat = offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null;
 
     const hasDeterministicSignal =
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
+    const offerCouponCode =
+      offer?.couponCode ||
+      offer?.code ||
+      offer?.parsedFields?.couponCode ||
+      offer?.parsedFields?.code ||
+      null;
+
     // Skip ONLY if this exact offer is already applied
-if (offer?.couponCode === appliedOffer?.couponCode) continue;
+    if (appliedCouponCode && offerCouponCode === appliedCouponCode) continue;
 
     info.push({
       title: offer?.title || null,
@@ -2171,16 +2178,17 @@ return {
   explain: best
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
-    infoOffers: [
+      infoOffers: [
     ...buildInfoOffersForPortal(
-  offers,
-  portal,
-  selectedPaymentMethods,
-  cabin,
-  isDomestic,
-  best?.couponCode || null,
-  5
-)
+      offers,
+      portal,
+      selectedPaymentMethods,
+      cabin,
+      isDomestic,
+      best?.couponCode || best?.code || null,
+      5
+    ),
+    ...otherMatchedOffersClean.map((row) => ({
     ...otherMatchedOffersClean.map((row) => ({
       title: row.offer?.title || null,
       couponCode:
