@@ -1252,26 +1252,26 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
 // Payment matching (robust)
 // --------------------
 function bankCanonicalFromAny(raw) {
-  const s = String(raw || "").toUpperCase();
+  const s = String(raw || "").toUpperCase().replace(/\s+/g, " ").trim();
 
-  const rules = [
-    { re: /\bAXIS\b/, canon: "AXIS_BANK" },
-    { re: /\bHDFC\b/, canon: "HDFC_BANK" },
-    { re: /\bICICI\b/, canon: "ICICI_BANK" },
-    { re: /\bHSBC\b/, canon: "HSBC" },
-    { re: /\bSBI\b|\bSTATE_BANK\b/, canon: "STATE_BANK_OF_INDIA" },
-    { re: /\bKOTAK\b/, canon: "KOTAK_BANK" },
-    { re: /\bYES\b/, canon: "YES_BANK" },
-    { re: /\bRBL\b/, canon: "RBL_BANK" },
-    { re: /\bAU\b/, canon: "AU_BANK" },
-    { re: /\bFEDERAL\b/, canon: "FEDERAL_BANK" },
-    { re: /\bIDFC\b/, canon: "IDFC_FIRST_BANK" },
-    { re: /\bINDUSIND\b/, canon: "INDUSIND_BANK" },
-  ];
+  if (!s) return null;
 
-  for (const r of rules) {
-    if (r.re.test(s)) return r.canon;
-  }
+  if (/\bFLIPKART\b.*\bAXIS\b|\bAXIS\b.*\bFLIPKART\b/.test(s)) return "AXIS_BANK";
+  if (/\bAXIS\b/.test(s)) return "AXIS_BANK";
+
+  if (/\bHDFC\b/.test(s)) return "HDFC_BANK";
+  if (/\bICICI\b/.test(s)) return "ICICI_BANK";
+  if (/\bHSBC\b/.test(s)) return "HSBC";
+  if (/\bSBI\b|\bSTATE BANK\b|\bSTATE_BANK\b/.test(s)) return "STATE_BANK_OF_INDIA";
+  if (/\bKOTAK\b/.test(s)) return "KOTAK_BANK";
+  if (/\bYES\b/.test(s)) return "YES_BANK";
+  if (/\bRBL\b/.test(s)) return "RBL_BANK";
+  if (/\bAU\b|\bAU SMALL\b/.test(s)) return "AU_BANK";
+  if (/\bFEDERAL\b/.test(s)) return "FEDERAL_BANK";
+  if (/\bIDFC\b/.test(s)) return "IDFC_FIRST_BANK";
+  if (/\bINDUSIND\b/.test(s)) return "INDUSIND_BANK";
+  if (/\bAMEX\b|\bAMERICAN EXPRESS\b/.test(s)) return "AMERICAN_EXPRESS";
+  if (/\bONECARD\b|\bONE CARD\b/.test(s)) return "ONECARD";
 
   const cleaned = s.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return cleaned || null;
