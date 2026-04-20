@@ -2005,6 +2005,7 @@ function buildInfoOffersForPortal(
   selectedPaymentMethods,
   cabin,
   isDomestic,
+  appliedCouponCode,
   limit = 5
 ) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
@@ -2034,7 +2035,8 @@ function buildInfoOffersForPortal(
       (typeof percent === "number" && percent > 0) ||
       (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
 
-    if (hasDeterministicSignal && !isSpecificFamilyInfoOnly) continue;
+    // Skip ONLY if this exact offer is already applied
+if (offer?.couponCode === appliedOffer?.couponCode) continue;
 
     info.push({
       title: offer?.title || null,
@@ -2171,13 +2173,14 @@ return {
     : null,
     infoOffers: [
     ...buildInfoOffersForPortal(
-      offers,
-      portal,
-      selectedPaymentMethods,
-      cabin,
-      isDomestic,
-      5
-    ),
+  offers,
+  portal,
+  selectedPaymentMethods,
+  cabin,
+  isDomestic,
+  best?.couponCode || null,
+  5
+)
     ...otherMatchedOffersClean.map((row) => ({
       title: row.offer?.title || null,
       couponCode:
