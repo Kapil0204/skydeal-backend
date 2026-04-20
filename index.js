@@ -129,103 +129,57 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
   });
 
   const tried = [];
+  let lastError = null;
 
-let lastError = null;
-
-for (let attempt = 1; attempt <= 3; attempt++) {
-  try {
-    const res = await fetch(url);
-    const text = await res.text();
-
-    tried.push({
-      url,
-      status: res.status,
-      attempt,
-      ...(attempt > 1 ? { retry: true } : {}),
-    });
-
-    if (res.ok) {
-      return {
-        ok: true,
-        data: JSON.parse(text),
-        tried,
-      };
-    } else {
-      lastError = {
-        status: res.status,
-        body: text,
-      };
-    }
-  } catch (err) {
-    lastError = { error: err.message };
-  }
-
-  // ⏳ small delay before retry (important)
-  await new Promise((r) => setTimeout(r, 500));
-}
-
-// ❌ All attempts failed
-return {
-  ok: false,
-  error: lastError,
-  tried,
-};
-
-  async function tryOnce() {
-    return axios.get(url, { timeout: 25000 });
-  }
-
-  try {
-    const r = await tryOnce();
-    return { status: r.status, data: r.data, tried };
-  } catch (e1) {
-    const st1 = e1?.response?.status || 0;
-    const body1 =
-      typeof e1?.response?.data === "string"
-        ? e1.response.data
-        : e1?.response?.data
-          ? JSON.stringify(e1.response.data)
-          : "";
-
-    tried[0].status = st1;
-    tried[0].body = body1.slice(0, 800);
-
-    const shouldRetry = st1 === 400 || st1 >= 500 || st1 === 0;
-
-    if (!shouldRetry) {
-      const err = new Error(`FlightAPI request failed (${st1 || "no-status"})`);
-      err.status = st1 || 500;
-      err.tried = tried;
-      throw err;
-    }
-
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      const r2 = await tryOnce();
-      tried.push({ url, status: r2.status, retry: true });
-      return { status: r2.status, data: r2.data, tried };
-    } catch (e2) {
-      const st2 = e2?.response?.status || 0;
-      const body2 =
-        typeof e2?.response?.data === "string"
-          ? e2.response.data
-          : e2?.response?.data
-            ? JSON.stringify(e2.response.data)
-            : "";
+      const res = await fetch(url);
+      const text = await res.text();
 
+      const triedRow = {
+        url,
+        status: res.status,
+        attempt,
+        ...(attempt > 1 ? { retry: true } : {}),
+      };
+
+      if (!res.ok) {
+        triedRow.body = text.slice(0, 800);
+      }
+
+      tried.push(triedRow);
+
+      if (res.ok) {
+        return {
+          status: res.status,
+          data: JSON.parse(text),
+          tried,
+        };
+      } else {
+        lastError = {
+          status: res.status,
+          body: text,
+        };
+      }
+    } catch (err) {
+      lastError = { error: err.message };
       tried.push({
         url,
-        retry: true,
-        status: st2,
-        body: body2.slice(0, 800),
+        attempt,
+        ...(attempt > 1 ? { retry: true } : {}),
+        error: err.message,
       });
-
-      const err = new Error(`FlightAPI request failed (${st2 || st1 || "no-status"})`);
-      err.status = st2 || st1 || 500;
-      err.tried = tried;
-      throw err;
     }
+
+    await new Promise((r) => setTimeout(r, 500));
   }
+
+  const err = new Error(
+    `FlightAPI request failed (${lastError?.status || lastError?.error || "no-status"})`
+  );
+  err.status = lastError?.status || 500;
+  err.tried = tried;
+  throw err;
 }
 
 // --------------------
@@ -2045,7 +1999,14 @@ const all = [
 return all.length > 0 ? all[0] : null;
 }
 
-function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, limit = 5) {
+function buildInfoOffersForPortal(
+  offers,
+  portal,
+  selectedPaymentMethods,
+  cabin,
+  isDomestic,
+  limit = 5
+) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return [];
 
@@ -2053,14 +2014,16 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
 
   for (const offer of offers) {
     if (!isFlightOffer(offer)) continue;
-    // ✅ keep info list flight-only, but also skip hotel-only
     if (isHotelOnlyOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
-       if (!offerScopeMatchesTrip(offer, true, cabin)) continue;
+    if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) continue;
 
     const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
-    const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(offer, selectedPaymentMethods);
+    const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(
+      offer,
+      selectedPaymentMethods
+    );
 
     if (!matchesNormally && !isSpecificFamilyInfoOnly) continue;
 
@@ -2073,9 +2036,14 @@ function buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin,
 
     if (hasDeterministicSignal && !isSpecificFamilyInfoOnly) continue;
 
-        info.push({
+    info.push({
       title: offer?.title || null,
-      couponCode: offer?.couponCode || offer?.code || offer?.parsedFields?.couponCode || offer?.parsedFields?.code || null,
+      couponCode:
+        offer?.couponCode ||
+        offer?.code ||
+        offer?.parsedFields?.couponCode ||
+        offer?.parsedFields?.code ||
+        null,
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
@@ -2201,8 +2169,15 @@ return {
   explain: best
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
-  infoOffers: [
-    ...buildInfoOffersForPortal(offers, portal, selectedPaymentMethods, cabin, 5),
+    infoOffers: [
+    ...buildInfoOffersForPortal(
+      offers,
+      portal,
+      selectedPaymentMethods,
+      cabin,
+      isDomestic,
+      5
+    ),
     ...otherMatchedOffersClean.map((row) => ({
       title: row.offer?.title || null,
       couponCode:
