@@ -128,7 +128,48 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
     currency,
   });
 
-  const tried = [{ url }];
+  const tried = [];
+
+let lastError = null;
+
+for (let attempt = 1; attempt <= 3; attempt++) {
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+
+    tried.push({
+      url,
+      status: res.status,
+      attempt,
+      ...(attempt > 1 ? { retry: true } : {}),
+    });
+
+    if (res.ok) {
+      return {
+        ok: true,
+        data: JSON.parse(text),
+        tried,
+      };
+    } else {
+      lastError = {
+        status: res.status,
+        body: text,
+      };
+    }
+  } catch (err) {
+    lastError = { error: err.message };
+  }
+
+  // ⏳ small delay before retry (important)
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+// ❌ All attempts failed
+return {
+  ok: false,
+  error: lastError,
+  tried,
+};
 
   async function tryOnce() {
     return axios.get(url, { timeout: 25000 });
