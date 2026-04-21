@@ -2014,13 +2014,43 @@ function buildInfoOffersForPortal(
   const info = [];
 
   for (const offer of offers) {
-    if (!isFlightOffer(offer)) continue;
-    if (isHotelOnlyOffer(offer)) continue;
-    if (isOfferExpired(offer)) continue;
-    if (!offerAppliesToPortal(offer, portal)) continue;
-    if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) continue;
+       const ev = evaluateOfferForFlight({
+      offer,
+      portal,
+      baseAmount: 10000,
+      eligibilityAmount: 10000,
+      selectedPaymentMethods,
+      isDomestic,
+      cabin,
+      flightAirlineName: "",
+      tripType: "one-way",
+      passengers: 1,
+    });
 
-        const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+    const nonPaymentFailReasons = new Set([
+      "NOT_FLIGHT_OFFER",
+      "HOTEL_ONLY_OFFER",
+      "HOTEL_ONLY",
+      "NON_FLIGHT_VERTICAL",
+      "FIRST_TIME_OR_NEW_USER",
+      "EXPIRED",
+      "PORTAL_MISMATCH",
+      "SCOPE_MISMATCH",
+      "ROUND_TRIP_ONLY",
+      "PASSENGER_COUNT_RESTRICTED",
+      "PASSENGER_COUNT_RESTRICTED_SOLO_ONLY",
+      "PASSENGER_COUNT_BELOW_MINIMUM",
+      "PASSENGER_COUNT_ABOVE_MAXIMUM",
+    ]);
+
+    if (
+      !ev.ok &&
+      !(Array.isArray(ev.reasons) && ev.reasons.every((r) => !nonPaymentFailReasons.has(r)))
+    ) {
+      continue;
+    }
+
+           const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
     const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(
       offer,
       selectedPaymentMethods
@@ -2197,14 +2227,18 @@ return {
     : null,
         infoOffers: [
     ...buildInfoOffersForPortal(
-      offers,
-      portal,
-      selectedPaymentMethods,
-      cabin,
-      isDomestic,
-      best?.couponCode || best?.code || null,
-      5
-    ),
+  offers,
+  portal,
+  selectedPaymentMethods,
+  cabin,
+  isDomestic,
+  best?.offer?.couponCode ||
+    best?.offer?.code ||
+    best?.offer?.parsedFields?.couponCode ||
+    best?.offer?.parsedFields?.code ||
+    null,
+  5
+),
     ...otherMatchedOffersClean.map((row) => ({
       title: row.offer?.title || null,
       couponCode:
