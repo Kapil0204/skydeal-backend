@@ -2020,13 +2020,30 @@ function buildInfoOffersForPortal(
     if (!offerAppliesToPortal(offer, portal)) continue;
     if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) continue;
 
-    const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+        const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
     const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(
       offer,
       selectedPaymentMethods
     );
 
-    if (!matchesNormally && !isSpecificFamilyInfoOnly) continue;
+    const offerPMs =
+      offer?.paymentMethods ||
+      offer?.parsedFields?.paymentMethods ||
+      offer?.eligiblePaymentMethods ||
+      offer?.parsedFields?.eligiblePaymentMethods ||
+      [];
+
+    const isBroadBankMatch =
+      Array.isArray(offerPMs) &&
+      offerPMs.some((pm) =>
+        selectedPaymentMethods?.some((sel) => {
+          const offerBank = String(pm?.bank || pm?.name || "").trim().toLowerCase();
+          const selectedBank = String(sel?.name || sel?.bank || "").trim().toLowerCase();
+          return offerBank && selectedBank && offerBank === selectedBank;
+        })
+      );
+
+    if (!matchesNormally && !isSpecificFamilyInfoOnly && !isBroadBankMatch) continue;
 
         const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
     const flat = offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null;
@@ -2178,7 +2195,7 @@ return {
   explain: best
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
-      infoOffers: [
+        infoOffers: [
     ...buildInfoOffersForPortal(
       offers,
       portal,
@@ -2188,7 +2205,6 @@ return {
       best?.couponCode || best?.code || null,
       5
     ),
-    ...otherMatchedOffersClean.map((row) => ({
     ...otherMatchedOffersClean.map((row) => ({
       title: row.offer?.title || null,
       couponCode:
