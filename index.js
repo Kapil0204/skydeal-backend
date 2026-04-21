@@ -2107,7 +2107,24 @@ function buildInfoOffersForPortal(
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
-      paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
+      paymentHint:
+  getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) ||
+  (() => {
+    const offerPMs =
+      offer?.paymentMethods ||
+      offer?.parsedFields?.paymentMethods ||
+      offer?.eligiblePaymentMethods ||
+      offer?.parsedFields?.eligiblePaymentMethods ||
+      [];
+
+    const firstPm = Array.isArray(offerPMs) && offerPMs.length > 0 ? offerPMs[0] : null;
+    if (!firstPm) return null;
+
+    const bank = firstPm?.bank || firstPm?.name || null;
+    const type = firstPm?.type || firstPm?.methodCanonical || null;
+
+    return [bank, type].filter(Boolean).join(" • ") || null;
+  })(),
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
       infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
