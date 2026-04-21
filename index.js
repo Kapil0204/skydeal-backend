@@ -2120,11 +2120,26 @@ function buildInfoOffersForPortal(
     const firstPm = Array.isArray(offerPMs) && offerPMs.length > 0 ? offerPMs[0] : null;
     if (!firstPm) return null;
 
-    const bank = firstPm?.bank || firstPm?.name || null;
-    const type = firstPm?.type || firstPm?.methodCanonical || null;
+    const rawBank = firstPm?.bank || firstPm?.name || null;
+    const rawType = firstPm?.type || firstPm?.methodCanonical || null;
+
+    const bank = rawBank
+      ? (normalizeBankDisplayName(rawBank) || rawBank)
+      : null;
+
+    const typeNorm = String(rawType || "").toUpperCase();
+    const type =
+      typeNorm === "EMI" ? "EMI" :
+      typeNorm === "CREDIT_CARD" ? "Credit Card" :
+      typeNorm === "DEBIT_CARD" ? "Debit Card" :
+      typeNorm === "NET_BANKING" ? "Net Banking" :
+      typeNorm === "UPI" ? "UPI" :
+      typeNorm === "WALLET" ? "Wallet" :
+      rawType || null;
 
     return [bank, type].filter(Boolean).join(" • ") || null;
   })(),
+
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
       infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
