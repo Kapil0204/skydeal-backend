@@ -2012,45 +2012,61 @@ function buildInfoOffersForPortal(
   if (sel.length === 0) return [];
 
   const info = [];
+  const seen = new Set();
 
   for (const offer of offers) {
-       const ev = evaluateOfferForFlight({
-      offer,
-      portal,
-      baseAmount: 10000,
-      eligibilityAmount: 10000,
-      selectedPaymentMethods,
-      isDomestic,
-      cabin,
-      flightAirlineName: "",
-      tripType: "one-way",
-      passengers: 1,
-    });
+    if (!isFlightOffer(offer)) continue;
+    if (isHotelOnlyOffer(offer)) continue;
+    if (isOfferExpired(offer)) continue;
+    if (!offerAppliesToPortal(offer, portal)) continue;
 
-    const nonPaymentFailReasons = new Set([
-      "NOT_FLIGHT_OFFER",
-      "HOTEL_ONLY_OFFER",
-      "HOTEL_ONLY",
-      "NON_FLIGHT_VERTICAL",
-      "FIRST_TIME_OR_NEW_USER",
-      "EXPIRED",
-      "PORTAL_MISMATCH",
-      "SCOPE_MISMATCH",
-      "ROUND_TRIP_ONLY",
-      "PASSENGER_COUNT_RESTRICTED",
-      "PASSENGER_COUNT_RESTRICTED_SOLO_ONLY",
-      "PASSENGER_COUNT_BELOW_MINIMUM",
-      "PASSENGER_COUNT_ABOVE_MAXIMUM",
-    ]);
+    // -----------------------------
+    // Extra route / cabin guard for info offers
+    // We keep this slightly broader than applied-offer logic,
+    // but still reject obviously irrelevant offers.
+    // -----------------------------
+    const coreBlob = normalizeText(
+      `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
+    );
+
+    const termsBlob = normalizeText(
+      `${offer?.terms?.raw || offer?.terms || ""} ${offer?.parsedFields?.terms?.raw || ""}`
+    );
+
+    const scopeBlob = `${coreBlob} ${termsBlob}`;
 
     if (
-      !ev.ok &&
-      !(Array.isArray(ev.reasons) && ev.reasons.every((r) => !nonPaymentFailReasons.has(r)))
+      (normalizeCabinShort(cabin) === "economy" || normalizeCabinShort(cabin) === "premium") &&
+      /\bbusiness class\b|\bfirst class\b/.test(scopeBlob)
     ) {
       continue;
     }
 
-           const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+    if (isDomestic) {
+      if (/\binternational flight(s)?\b/.test(scopeBlob) && !/\bdomestic flight(s)?\b/.test(scopeBlob)) {
+        continue;
+      }
+    } else {
+      if (/\bdomestic flight(s)?\b/.test(scopeBlob) && !/\binternational flight(s)?\b/.test(scopeBlob)) {
+        continue;
+      }
+    }
+
+    if (offerRequiresRoundTrip(offer)) continue;
+
+    const offerCouponCode =
+      offer?.couponCode ||
+      offer?.code ||
+      offer?.parsedFields?.couponCode ||
+      offer?.parsedFields?.code ||
+      null;
+
+    // Skip if this exact offer is already applied
+    if (appliedCouponCode && offerCouponCode && offerCouponCode === appliedCouponCode) {
+      continue;
+    }
+
+    const matchesNormally = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
     const isSpecificFamilyInfoOnly = isSpecificFamilyOfferForGenericSelectedBank(
       offer,
       selectedPaymentMethods
@@ -2066,40 +2082,28 @@ function buildInfoOffersForPortal(
     const isBroadBankMatch =
       Array.isArray(offerPMs) &&
       offerPMs.some((pm) =>
-        selectedPaymentMethods?.some((sel) => {
-          const offerBank = String(pm?.bank || pm?.name || "").trim().toLowerCase();
-          const selectedBank = String(sel?.name || sel?.bank || "").trim().toLowerCase();
+        selectedPaymentMethods?.some((selPm) => {
+          const offerBank = normalizeBankName(pm?.bank || pm?.name || pm?.raw || "");
+          const selectedBank = normalizeBankName(selPm?.name || selPm?.bank || "");
           return offerBank && selectedBank && offerBank === selectedBank;
         })
       );
 
     if (!matchesNormally && !isSpecificFamilyInfoOnly && !isBroadBankMatch) continue;
 
-        const percent = offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null;
-    const flat = offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null;
+    const dedupeKey = [
+      offerCouponCode || "",
+      String(offer?.title || "").trim().toLowerCase(),
+      String(offer?.rawDiscount || "").trim().toLowerCase(),
+      String(offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || portal).trim().toLowerCase()
+    ].join("|");
 
-    const hasDeterministicSignal =
-      (typeof percent === "number" && percent > 0) ||
-      (flat != null && String(flat).replace(/[^\d.]/g, "") !== "");
-
-    const offerCouponCode =
-      offer?.couponCode ||
-      offer?.code ||
-      offer?.parsedFields?.couponCode ||
-      offer?.parsedFields?.code ||
-      null;
-
-    // Skip ONLY if this exact offer is already applied
-    if (appliedCouponCode && offerCouponCode === appliedCouponCode) continue;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
 
     info.push({
       title: offer?.title || null,
-      couponCode:
-        offer?.couponCode ||
-        offer?.code ||
-        offer?.parsedFields?.couponCode ||
-        offer?.parsedFields?.code ||
-        null,
+      couponCode: offerCouponCode,
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
