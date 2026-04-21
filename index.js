@@ -1740,6 +1740,83 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
   return null;
 }
+function getInfoOfferDisplayLabel(offer, selectedPaymentMethods = []) {
+  const exact = getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods);
+  if (exact) return "Exact match";
+
+  const offerPMs =
+    offer?.paymentMethods ||
+    offer?.parsedFields?.paymentMethods ||
+    offer?.eligiblePaymentMethods ||
+    offer?.parsedFields?.eligiblePaymentMethods ||
+    [];
+
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+
+  const sameBank = Array.isArray(offerPMs) && offerPMs.some((pm) =>
+    selected.some((sel) => {
+      const offerBank = normalizeBankName(pm?.bank || pm?.name || pm?.raw || "");
+      const selectedBank = normalizeBankName(sel?.name || sel?.bank || "");
+      return offerBank && selectedBank && offerBank === selectedBank;
+    })
+  );
+
+  if (sameBank) return "Same bank alternative";
+
+  return "Related offer";
+}
+
+function extractBestNumericDiscountValue(offer) {
+  const pct = Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent);
+  const flat = Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount);
+
+  if (Number.isFinite(flat) && flat > 0) return flat;
+  if (Number.isFinite(pct) && pct > 0) return pct;
+
+  const raw = String(
+    offer?.rawDiscount ||
+    offer?.parsedFields?.rawDiscount ||
+    offer?.offerSummary?.headline ||
+    ""
+  );
+
+  const pctMatch = raw.match(/(\d{1,2})\s*%/);
+  if (pctMatch) return Number(pctMatch[1]);
+
+  const amtMatch = raw.match(/(?:₹|rs\.?|inr)\s*([\d,]+)/i);
+  if (amtMatch) return Number(String(amtMatch[1]).replace(/,/g, ""));
+
+  return 0;
+}
+
+function scoreInfoOfferForDisplay({
+  offer,
+  selectedPaymentMethods,
+  isSpecificFamilyInfoOnly,
+}) {
+  let score = 0;
+
+  if (offerMatchesSelectedPayment(offer, selectedPaymentMethods)) score += 100;
+  if (isSpecificFamilyInfoOnly) score += 20;
+
+  const kind = getOfferKindForFlight(offer, selectedPaymentMethods, "")?.kind;
+  if (kind === "payment") score += 40;
+  if (kind === "airline") score += 15;
+  if (kind === "portal") score += 10;
+
+  const blob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary?.headline || ""}`
+  );
+
+  if (/\bemi\b/.test(blob)) score += 12;
+  if (/\binstant discount\b|\boff\b|\bdiscount\b/.test(blob)) score += 10;
+  if (isCashbackStyleOffer(offer)) score -= 8;
+
+  score += Math.min(25, extractBestNumericDiscountValue(offer));
+
+  return score;
+}
+
 function isSpecificFamilyOfferForGenericSelectedBank(offer, selectedPaymentMethods = []) {
   if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return false;
 
@@ -2020,11 +2097,6 @@ function buildInfoOffersForPortal(
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
 
-    // -----------------------------
-    // Extra route / cabin guard for info offers
-    // We keep this slightly broader than applied-offer logic,
-    // but still reject obviously irrelevant offers.
-    // -----------------------------
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
     );
@@ -2061,7 +2133,6 @@ function buildInfoOffersForPortal(
       offer?.parsedFields?.code ||
       null;
 
-    // Skip if this exact offer is already applied
     if (appliedCouponCode && offerCouponCode && offerCouponCode === appliedCouponCode) {
       continue;
     }
@@ -2101,54 +2172,57 @@ function buildInfoOffersForPortal(
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
+    const paymentHint =
+      getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) ||
+      (() => {
+        const firstPm = Array.isArray(offerPMs) && offerPMs.length > 0 ? offerPMs[0] : null;
+        if (!firstPm) return null;
+
+        const rawBank = firstPm?.bank || firstPm?.name || null;
+        const rawType = firstPm?.type || firstPm?.methodCanonical || null;
+
+        const bank = rawBank
+          ? (normalizeBankDisplayName(rawBank) || rawBank)
+          : null;
+
+        const typeNorm = String(rawType || "").toUpperCase();
+        const type =
+          typeNorm === "EMI" ? "EMI" :
+          typeNorm === "CREDIT_CARD" ? "Credit Card" :
+          typeNorm === "DEBIT_CARD" ? "Debit Card" :
+          typeNorm === "NET_BANKING" ? "Net Banking" :
+          typeNorm === "UPI" ? "UPI" :
+          typeNorm === "WALLET" ? "Wallet" :
+          rawType || null;
+
+        return [bank, type].filter(Boolean).join(" • ") || null;
+      })();
+
     info.push({
       title: offer?.title || null,
       couponCode: offerCouponCode,
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
-      paymentHint:
-  getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) ||
-  (() => {
-    const offerPMs =
-      offer?.paymentMethods ||
-      offer?.parsedFields?.paymentMethods ||
-      offer?.eligiblePaymentMethods ||
-      offer?.parsedFields?.eligiblePaymentMethods ||
-      [];
-
-    const firstPm = Array.isArray(offerPMs) && offerPMs.length > 0 ? offerPMs[0] : null;
-    if (!firstPm) return null;
-
-    const rawBank = firstPm?.bank || firstPm?.name || null;
-    const rawType = firstPm?.type || firstPm?.methodCanonical || null;
-
-    const bank = rawBank
-      ? (normalizeBankDisplayName(rawBank) || rawBank)
-      : null;
-
-    const typeNorm = String(rawType || "").toUpperCase();
-    const type =
-      typeNorm === "EMI" ? "EMI" :
-      typeNorm === "CREDIT_CARD" ? "Credit Card" :
-      typeNorm === "DEBIT_CARD" ? "Debit Card" :
-      typeNorm === "NET_BANKING" ? "Net Banking" :
-      typeNorm === "UPI" ? "UPI" :
-      typeNorm === "WALLET" ? "Wallet" :
-      rawType || null;
-
-    return [bank, type].filter(Boolean).join(" • ") || null;
-  })(),
-
+      paymentHint,
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
-      infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
+      infoLabel:
+        isSpecificFamilyInfoOnly
+          ? "Specific card type required"
+          : getInfoOfferDisplayLabel(offer, selectedPaymentMethods),
+      _score: scoreInfoOfferForDisplay({
+        offer,
+        selectedPaymentMethods,
+        isSpecificFamilyInfoOnly,
+      }),
     });
-
-    if (info.length >= limit) break;
   }
 
-  return info;
+  return info
+    .sort((a, b) => (b._score || 0) - (a._score || 0))
+    .slice(0, limit)
+    .map(({ _score, ...rest }) => rest);
 }
 
 async function applyOffersToFlight(
