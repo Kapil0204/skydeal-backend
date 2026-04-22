@@ -1114,16 +1114,20 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
 
   const lower = txt.toLowerCase();
 
-  // 1) Prefer "instant discount" percentage when present
+  // 1) Prefer explicit instant/upfront discount percentage when present
   const instantPct =
     lower.match(/(\d{1,2})\s*%\s*instant\s*discount/i) ||
-    lower.match(/instant\s*discount[^%]{0,40}(\d{1,2})\s*%/i);
+    lower.match(/instant\s*discount[^%]{0,40}(\d{1,2})\s*%/i) ||
+    lower.match(/(\d{1,2})\s*%\s*instant\s*off/i) ||
+    lower.match(/instant\s*off[^%]{0,40}(\d{1,2})\s*%/i) ||
+    lower.match(/\bflat\s*(\d{1,2})\s*%\s*off\b/i) ||
+    lower.match(/\b(\d{1,2})\s*%\s*off\b/i);
 
   if (instantPct) {
     return Number(instantPct[1]);
   }
 
-  // 2) If mixed offer mentions cashback + off/discount, prefer the first non-cashback % chunk
+  // 2) Mixed offers: choose the first non-cashback percentage chunk
   const percentMatches = [...lower.matchAll(/(\d{1,2})\s*%/g)].map((m) => ({
     pct: Number(m[1]),
     idx: m.index ?? 0,
@@ -1131,24 +1135,28 @@ function parsePercentFromRawDiscount(offer, isDomestic) {
 
   if (percentMatches.length > 0) {
     for (const m of percentMatches) {
-      const windowTxt = lower.slice(Math.max(0, m.idx - 25), Math.min(lower.length, m.idx + 40));
+      const windowTxt = lower.slice(Math.max(0, m.idx - 35), Math.min(lower.length, m.idx + 55));
 
-      // skip percentages that look like cashback/reward percentages
+      // skip cashback/reward/coins/wallet/statement-credit percentages
       if (
         /cashback/.test(windowTxt) ||
         /reward/.test(windowTxt) ||
         /supercoin/.test(windowTxt) ||
-        /wallet/.test(windowTxt)
+        /coin/.test(windowTxt) ||
+        /wallet/.test(windowTxt) ||
+        /statement/.test(windowTxt)
       ) {
         continue;
       }
 
-      // domestic preference if explicitly domestic
-      if (isDomestic && /domestic/.test(lower)) {
+      // Prefer explicit discount/off context
+      if (
+        /instant/.test(windowTxt) ||
+        /discount/.test(windowTxt) ||
+        /\boff\b/.test(windowTxt)
+      ) {
         return m.pct;
       }
-
-      return m.pct;
     }
   }
 
@@ -1178,23 +1186,27 @@ function isCashbackStyleOffer(offer) {
     /\bcashback\b/.test(blob) ||
     /\bback as cashback\b/.test(blob) ||
     /\bget .* cashback\b/.test(blob) ||
+    /\badditional cashback\b/.test(blob) ||
     /\bbonus\b/.test(blob) ||
     /\breward point(s)?\b/.test(blob) ||
     /\bsupercoin(s)?\b/.test(blob) ||
+    /\bcoin(s)?\b/.test(blob) ||
     /\bwallet credit\b/.test(blob) ||
     /\bcredited later\b/.test(blob) ||
     /\bcredited within\b/.test(blob) ||
+    /\bstatement credit\b/.test(blob) ||
     /\bcredit shell\b/.test(blob);
 
-  const hasInstantDiscountSignal =
+  const hasUpfrontDiscountSignal =
     /\binstant discount\b/.test(blob) ||
+    /\binstant off\b/.test(blob) ||
     /\bflat .* off\b/.test(blob) ||
-    /\bup to .* off\b/.test(blob) ||
     /\bdiscount\b/.test(blob) ||
     /\boff\b/.test(blob);
 
-  // Pure cashback only => cashback signals present, but no real upfront discount signal
-  return hasCashbackSignal && !hasInstantDiscountSignal;
+  // Cashback-style means cashback/reward exists.
+  // Mixed offers may still also have upfront discount, but cashback part should not count in price.
+  return hasCashbackSignal && !hasUpfrontDiscountSignal;
 }
 
 function getOfferMaxDiscountAmount(offer, passengers = 1) {
@@ -1252,39 +1264,31 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
   const base = Number(baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
 
-      if (!Number.isFinite(base) || base <= 0) return baseAmount;
+  if (!Number.isFinite(base) || base <= 0) return baseAmount;
 
   const perPassenger = offerIsPerPassenger(offer);
   const maxCap = getOfferMaxDiscountAmount(offer, passengers);
 
-  // Pure cashback / reward-style offers should not reduce upfront payable price.
-  // Mixed offers like "7% instant off + 5% cashback" should still use the instant-discount part.
+  // Pure cashback / rewards / coins must not reduce upfront payable price
   if (isCashbackStyleOffer(offer)) {
-    const fallbackPct = parsePercentFromRawDiscount(offer, isDomestic);
-    const flat = Number(
-      offer?.flatDiscountAmount ??
-      offer?.parsedFields?.flatDiscountAmount
-    );
-
-    const hasUsableUpfrontPct = Number.isFinite(fallbackPct) && fallbackPct > 0;
-    const hasUsableFlat = Number.isFinite(flat) && flat > 0;
-
-    if (!hasUsableUpfrontPct && !hasUsableFlat) {
-      return base;
-    }
+    return base;
   }
 
   let pct = null;
+
+  // Trust structured percent only if the raw text does not look cashback-only
   if (offer?.discountPercent != null) {
     const n = Number(offer.discountPercent);
-    if (Number.isFinite(n) && n > 0) pct = n;
+    if (Number.isFinite(n) && n > 0) {
+      pct = parsePercentFromRawDiscount(offer, isDomestic) ?? n;
+    }
   }
 
-  if (pct == null) {
-    if (ENABLE_ESTIMATED_DISCOUNTS) pct = parsePercentFromRawDiscount(offer, isDomestic);
+  if (pct == null && ENABLE_ESTIMATED_DISCOUNTS) {
+    pct = parsePercentFromRawDiscount(offer, isDomestic);
   }
 
-  if (pct != null) {
+  if (pct != null && Number.isFinite(pct) && pct > 0) {
     let discountAmount = 0;
 
     if (perPassenger) {
