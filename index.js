@@ -1853,6 +1853,72 @@ function getInfoOfferDisplayLabel(offer, selectedPaymentMethods = []) {
 
   return "Related offer";
 }
+function getInfoOfferReasonLabel(offer, selectedPaymentMethods = []) {
+  const validForBest = isValidBestOffer(offer);
+  if (!validForBest) return "Shown for reference only";
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  const selNorm = Array.isArray(selectedPaymentMethods)
+    ? selectedPaymentMethods.map(normalizeSelectedPM).filter((x) => x.typeNorm)
+    : [];
+
+  if (!selNorm.length) return null;
+  if (!offerPMs.length) return null;
+
+  const offerNorm = offerPMs
+    .map((pm) => normalizeOfferPM(pm, offer))
+    .filter((x) => x.typeNorm);
+
+  if (!offerNorm.length) return null;
+
+  for (const s of selNorm) {
+    for (const o of offerNorm) {
+      const sameBank = !o.bankCanonical || (s.bankCanonical && s.bankCanonical === o.bankCanonical);
+
+      if (!sameBank) continue;
+
+      if (o.typeNorm === "EMI" && s.typeNorm !== "EMI") {
+        return "Requires EMI";
+      }
+
+      if (
+        Array.isArray(o.allowedCardFamilies) &&
+        o.allowedCardFamilies.length > 0 &&
+        !s.cardFamilyCanonical
+      ) {
+        return "Specific card required";
+      }
+
+      if (
+        Array.isArray(o.allowedCardFamilies) &&
+        o.allowedCardFamilies.length > 0 &&
+        s.cardFamilyCanonical &&
+        !o.allowedCardFamilies.includes(s.cardFamilyCanonical)
+      ) {
+        return "Different card variant required";
+      }
+
+      if (
+        Array.isArray(o.allowedNetworks) &&
+        o.allowedNetworks.length > 0 &&
+        s.networkCanonical &&
+        !o.allowedNetworks.includes(s.networkCanonical)
+      ) {
+        return "Different card network required";
+      }
+
+      if (o.corporateOnly === true && s.isCorporate === false) {
+        return "Corporate card required";
+      }
+
+      if (o.excludesCorporate === true && s.isCorporate === true) {
+        return "Not valid on corporate cards";
+      }
+    }
+  }
+
+  return null;
+}
 
 function extractBestNumericDiscountValue(offer) {
   const pct = Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent);
@@ -2268,13 +2334,14 @@ function buildInfoOffersForPortal(
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    const paymentHint =
+        const paymentHint =
       getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) ||
       (() => {
-        const firstPm = Array.isArray(offerPMs) && offerPMs.length > 0 ? offerPMs[0] : null;
+        const explicitPMs = extractOfferPaymentMethodsNoInference(offer);
+        const firstPm = Array.isArray(explicitPMs) && explicitPMs.length > 0 ? explicitPMs[0] : null;
         if (!firstPm) return null;
 
-        const rawBank = firstPm?.bank || firstPm?.name || null;
+        const rawBank = firstPm?.bank || firstPm?.name || firstPm?.raw || null;
         const rawType = firstPm?.type || firstPm?.methodCanonical || null;
 
         const bank = rawBank
@@ -2310,7 +2377,13 @@ function buildInfoOffersForPortal(
       paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
-      infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
+            infoLabel:
+        isSpecificFamilyInfoOnly
+          ? "Specific card required"
+          : (
+              getInfoOfferReasonLabel(offer, selectedPaymentMethods) ||
+              getInfoOfferDisplayLabel(offer, selectedPaymentMethods)
+            ),
     });
   }
 
