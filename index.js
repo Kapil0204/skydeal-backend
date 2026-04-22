@@ -380,6 +380,10 @@ function isValidBestOffer(offer) {
 
   if (offer?.couponRequired && !code) return false;
 
+  // 6. Percent-only offers without cap are too vague for best-price selection
+  // Example: "Up to 15% OFF*" with no max cap
+  if (hasPercent && !hasFlat && !hasCap) return false;
+
   return true;
 }
 
