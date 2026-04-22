@@ -2104,6 +2104,7 @@ function evaluateOfferForFlight({
   flightAirlineName,
   tripType,
   passengers,
+  allOffers = [],
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
 
@@ -2122,14 +2123,18 @@ function evaluateOfferForFlight({
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
     if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
-  if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
-  if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
+if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
-  // Best-offer trust filter:
-  // allow display elsewhere, but never let non-deterministic / vague offers become applied winners
-  if (!isValidBestOffer(offer)) {
-    return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
-  }
+if (isSuspiciousGenericOffer(offer, allOffers || [])) {
+  return { ok: false, reasons: ["SUSPICIOUS_GENERIC_VARIANT"] };
+}
+
+// Best-offer trust filter:
+// allow display elsewhere, but never let non-deterministic / vague offers become applied winners
+if (!isValidBestOffer(offer)) {
+  return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
+}
 
 
 
@@ -2208,7 +2213,7 @@ function pickBestOfferForPortal(
 
   for (const offer of offers) {
 
-    const ev = evaluateOfferForFlight({
+const ev = evaluateOfferForFlight({
   offer,
   portal,
   baseAmount,
@@ -2219,6 +2224,7 @@ function pickBestOfferForPortal(
   flightAirlineName,
   tripType,
   passengers,
+  allOffers: offers,
 });
 
     if (!ev.ok) continue;
@@ -2277,9 +2283,10 @@ function buildInfoOffersForPortal(
 
   for (const offer of offers) {
        if (!isFlightOffer(offer)) continue;
-    if (isHotelOnlyOffer(offer)) continue;
-    if (isOfferExpired(offer)) continue;
-    if (!offerAppliesToPortal(offer, portal)) continue;
+if (isHotelOnlyOffer(offer)) continue;
+if (isOfferExpired(offer)) continue;
+if (!offerAppliesToPortal(offer, portal)) continue;
+if (isSuspiciousGenericOffer(offer, offers)) continue;
 
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
@@ -2433,18 +2440,19 @@ async function applyOffersToFlight(
     const matchingCandidates = [];
 
     for (const offer of offers) {
-      const ev = evaluateOfferForFlight({
-        offer,
-        portal,
-        baseAmount: portalBase,
-        eligibilityAmount,
-        selectedPaymentMethods,
-        isDomestic,
-        cabin,
-        flightAirlineName: flight.airlineName,
-        tripType,
-        passengers,
-      });
+   const ev = evaluateOfferForFlight({
+  offer,
+  portal,
+  baseAmount: portalBase,
+  eligibilityAmount,
+  selectedPaymentMethods,
+  isDomestic,
+  cabin,
+  flightAirlineName: flight.airlineName,
+  tripType,
+  passengers,
+  allOffers: offers,
+});
 
       if (!ev.ok) continue;
 
