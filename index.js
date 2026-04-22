@@ -65,6 +65,28 @@ function toISO(d) {
   return "";
 }
 
+function isSuspiciousGenericOffer(offer, allOffersForPortal = []) {
+  const hasPayment =
+    (offer?.eligiblePaymentMethods && offer.eligiblePaymentMethods.length > 0) ||
+    (offer?.paymentMethods && offer.paymentMethods.length > 0);
+
+  if (hasPayment) return false;
+
+  const coupon = offer?.couponCode;
+  if (!coupon) return false;
+
+  // check if same coupon exists with payment-specific version
+  const hasPaymentVariant = allOffersForPortal.some(o =>
+    o?.couponCode === coupon &&
+    (
+      (o?.eligiblePaymentMethods && o.eligiblePaymentMethods.length > 0) ||
+      (o?.paymentMethods && o.paymentMethods.length > 0)
+    )
+  );
+
+  return hasPaymentVariant;
+}
+
 function paymentLabelFromSelection(selectedPaymentMethods) {
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (!sel.length) return null;
