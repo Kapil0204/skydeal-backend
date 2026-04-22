@@ -277,6 +277,39 @@ function limitAndSortFlights(flights) {
 // --------------------
 // Offer matching + pricing
 // --------------------
+function isValidBestOffer(offer) {
+  if (!offer || typeof offer !== "object") return false;
+
+  // 1. Expiry check (reuse your existing logic)
+  if (isOfferExpired(offer)) return false;
+
+  // 2. Must have deterministic discount
+  const percent = Number(offer?.discountPercent || offer?.parsedFields?.discountPercent || 0);
+  const flat = Number(offer?.flatDiscountAmount || offer?.parsedFields?.flatDiscountAmount || 0);
+
+  const hasPercent = percent > 0;
+  const hasFlat = flat > 0;
+
+  if (!hasPercent && !hasFlat) return false;
+
+  // 3. Reject vague "upto" ONLY offers
+  const raw = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "").toLowerCase();
+
+  if (raw.includes("upto") && !hasPercent) return false;
+
+  // 4. Cashback should NOT be best price
+  const type = String(offer?.offerType || "").toLowerCase();
+  if (type.includes("cashback")) return false;
+
+  // 5. Coupon required but missing code
+  if (offer?.couponRequired && !offer?.couponCode) return false;
+
+  // ❗ IMPORTANT: DO NOT check minTransaction here
+  // That will be handled during applicability
+
+  return true;
+}
+
 function normalizeText(s) {
   return String(s || "")
     .trim()
@@ -1945,9 +1978,15 @@ function evaluateOfferForFlight({
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-  if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+   if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+
+  // Best-offer trust filter:
+  // allow display elsewhere, but never let non-deterministic / vague offers become applied winners
+  if (!isValidBestOffer(offer)) {
+    return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
+  }
 
   if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
@@ -2092,7 +2131,7 @@ function buildInfoOffersForPortal(
   const seen = new Set();
 
   for (const offer of offers) {
-    if (!isFlightOffer(offer)) continue;
+       if (!isFlightOffer(offer)) continue;
     if (isHotelOnlyOffer(offer)) continue;
     if (isOfferExpired(offer)) continue;
     if (!offerAppliesToPortal(offer, portal)) continue;
@@ -2198,6 +2237,8 @@ function buildInfoOffersForPortal(
         return [bank, type].filter(Boolean).join(" • ") || null;
       })();
 
+        const validForBest = isValidBestOffer(offer);
+
     info.push({
       title: offer?.title || null,
       couponCode: offerCouponCode,
@@ -2210,7 +2251,9 @@ function buildInfoOffersForPortal(
       infoLabel:
         isSpecificFamilyInfoOnly
           ? "Specific card type required"
-          : getInfoOfferDisplayLabel(offer, selectedPaymentMethods),
+          : (!validForBest
+              ? "Shown for reference only"
+              : getInfoOfferDisplayLabel(offer, selectedPaymentMethods)),
       _score: scoreInfoOfferForDisplay({
         offer,
         selectedPaymentMethods,
