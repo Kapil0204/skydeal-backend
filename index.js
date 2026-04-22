@@ -280,32 +280,83 @@ function limitAndSortFlights(flights) {
 function isValidBestOffer(offer) {
   if (!offer || typeof offer !== "object") return false;
 
-  // 1. Expiry check (reuse your existing logic)
+  // 1. Expiry
   if (isOfferExpired(offer)) return false;
 
-  // 2. Must have deterministic discount
-  const percent = Number(offer?.discountPercent || offer?.parsedFields?.discountPercent || 0);
-  const flat = Number(offer?.flatDiscountAmount || offer?.parsedFields?.flatDiscountAmount || 0);
+  const rawDiscount = String(
+    offer?.rawDiscount ||
+    offer?.parsedFields?.rawDiscount ||
+    ""
+  ).trim();
 
-  const hasPercent = percent > 0;
-  const hasFlat = flat > 0;
+  const title = String(offer?.title || "").trim();
 
+  const blob = `${title} ${rawDiscount}`.toLowerCase();
+
+  const percent = Number(
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    0
+  );
+
+  const flat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    0
+  );
+
+  const maxCap = Number(
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    0
+  );
+
+  const minTxn = Number(
+    offer?.minTransactionValue ??
+    offer?.parsedFields?.minTransactionValue ??
+    0
+  );
+
+  const hasPercent = Number.isFinite(percent) && percent > 0;
+  const hasFlat = Number.isFinite(flat) && flat > 0;
+  const hasCap = Number.isFinite(maxCap) && maxCap > 0;
+  const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
+
+  const mentionsUpTo = /\bup\s*to\b|\bupto\b/.test(blob);
+  const mentionsCashback = /\bcashback\b/.test(blob);
+  const mentionsInstantDiscount =
+    /\binstant discount\b/.test(blob) ||
+    /\binstant off\b/.test(blob) ||
+    /\bflat\b/.test(blob) ||
+    /\boff\b/.test(blob) ||
+    /\bdiscount\b/.test(blob);
+
+  // 2. Must have some real discount signal
   if (!hasPercent && !hasFlat) return false;
 
-  // 3. Reject vague "upto" ONLY offers
-  const raw = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "").toLowerCase();
+  // 3. Cashback-only should never become best offer
+  // Allow mixed offers only if they also have a real instant-discount structure
+  if (mentionsCashback && !mentionsInstantDiscount) return false;
 
-  if (raw.includes("upto") && !hasPercent) return false;
-
-  // 4. Cashback should NOT be best price
-  const type = String(offer?.offerType || "").toLowerCase();
-  if (type.includes("cashback")) return false;
+  // 4. Pure vague "up to" rows should never become best offer
+  // Examples:
+  // - "Up to 25% OFF*"
+  // - "Up to 15% OFF on Domestic Flights for All Users"
+  // Allow only if there is a calculable structure:
+  // - cap
+  // - flat amount
+  // - or min transaction
+  if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn) return false;
 
   // 5. Coupon required but missing code
-  if (offer?.couponRequired && !offer?.couponCode) return false;
+  const code =
+    offer?.couponCode ||
+    offer?.code ||
+    offer?.parsedFields?.couponCode ||
+    offer?.parsedFields?.code ||
+    null;
 
-  // ❗ IMPORTANT: DO NOT check minTransaction here
-  // That will be handled during applicability
+  if (offer?.couponRequired && !code) return false;
 
   return true;
 }
@@ -1978,7 +2029,7 @@ function evaluateOfferForFlight({
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-   if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+    if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
   if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
   if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
@@ -1987,6 +2038,8 @@ function evaluateOfferForFlight({
   if (!isValidBestOffer(offer)) {
     return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
   }
+
+
 
   if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
@@ -2239,26 +2292,21 @@ function buildInfoOffersForPortal(
 
         const validForBest = isValidBestOffer(offer);
 
-    info.push({
+     info.push({
       title: offer?.title || null,
-      couponCode: offerCouponCode,
+      couponCode:
+        offer?.couponCode ||
+        offer?.code ||
+        offer?.parsedFields?.couponCode ||
+        offer?.parsedFields?.code ||
+        null,
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
-      paymentHint,
+      paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
-      infoLabel:
-        isSpecificFamilyInfoOnly
-          ? "Specific card type required"
-          : (!validForBest
-              ? "Shown for reference only"
-              : getInfoOfferDisplayLabel(offer, selectedPaymentMethods)),
-      _score: scoreInfoOfferForDisplay({
-        offer,
-        selectedPaymentMethods,
-        isSpecificFamilyInfoOnly,
-      }),
+      infoLabel: isSpecificFamilyInfoOnly ? "Specific card type required" : null,
     });
   }
 
@@ -2311,7 +2359,19 @@ async function applyOffersToFlight(
       });
     }
 
-    matchingCandidates.sort((a, b) => a.finalPrice - b.finalPrice);
+       matchingCandidates.sort((a, b) => {
+      if (a.finalPrice !== b.finalPrice) return a.finalPrice - b.finalPrice;
+
+      const aRank =
+        a.offerKind === "payment" ? 0 :
+        a.offerKind === "airline" ? 1 : 2;
+
+      const bRank =
+        b.offerKind === "payment" ? 0 :
+        b.offerKind === "airline" ? 1 : 2;
+
+      return aRank - bRank;
+    });
 
     const best = matchingCandidates.length > 0 ? matchingCandidates[0] : null;
     const otherMatchedOffers = matchingCandidates.slice(1);
