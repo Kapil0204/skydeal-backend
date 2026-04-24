@@ -2264,12 +2264,12 @@ function pickBestOfferForPortal(
   passengers,
   isDomestic
 ) {
-  const dedupedOffers = getBestVariantPerCoupon(offers);
+  
   const paymentCandidates = [];
   const portalCandidates = [];
   const airlineCandidates = [];
 
-    for (const offer of dedupedOffers) {
+for (const offer of offers) {
 
 const ev = evaluateOfferForFlight({
   offer,
@@ -2282,7 +2282,7 @@ const ev = evaluateOfferForFlight({
   flightAirlineName,
   tripType,
   passengers,
-    allOffers: dedupedOffers,
+    allOffers: offers,
 });
 
     if (!ev.ok) continue;
@@ -2333,14 +2333,14 @@ function buildInfoOffersForPortal(
   appliedCouponCode,
   limit = 5
 ) {
-    const dedupedOffers = getBestVariantPerCoupon(offers);
+   
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return [];
 
   const info = [];
   const seen = new Set();
 
-    for (const offer of dedupedOffers) {
+    for (const offer of offers) {
        if (!isFlightOffer(offer)) continue;
 if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
@@ -2491,7 +2491,7 @@ async function applyOffersToFlight(
   isDomestic = true
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
-    const dedupedOffers = getBestVariantPerCoupon(offers);
+    
 
     const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
@@ -2499,7 +2499,7 @@ async function applyOffersToFlight(
 
     const matchingCandidates = [];
 
-        for (const offer of dedupedOffers) {
+        for (const offer of offers) {
    const ev = evaluateOfferForFlight({
   offer,
   portal,
@@ -2606,8 +2606,8 @@ return {
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
         infoOffers: [
-   ...buildInfoOffersForPortal(
-  dedupedOffers,
+ ...buildInfoOffersForPortal(
+  offers,
   portal,
   selectedPaymentMethods,
   cabin,
@@ -2637,7 +2637,7 @@ return {
     })),
   ],
   debugCounts: {
-   offersForPortal: dedupedOffers.filter((o) => offerAppliesToPortal(o, portal)).length,
+   offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
   },
 };
 
