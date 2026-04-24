@@ -2094,7 +2094,60 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 
   return true;
 }
+function getBestVariantPerCoupon(offers) {
+  const byCoupon = {};
 
+  for (const offer of offers) {
+    const code = offer.couponCode || "__NO_CODE__";
+
+    if (!byCoupon[code]) {
+      byCoupon[code] = [];
+    }
+
+    byCoupon[code].push(offer);
+  }
+
+  const bestVariants = [];
+
+  for (const code in byCoupon) {
+    const variants = byCoupon[code];
+
+    // pick best variant
+    let best = null;
+
+    for (const v of variants) {
+      if (!best) {
+        best = v;
+        continue;
+      }
+
+      const score = (o) => {
+        const hasMTV = !!o.minTransactionValue;
+        const hasCap = !!o.maxDiscountAmount;
+        const hasFlat = !!o.flatDiscountAmount;
+        const hasPercent = !!o.discountPercent;
+        const isUpto = (o.rawDiscount || "").toLowerCase().includes("up to");
+
+        let s = 0;
+        if (hasMTV) s += 5;
+        if (hasCap) s += 4;
+        if (hasFlat) s += 4;
+        if (hasPercent) s += 3;
+        if (isUpto) s -= 5;
+
+        return s;
+      };
+
+      if (score(v) > score(best)) {
+        best = v;
+      }
+    }
+
+    bestVariants.push(best);
+  }
+
+  return bestVariants;
+}
 // --------------------
 // Core evaluator
 function evaluateOfferForFlight({
@@ -2211,11 +2264,12 @@ function pickBestOfferForPortal(
   passengers,
   isDomestic
 ) {
+  const dedupedOffers = getBestVariantPerCoupon(offers);
   const paymentCandidates = [];
   const portalCandidates = [];
   const airlineCandidates = [];
 
-  for (const offer of offers) {
+    for (const offer of dedupedOffers) {
 
 const ev = evaluateOfferForFlight({
   offer,
@@ -2228,7 +2282,7 @@ const ev = evaluateOfferForFlight({
   flightAirlineName,
   tripType,
   passengers,
-  allOffers: offers,
+    allOffers: dedupedOffers,
 });
 
     if (!ev.ok) continue;
@@ -2279,18 +2333,19 @@ function buildInfoOffersForPortal(
   appliedCouponCode,
   limit = 5
 ) {
+    const dedupedOffers = getBestVariantPerCoupon(offers);
   const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
   if (sel.length === 0) return [];
 
   const info = [];
   const seen = new Set();
 
-  for (const offer of offers) {
+    for (const offer of dedupedOffers) {
        if (!isFlightOffer(offer)) continue;
 if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
 if (!offerAppliesToPortal(offer, portal)) continue;
-if (isSuspiciousGenericOffer(offer, offers)) continue;
+if (isSuspiciousGenericOffer(offer, dedupedOffers)) continue;
 
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
@@ -2436,6 +2491,7 @@ async function applyOffersToFlight(
   isDomestic = true
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
+    const dedupedOffers = getBestVariantPerCoupon(offers);
 
     const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
@@ -2443,7 +2499,7 @@ async function applyOffersToFlight(
 
     const matchingCandidates = [];
 
-    for (const offer of offers) {
+        for (const offer of dedupedOffers) {
    const ev = evaluateOfferForFlight({
   offer,
   portal,
@@ -2550,8 +2606,8 @@ return {
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
         infoOffers: [
-    ...buildInfoOffersForPortal(
-  offers,
+   ...buildInfoOffersForPortal(
+  dedupedOffers,
   portal,
   selectedPaymentMethods,
   cabin,
@@ -2581,7 +2637,7 @@ return {
     })),
   ],
   debugCounts: {
-    offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
+   offersForPortal: dedupedOffers.filter((o) => offerAppliesToPortal(o, portal)).length,
   },
 };
 
