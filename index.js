@@ -2345,7 +2345,7 @@ function buildInfoOffersForPortal(
 if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
 if (!offerAppliesToPortal(offer, portal)) continue;
-if (isSuspiciousGenericOffer(offer, dedupedOffers)) continue;
+if (isSuspiciousGenericOffer(offer, offers)) continue;
 
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
