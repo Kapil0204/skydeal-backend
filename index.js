@@ -727,12 +727,22 @@ function isFlightOffer(offer) {
   if (coreHasFlight) return true;
 
   // Weak fallback: if categories say flight AND core doesn't indicate non-flight verticals
-  // (prevents template noise from rawText causing false positives)
-  const catsSayFlight = /\bflight(s)?\b/.test(catBlob);
-  if (catsSayFlight && !coreHasNonFlight) return true;
+// (prevents template noise from rawText causing false positives)
+const catsSayFlight = /\bflight(s)?\b/.test(catBlob);
+if (catsSayFlight && !coreHasNonFlight) return true;
 
-  return false;
+// Clean DB fallback:
+// In offer_rules, some Goibibo bank-flight rows are parsed as categories:
+// ["domestic"] or ["international"] without the word "flight" in title/rawDiscount.
+// Since offer_rules is already curated, allow these as flight offers.
+const catsSayDomesticOrInternational =
+  /\bdomestic\b/.test(catBlob) || /\binternational\b/.test(catBlob);
+
+if (isTrustedPricingRule(offer) && catsSayDomesticOrInternational && !coreHasNonFlight) {
+  return true;
 }
+
+return false;
 
 function isHotelOnlyOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
@@ -2952,7 +2962,7 @@ if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       if (ok) stats.ok++;
       else stats.notOk++;
 
-      if (samples.length < limit && (wouldApplyNow || ok || expired)) { 
+     if (samples.length < limit) {
         samples.push({
           title: offer?.title || null,
           code: offer?.couponCode || offer?.code || null,
