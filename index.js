@@ -320,10 +320,13 @@ function isTrustedPricingRule(offer) {
   if (offer.reviewStatus && offer.reviewStatus !== "APPROVED") return false;
   if (offer.hasDeterministicDiscount === false) return false;
 
-  if (!offer.sourceMetadata?.sourcePortal && !offer.sourcePortal) return false;
-  if (!offer.validityPeriod?.to && !offer.parsedFields?.validityPeriod?.to) return false;
+ if (!offer.sourceMetadata?.sourcePortal && !offer.sourcePortal) return false;
 
-  return true;
+// Clean DB note:
+// offer_rules may include always-on bank/payment offers with no expiry date.
+// We already filtered risky missing-validity rows during promotion.
+// So do NOT reject missing validity here.
+return true;
 }
 
 function isValidBestOffer(offer) {
