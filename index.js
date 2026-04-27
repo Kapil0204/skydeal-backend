@@ -1703,14 +1703,18 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
   // -----------------------------
   // 1) Hard bank guard from code/title/raw text
   // -----------------------------
-  const inferredBankFromCodeOrText = bankCanonicalFromAny(
-    [
-      offer?.couponCode || offer?.code || "",
-      offer?.title || "",
-      offer?.rawDiscount || "",
-      offer?.rawText || "",
-    ].join(" ")
-  );
+ const inferredBankFromCodeOrText = bankCanonicalFromAny(
+  [
+    offer?.couponCode || offer?.code || "",
+    offer?.title || "",
+    offer?.rawDiscount || "",
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : "",
+  ].join(" ")
+);
 
   const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
 
