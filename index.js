@@ -743,6 +743,7 @@ if (isTrustedPricingRule(offer) && catsSayDomesticOrInternational && !coreHasNon
 }
 
 return false;
+}
 
 function isHotelOnlyOffer(offer) {
   const text = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.terms || ""}`.toLowerCase();
