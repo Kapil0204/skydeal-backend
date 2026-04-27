@@ -296,9 +296,36 @@ function limitAndSortFlights(flights) {
   return pool.slice(0, MAX_RESULTS_PER_DIRECTION);
 }
 
+
 // --------------------
 // Offer matching + pricing
 // --------------------
+function isTrustedPricingRule(offer) {
+  if (!offer || typeof offer !== "object") return false;
+
+  // If we are using the new clean DB structure, only trusted rules should price.
+  const hasCleanDbFields =
+    "pricingEligible" in offer ||
+    "displayOnly" in offer ||
+    "reviewStatus" in offer ||
+    "hasDeterministicDiscount" in offer ||
+    "offerKind" in offer;
+
+  if (!hasCleanDbFields) {
+    return true; // backward compatible if old offers collection is used
+  }
+
+  if (offer.pricingEligible !== true) return false;
+  if (offer.displayOnly === true) return false;
+  if (offer.reviewStatus && offer.reviewStatus !== "APPROVED") return false;
+  if (offer.hasDeterministicDiscount === false) return false;
+
+  if (!offer.sourceMetadata?.sourcePortal && !offer.sourcePortal) return false;
+  if (!offer.validityPeriod?.to && !offer.parsedFields?.validityPeriod?.to) return false;
+
+  return true;
+}
+
 function isValidBestOffer(offer) {
   if (!offer || typeof offer !== "object") return false;
 
@@ -2164,6 +2191,9 @@ function evaluateOfferForFlight({
   allOffers = [],
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
+  if (!isTrustedPricingRule(offer)) {
+  return { ok: false, reasons: ["NOT_TRUSTED_PRICING_RULE"] };
+}
 
   if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
   if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
@@ -2976,6 +3006,8 @@ app.post("/search", async (req, res) => {
     meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
     meta.usedFallback = false;
+    meta.mongoCollection = MONGO_COL;
+meta.mongoDb = MONGODB_DB;
 
     if (!from || !to || !outDate) {
       return res.status(400).json({
@@ -2988,6 +3020,7 @@ app.post("/search", async (req, res) => {
     // Load offers ONCE per request
         const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    meta.offersLoaded = offers.length;
 
     // Outbound
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
