@@ -1362,9 +1362,14 @@ function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMet
 
       const tierTenure = Number(t?.tenureMonths || 0);
 
-      if (selectedTenure && tierTenure > 0 && tierTenure !== selectedTenure) {
-        return false;
-      }
+      // If user selected EMI tenure, allow exact tenure or generic all-tenure tier.
+// If user did NOT select tenure, do NOT apply tenure-specific slabs like 6/9 months.
+// This prevents over-discounting ₹2000 when actual/default 3-month discount is ₹1500.
+if (selectedTenure) {
+  if (tierTenure > 0 && tierTenure !== selectedTenure) return false;
+} else {
+  if (tierTenure > 0) return false;
+}
 
       const flat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
       const pct = Number(t?.discountPercent || 0);
@@ -1388,6 +1393,12 @@ function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMet
     const bExact = bTenure === selectedTenure ? 1 : 0;
     if (aExact !== bExact) return bExact - aExact;
   }
+   // If no tenure selected, generic all-tenure tier should win.
+if (!selectedTenure) {
+  const aGeneric = aTenure === 0 ? 1 : 0;
+  const bGeneric = bTenure === 0 ? 1 : 0;
+  if (aGeneric !== bGeneric) return bGeneric - aGeneric;
+}
 
   const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
   const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
