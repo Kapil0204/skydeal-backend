@@ -369,10 +369,23 @@ function isValidBestOffer(offer) {
     0
   );
 
-  const hasPercent = Number.isFinite(percent) && percent > 0;
-  const hasFlat = Number.isFinite(flat) && flat > 0;
-  const hasCap = Number.isFinite(maxCap) && maxCap > 0;
-  const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
+const tiers =
+  offer?.discountTiers ||
+  offer?.parsedFields?.discountTiers ||
+  [];
+
+const hasTierDiscount =
+  Array.isArray(tiers) &&
+  tiers.some((t) => {
+    const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+    const tierPct = Number(t?.discountPercent || 0);
+    return tierFlat > 0 || tierPct > 0;
+  });
+
+const hasPercent = Number.isFinite(percent) && percent > 0;
+const hasFlat = Number.isFinite(flat) && flat > 0;
+const hasCap = Number.isFinite(maxCap) && maxCap > 0;
+const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
 
   const mentionsUpTo = /\bup\s*to\b|\bupto\b/.test(blob);
   const mentionsCashback = /\bcashback\b/.test(blob);
@@ -384,7 +397,7 @@ function isValidBestOffer(offer) {
     /\bdiscount\b/.test(blob);
 
   // 2. Must have some real discount signal
-  if (!hasPercent && !hasFlat) return false;
+  if (!hasPercent && !hasFlat && !hasTierDiscount) return false;
 
   // 3. Cashback-only should never become best offer
   // Allow mixed offers only if they also have a real instant-discount structure
@@ -398,7 +411,7 @@ function isValidBestOffer(offer) {
   // - cap
   // - flat amount
   // - or min transaction
-  if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn) return false;
+if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn && !hasTierDiscount) return false;
 
   // 5. Coupon required but missing code
   const code =
@@ -1131,15 +1144,9 @@ function inferMinTxnFromText(offer) {
 }
 
 function getMinTxnValue(offer) {
-  // ✅ FIX #2: Prefer tiered min transaction values (bestTierForDisplay / discountTiers)
-  const tierMin =
-    offer?.bestTierForDisplay?.minTransactionValue ??
-    offer?.parsedFields?.bestTierForDisplay?.minTransactionValue ??
-    null;
-
-  const tierMinNum = Number(tierMin);
-  if (Number.isFinite(tierMinNum) && tierMinNum > 0) return tierMinNum;
-
+  // For tiered offers, do NOT use bestTierForDisplay first.
+  // bestTierForDisplay is for display only and may point to a higher slab,
+  // e.g. HDFC 15000+ tier, which wrongly blocks 7500+ bookings.
   const tiers =
     offer?.discountTiers ??
     offer?.parsedFields?.discountTiers ??
@@ -1156,10 +1163,8 @@ function getMinTxnValue(offer) {
   const v = offer?.minTransactionValue ?? offer?.parsedFields?.minTransactionValue ?? null;
   const n = Number(v);
 
-  // If Mongo has a real value, trust it
   if (Number.isFinite(n) && n > 0) return n;
 
-  // Otherwise infer from text (flight-safe; prevents picking hotel minimum)
   const inferred = inferMinTxnFromText(offer);
   return Number.isFinite(inferred) ? inferred : 0;
 }
@@ -1366,24 +1371,28 @@ function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMet
 
       return flat > 0 || pct > 0;
     })
-    .sort((a, b) => {
-      const aTenure = Number(a?.tenureMonths || 0);
-      const bTenure = Number(b?.tenureMonths || 0);
+ .sort((a, b) => {
+  const aMin = Number(a?.minTransactionValue || 0);
+  const bMin = Number(b?.minTransactionValue || 0);
 
-      if (selectedTenure) {
-        const aExact = aTenure === selectedTenure ? 1 : 0;
-        const bExact = bTenure === selectedTenure ? 1 : 0;
-        if (aExact !== bExact) return bExact - aExact;
-      }
+  // Higher applicable slab should win first.
+  // Example: amount 15000 should prefer 15000+ slab over 7500+ slab.
+  if (aMin !== bMin) return bMin - aMin;
 
-      const aMin = Number(a?.minTransactionValue || 0);
-      const bMin = Number(b?.minTransactionValue || 0);
-      if (aMin !== bMin) return bMin - aMin;
+  const aTenure = Number(a?.tenureMonths || 0);
+  const bTenure = Number(b?.tenureMonths || 0);
 
-      const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
-      const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
-      return bVal - aVal;
-    });
+  // If same slab, exact EMI tenure wins over generic tier.
+  if (selectedTenure) {
+    const aExact = aTenure === selectedTenure ? 1 : 0;
+    const bExact = bTenure === selectedTenure ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+  }
+
+  const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
+  const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
+  return bVal - aVal;
+});
 
   return eligible[0] || null;
 }
