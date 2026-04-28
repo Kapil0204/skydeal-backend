@@ -1326,8 +1326,69 @@ function getOfferMaxDiscountAmount(offer, passengers = 1) {
 
   return null;
 }
+function getSelectedEmiTenure(selectedPaymentMethods = []) {
+  if (!Array.isArray(selectedPaymentMethods)) return null;
 
-function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
+  for (const pm of selectedPaymentMethods) {
+    const type = String(pm?.type || "").toLowerCase();
+    const tenure = Number(pm?.tenureMonths || pm?.emiTenureMonths || 0);
+
+    if (type.includes("emi") && Number.isFinite(tenure) && tenure > 0) {
+      return tenure;
+    }
+  }
+
+  return null;
+}
+
+function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMethods = []) {
+  const tiers = offer?.discountTiers || offer?.parsedFields?.discountTiers || [];
+  if (!Array.isArray(tiers) || tiers.length === 0) return null;
+
+  const amount = Number(eligibilityAmount || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  const selectedTenure = getSelectedEmiTenure(selectedPaymentMethods);
+
+  const eligible = tiers
+    .filter((t) => {
+      const min = Number(t?.minTransactionValue || 0);
+      if (min > 0 && amount < min) return false;
+
+      const tierTenure = Number(t?.tenureMonths || 0);
+
+      if (selectedTenure && tierTenure > 0 && tierTenure !== selectedTenure) {
+        return false;
+      }
+
+      const flat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const pct = Number(t?.discountPercent || 0);
+
+      return flat > 0 || pct > 0;
+    })
+    .sort((a, b) => {
+      const aTenure = Number(a?.tenureMonths || 0);
+      const bTenure = Number(b?.tenureMonths || 0);
+
+      if (selectedTenure) {
+        const aExact = aTenure === selectedTenure ? 1 : 0;
+        const bExact = bTenure === selectedTenure ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+      }
+
+      const aMin = Number(a?.minTransactionValue || 0);
+      const bMin = Number(b?.minTransactionValue || 0);
+      if (aMin !== bMin) return bMin - aMin;
+
+      const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
+      const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
+      return bVal - aVal;
+    });
+
+  return eligible[0] || null;
+}
+
+function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, selectedPaymentMethods = [], eligibilityAmount = baseAmount) {
   const base = Number(baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
 
@@ -1335,6 +1396,31 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1) {
 
   const perPassenger = offerIsPerPassenger(offer);
   const maxCap = getOfferMaxDiscountAmount(offer, passengers);
+  const applicableTier = pickApplicableDiscountTier(
+  offer,
+  eligibilityAmount,
+  selectedPaymentMethods
+);
+
+if (applicableTier) {
+  const tierFlat = Number(applicableTier.flatDiscountAmount || applicableTier.discountAmount || 0);
+  const tierPct = Number(applicableTier.discountPercent || 0);
+  const tierCap = Number(applicableTier.maxDiscountAmount || 0);
+
+  if (tierFlat > 0) {
+    const discountAmount = perPassenger ? Math.round(tierFlat * pax) : Math.round(tierFlat);
+    const discounted = Math.round(base - discountAmount);
+    return discounted < base ? discounted : base;
+  }
+
+  if (tierPct > 0) {
+    let discountAmount = Math.round(base * (tierPct / 100));
+    if (tierCap > 0) discountAmount = Math.min(discountAmount, tierCap);
+
+    const discounted = Math.round(base - discountAmount);
+    return discounted < base ? discounted : base;
+  }
+}
 
   // Pure cashback / rewards / coins must not reduce upfront payable price
   if (isCashbackStyleOffer(offer)) {
@@ -2283,7 +2369,14 @@ if (!isValidBestOffer(offer)) {
     }
   }
 
-  const discounted = computeDiscountedPrice(offer, baseAmount, isDomestic, passengers);
+  const discounted = computeDiscountedPrice(
+  offer,
+  baseAmount,
+  isDomestic,
+  passengers,
+  selectedPaymentMethods,
+  eligibilityAmount
+);
   const maxDiscountAmount = getOfferMaxDiscountAmount(offer);
 
   if (!Number.isFinite(discounted)) return { ok: false, reasons: ["DISCOUNT_NOT_COMPUTABLE"] };
@@ -2963,7 +3056,14 @@ if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       // ok = wouldApplyNow AND compute yields improvement
       let ok = false;
       if (wouldApplyNow) {
-        const discounted = computeDiscountedPrice(offer, amount, true);
+        const discounted = computeDiscountedPrice(
+  offer,
+  amount,
+  true,
+  1,
+  selectedPaymentMethods,
+  amount
+);
         ok = Number.isFinite(discounted) && discounted < amount;
       }
 
