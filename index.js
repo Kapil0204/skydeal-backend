@@ -1528,6 +1528,10 @@ function bankCanonicalFromAny(raw) {
   if (/\bINDUSIND\b/.test(s)) return "INDUSIND_BANK";
   if (/\bAMEX\b|\bAMERICAN EXPRESS\b/.test(s)) return "AMERICAN_EXPRESS";
   if (/\bONECARD\b|\bONE CARD\b/.test(s)) return "ONECARD";
+  if (/\bBOB\b|\bBOBCARD\b|\bBANK OF BARODA\b/.test(s)) return "BANK_OF_BARODA";
+if (/\bCANARA\b/.test(s)) return "CANARA_BANK";
+if (/\bDBS\b/.test(s)) return "DBS";
+if (/\bCENTRAL BANK\b|\bCENTRAL BANK OF INDIA\b/.test(s)) return "CENTRAL_BANK_OF_INDIA";
 
   const cleaned = s.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return cleaned || null;
@@ -2346,6 +2350,31 @@ if (isSuspiciousGenericOffer(offer, allOffers || [])) {
 if (!isValidBestOffer(offer)) {
   return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
 }
+  const rawDiscountText = String(
+  offer?.rawDiscount ||
+  offer?.parsedFields?.rawDiscount ||
+  ""
+).toLowerCase();
+
+const hasTiers =
+  Array.isArray(offer?.discountTiers) && offer.discountTiers.length > 0;
+
+const hasStructuredCapOrFlat =
+  Number(offer?.flatDiscountAmount || offer?.parsedFields?.flatDiscountAmount || 0) > 0 ||
+  Number(offer?.maxDiscountAmount || offer?.parsedFields?.maxDiscountAmount || 0) > 0;
+
+const isUnsafeUpToOnly =
+  /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
+  !hasTiers &&
+  !hasStructuredCapOrFlat;
+
+if (isUnsafeUpToOnly) {
+  return { ok: false, reasons: ["UNSAFE_UPTO_OFFER"] };
+}
+
+if (isCashbackStyleOffer(offer)) {
+  return { ok: false, reasons: ["CASHBACK_NOT_UPFRONT_PRICE"] };
+}
 
 
 
@@ -2571,7 +2600,29 @@ if (isSuspiciousGenericOffer(offer, offers)) continue;
         })
       );
 
-    if (!matchesNormally && !isSpecificFamilyInfoOnly && !isBroadBankMatch) continue;
+   const infoEval = evaluateOfferForFlight({
+  offer,
+  portal,
+  baseAmount: 10000,
+  eligibilityAmount: 10000,
+  selectedPaymentMethods,
+  isDomestic,
+  cabin,
+  flightAirlineName: "",
+  tripType: "one-way",
+  passengers: 1,
+  allOffers: offers,
+});
+
+const canBeShownAsMatchedInfo =
+  infoEval.ok ||
+  isSpecificFamilyInfoOnly ||
+  (
+    isBroadBankMatch &&
+    !String(infoEval?.reasons || "").includes("PAYMENT_MISMATCH")
+  );
+
+if (!canBeShownAsMatchedInfo) continue;
 
     const dedupeKey = [
       offerCouponCode || "",
@@ -3139,9 +3190,23 @@ app.post("/search", async (req, res) => {
     const cabin = normalizeCabin(body.travelClass);
     const currency = "INR";
 
-    const selectedPaymentMethods = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
+   const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
 
-    meta.selectedPaymentMethods = selectedPaymentMethods;
+const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
+  const type = String(pm?.type || "").toLowerCase();
+
+  if (type.includes("emi") && !Number(pm?.tenureMonths)) {
+    return {
+      ...pm,
+      tenureMonths: 3,
+      defaultedTenure: true
+    };
+  }
+
+  return pm;
+});
+
+meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
     meta.usedFallback = false;
     meta.mongoCollection = MONGO_COL;
