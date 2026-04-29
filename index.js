@@ -1836,6 +1836,16 @@ const inferredBankFromCodeOrText = bankCanonicalFromAny(
   ].join(" ")
 );
 
+const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
+
+if (
+  inferredBankFromCodeOrText &&
+  selectedBanks.length > 0 &&
+  !selectedBanks.includes(inferredBankFromCodeOrText)
+) {
+  return false;
+}
+
   const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
 
   if (
