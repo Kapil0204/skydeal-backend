@@ -2381,8 +2381,9 @@ const hasTiers =
   Array.isArray(offer?.discountTiers) && offer.discountTiers.length > 0;
 
 const hasStructuredCapOrFlat =
-  Number(offer?.flatDiscountAmount || offer?.parsedFields?.flatDiscountAmount || 0) > 0 ||
-  Number(offer?.maxDiscountAmount || offer?.parsedFields?.maxDiscountAmount || 0) > 0;
+  Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0) > 0 ||
+  Number(offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0) > 0 ||
+  Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0) > 0;
 
 const isUnsafeUpToOnly =
   /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
