@@ -2804,8 +2804,8 @@ if (!canBeShownAsMatchedInfo) continue;
     : infoEval.ok
       ? "Applicable offer"
       : hasExplicitOfferPaymentMethods(offer)
-        ? "Requires different card/payment"
-        : "Available on this portal",
+        ? "Use this card to unlock"
+        : "No payment restriction",
     });
   }
 
