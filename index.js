@@ -2719,17 +2719,20 @@ const showReferenceInfo = shouldShowAsReferenceInfoOffer({
   appliedCouponCode,
 });
 
+// NEW LOGIC — allow valid offers even if not applied
+
+const isValidButNotApplied =
+  !infoEval.ok &&
+  !isOfferExpired(offer) &&
+  isFlightOffer(offer);
+
 const canBeShownAsMatchedInfo =
-  infoEval.ok ||
-  showReferenceInfo ||
-  isSpecificFamilyInfoOnly ||
-  (
-    isBroadBankMatch &&
-    !String(infoEval?.reasons || "").includes("PAYMENT_MISMATCH")
-  );
+  infoEval.ok ||                 // applied
+  showReferenceInfo ||           // reference
+  isSpecificFamilyInfoOnly ||    // card mismatch
+  isValidButNotApplied;          // 👈 NEW
 
 if (!canBeShownAsMatchedInfo) continue;
-
     const dedupeKey = [
       offerCouponCode || "",
       String(offer?.title || "").trim().toLowerCase(),
@@ -2786,15 +2789,11 @@ if (!canBeShownAsMatchedInfo) continue;
             infoLabel:
   isSpecificFamilyInfoOnly
     ? "Specific card required"
-    : (
-        infoEval.ok
-          ? "Another applicable offer"
-          : (
-              getInfoOfferReasonLabel(offer, selectedPaymentMethods) ||
-              getInfoOfferDisplayLabel(offer, selectedPaymentMethods) ||
-              "Shown for reference only"
-            )
-      ),
+    : infoEval.ok
+      ? "Another applicable offer"
+      : isValidBestOffer(offer)
+        ? "Available offer (conditions not met)"
+        : "Shown for reference only",
     });
   }
 
@@ -2866,6 +2865,34 @@ for (const offer of offers) {
 
     const best = matchingCandidates.length > 0 ? matchingCandidates[0] : null;
     const otherMatchedOffers = matchingCandidates.slice(1);
+      // ADD THIS BLOCK
+
+const nonAppliedButRelevantOffers = offers
+  .filter((offer) => {
+    if (!isFlightOffer(offer)) return false;
+    if (isOfferExpired(offer)) return false;
+    if (!offerAppliesToPortal(offer, portal)) return false;
+
+    // skip already included
+    const code =
+      offer?.couponCode ||
+      offer?.code ||
+      offer?.parsedFields?.couponCode ||
+      offer?.parsedFields?.code ||
+      null;
+
+    return !matchingCandidates.some((c) => {
+      const cCode =
+        c.offer?.couponCode ||
+        c.offer?.code ||
+        c.offer?.parsedFields?.couponCode ||
+        c.offer?.parsedFields?.code ||
+        null;
+
+      return cCode === code;
+    });
+  })
+  .slice(0, 3); // limit
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
     ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
@@ -2930,36 +2957,44 @@ return {
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
         infoOffers: [
- ...buildInfoOffersForPortal(
-  offers,
-  portal,
-  selectedPaymentMethods,
-  cabin,
-  isDomestic,
-  best?.offer?.couponCode ||
-    best?.offer?.code ||
-    best?.offer?.parsedFields?.couponCode ||
-    best?.offer?.parsedFields?.code ||
-    null,
-  5
-),
-    ...otherMatchedOffersClean.map((row) => ({
-      title: row.offer?.title || null,
-      couponCode:
-        row.offer?.couponCode ||
-        row.offer?.code ||
-        row.offer?.parsedFields?.couponCode ||
-        row.offer?.parsedFields?.code ||
-        null,
-      rawDiscount: row.offer?.rawDiscount || row.offer?.parsedFields?.rawDiscount || null,
-      offerSummary: row.offer?.offerSummary || row.offer?.parsedFields?.offerSummary || null,
-      terms: row.offer?.terms || row.offer?.parsedFields?.terms || null,
-      paymentHint: getMatchedSelectedPaymentLabel(row.offer, selectedPaymentMethods) || null,
-      sourcePortal: row.offer?.sourceMetadata?.sourcePortal || row.offer?.sourcePortal || null,
-      requiresSpecificCardType: false,
-      infoLabel: "Another applicable offer",
-    })),
-  ],
+  ...buildInfoOffersForPortal(
+    offers,
+    portal,
+    selectedPaymentMethods,
+    cabin,
+    isDomestic,
+    best?.offer?.couponCode ||
+      best?.offer?.code ||
+      best?.offer?.parsedFields?.couponCode ||
+      best?.offer?.parsedFields?.code ||
+      null,
+    5
+  ),
+
+  ...otherMatchedOffersClean.map((row) => ({
+    title: row.offer?.title || null,
+    couponCode:
+      row.offer?.couponCode ||
+      row.offer?.code ||
+      row.offer?.parsedFields?.couponCode ||
+      row.offer?.parsedFields?.code ||
+      null,
+    rawDiscount: row.offer?.rawDiscount || null,
+    infoLabel: "Another applicable offer",
+  })),
+
+  ...nonAppliedButRelevantOffers.map((offer) => ({
+    title: offer?.title || null,
+    couponCode:
+      offer?.couponCode ||
+      offer?.code ||
+      offer?.parsedFields?.couponCode ||
+      offer?.parsedFields?.code ||
+      null,
+    rawDiscount: offer?.rawDiscount || null,
+    infoLabel: "Available offer",
+  }))
+],
   debugCounts: {
   offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
 },
