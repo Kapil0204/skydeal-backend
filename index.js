@@ -1534,7 +1534,7 @@ function bankCanonicalFromAny(raw) {
   if (/\bINDUSIND\b/.test(s)) return "INDUSIND_BANK";
   if (/\bAMEX\b|\bAMERICAN EXPRESS\b/.test(s)) return "AMERICAN_EXPRESS";
   if (/\bONECARD\b|\bONE CARD\b/.test(s)) return "ONECARD";
-  if (/\bBOB\b|\bBOBCARD\b|\bBANK OF BARODA\b/.test(s)) return "BANK_OF_BARODA";
+ if (/\bBOB\b|\bBOBCARD\b|\bBANK OF BARODA\b/.test(s)) return "BOB";
 if (/\bCANARA\b/.test(s)) return "CANARA_BANK";
 if (/\bDBS\b/.test(s)) return "DBS";
 if (/\bCENTRAL BANK\b|\bCENTRAL BANK OF INDIA\b/.test(s)) return "CENTRAL_BANK_OF_INDIA";
