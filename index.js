@@ -2813,26 +2813,43 @@ async function applyOffersToFlight(
     const portalBase = Math.round(base);
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
-    const matchingCandidates = [];
+  const matchingCandidates = [];
+const rejectedOfferDebug = [];
 
-        for (const offer of offers) {
-   const ev = evaluateOfferForFlight({
-  offer,
-  portal,
-  baseAmount: portalBase,
-  eligibilityAmount,
-  selectedPaymentMethods,
-  isDomestic,
-  cabin,
-  flightAirlineName: flight.airlineName,
-  tripType,
-  passengers,
-  allOffers: offers,
-});
+for (const offer of offers) {
+  const ev = evaluateOfferForFlight({
+    offer,
+    portal,
+    baseAmount: portalBase,
+    eligibilityAmount,
+    selectedPaymentMethods,
+    isDomestic,
+    cabin,
+    flightAirlineName: flight.airlineName,
+    tripType,
+    passengers,
+    allOffers: offers,
+  });
 
-      if (!ev.ok) continue;
+  if (!ev.ok) {
+    if (
+      portal === "Cleartrip" &&
+      (
+        offer?.couponCode === "CTDOM" ||
+        offer?.couponCode === "CTPREMIUM"
+      )
+    ) {
+      rejectedOfferDebug.push({
+        couponCode: offer?.couponCode || null,
+        title: offer?.title || null,
+        rawDiscount: offer?.rawDiscount || null,
+        reasons: ev.reasons || []
+      });
+    }
+    continue;
+  }
 
-      matchingCandidates.push({
+  matchingCandidates.push({
         offer,
         finalPrice: ev.discounted,
         offerKind: ev.offerKind,
@@ -2953,8 +2970,9 @@ return {
     })),
   ],
   debugCounts: {
-   offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
-  },
+  offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
+  rejectedOfferDebug,
+},
 };
 
   });
