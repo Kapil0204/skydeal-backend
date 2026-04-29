@@ -2627,6 +2627,8 @@ function buildInfoOffersForPortal(
   const seen = new Set();
 
     for (const offer of offers) {
+      // 🔥 REMOVE JUNK OFFERS HERE (MAIN FIX)
+if (isJunkInfoOffer(offer)) continue;
        if (!isFlightOffer(offer)) continue;
 if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
