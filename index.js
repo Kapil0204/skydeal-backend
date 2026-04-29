@@ -787,29 +787,35 @@ function isFirstTimeOrNewUserOffer(offer) {
 }
 
 function hasExplicitOfferPaymentMethods(offer) {
-  const pms =
-    offer?.parsedFields?.paymentMethods ||
-    offer?.paymentMethods ||
-    offer?.eligiblePaymentMethods ||
-    offer?.parsedFields?.eligiblePaymentMethods ||
-    [];
+  // First trust structured payment methods only.
+  const structured = extractOfferPaymentMethodsNoInference(offer);
+  if (Array.isArray(structured) && structured.length > 0) return true;
 
-  if (Array.isArray(pms) && pms.length > 0) return true;
+  // Fallback should be CORE-only.
+  // Do not scan rawText/terms because portal pages contain template/payment noise.
+  const offerSummary =
+    typeof offer?.offerSummary === "string"
+      ? offer.offerSummary
+      : offer?.offerSummary
+        ? JSON.stringify(offer.offerSummary)
+        : offer?.parsedFields?.offerSummary
+          ? JSON.stringify(offer.parsedFields.offerSummary)
+          : "";
 
-  const blob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`.toLowerCase();
+  const coreBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offerSummary}`.toLowerCase();
 
   const bankKeywords = [
-    "axis", "hdfc", "icici", "sbi", "kotak", "amex", "indusind",
-    "hsbc", "idfc", "yes bank", "rbl", "au bank", "federal", "canara",
-    "bank of baroda", "central bank", "onecard", "cred"
+    "axis", "hdfc", "icici", "sbi", "kotak", "amex", "american express",
+    "indusind", "hsbc", "idfc", "yes bank", "rbl", "au bank", "federal",
+    "canara", "bank of baroda", "bobcard", "central bank", "onecard", "cred"
   ];
 
   const paymentKeywords = [
-    "credit card", "debit card", "emi", "upi", "wallet", "net banking", "netbanking", "card"
+    "credit card", "debit card", "emi", "upi", "wallet", "net banking", "netbanking"
   ];
 
-  const mentionsBank = bankKeywords.some((b) => blob.includes(b));
-  const mentionsPayment = paymentKeywords.some((p) => blob.includes(p));
+  const mentionsBank = bankKeywords.some((b) => coreBlob.includes(b));
+  const mentionsPayment = paymentKeywords.some((p) => coreBlob.includes(p));
 
   return mentionsBank || mentionsPayment;
 }
@@ -1618,7 +1624,7 @@ function normalizeSelectedPM(pm) {
   };
 }
 function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
-  const sources = [
+  const rawSources = [
     pm?.conditions || "",
     pm?.raw || "",
     offer?.title || "",
@@ -1630,32 +1636,54 @@ function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
     .map((x) => String(x || ""))
     .join(" ");
 
-  const blob = normalizeText(sources);
+  const lowerRaw = rawSources.toLowerCase();
+  const blob = normalizeText(rawSources);
 
   if (!/\bemi\b/.test(blob)) return [];
 
   const found = new Set();
 
-  // patterns like "3 & 6 months", "3 and 6 months", "3/6 months"
-  const pairRegex = /(\d{1,2})\s*(?:&|and|\/)\s*(\d{1,2})\s*month(s)?/gi;
   let m;
-  while ((m = pairRegex.exec(blob)) !== null) {
+
+  // Raw text patterns: "3 & 6 Months", "3 and 6 month", "3/6 months"
+  const rawPairRegex = /(\d{1,2})\s*(?:&|and|\/|\+|,)\s*(\d{1,2})\s*month(s)?/gi;
+  while ((m = rawPairRegex.exec(lowerRaw)) !== null) {
     const a = Number(m[1]);
     const b = Number(m[2]);
     if (Number.isFinite(a)) found.add(a);
     if (Number.isFinite(b)) found.add(b);
   }
 
-  // patterns like "6 months EMI", "9 month tenure", "12 months only"
+  // Normalized fallback after symbols were stripped: "3 6 month"
+  const normalizedPairRegex = /(\d{1,2})\s+(\d{1,2})\s+month(s)?/gi;
+  while ((m = normalizedPairRegex.exec(blob)) !== null) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (Number.isFinite(a)) found.add(a);
+    if (Number.isFinite(b)) found.add(b);
+  }
+
+  // Range patterns: "3 to 6 months"
+  const rangeRegex = /(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s*month(s)?/gi;
+  while ((m = rangeRegex.exec(lowerRaw)) !== null) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (Number.isFinite(a) && Number.isFinite(b)) {
+      found.add(a);
+      found.add(b);
+    }
+  }
+
+  // Single patterns: "6 month EMI"
   const singleRegex = /(\d{1,2})\s*month(s)?/gi;
-  while ((m = singleRegex.exec(blob)) !== null) {
+  while ((m = singleRegex.exec(lowerRaw)) !== null) {
     const n = Number(m[1]);
     if (Number.isFinite(n)) found.add(n);
   }
 
-  // remove silly values
-  const out = Array.from(found).filter((n) => n >= 2 && n <= 60).sort((a, b) => a - b);
-  return out;
+  return Array.from(found)
+    .filter((n) => n >= 2 && n <= 60)
+    .sort((a, b) => a - b);
 }
 
 function extractOfferNetworkRestrictions(offer, pm = null) {
@@ -2498,6 +2526,69 @@ const all = [
 // If multiple candidates exist, cheapest valid one wins.
 return all.length > 0 ? all[0] : null;
 }
+function shouldShowAsReferenceInfoOffer({
+  offer,
+  portal,
+  selectedPaymentMethods,
+  cabin,
+  isDomestic,
+  appliedCouponCode,
+}) {
+  if (!offer) return false;
+  if (!isFlightOffer(offer)) return false;
+  if (isHotelOnlyOffer(offer)) return false;
+  if (isOfferExpired(offer)) return false;
+  if (!offerAppliesToPortal(offer, portal)) return false;
+
+  const coupon =
+    offer?.couponCode ||
+    offer?.code ||
+    offer?.parsedFields?.couponCode ||
+    offer?.parsedFields?.code ||
+    null;
+
+  if (appliedCouponCode && coupon && coupon === appliedCouponCode) return false;
+
+  const coreBlob = normalizeText(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
+  );
+
+  if (
+    (normalizeCabinShort(cabin) === "economy" || normalizeCabinShort(cabin) === "premium") &&
+    /\bbusiness class\b|\bfirst class\b/.test(coreBlob)
+  ) {
+    return false;
+  }
+
+  if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return false;
+
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
+
+  // If no payment selected, only show generic portal/airline references.
+  if (selected.length === 0) {
+    return !hasExplicitPM;
+  }
+
+  // If payment selected, show:
+  // 1. exact payment matches
+  // 2. same-bank alternatives
+  // 3. generic portal/airline offers
+  if (!hasExplicitPM) return true;
+
+  if (offerMatchesSelectedPayment(offer, selected)) return true;
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  const sameBank = offerPMs.some((pm) =>
+    selected.some((sel) => {
+      const offerBank = bankCanonicalFromAny(pm?.bankCanonical || pm?.bank || pm?.name || pm?.raw || "");
+      const selectedBank = bankCanonicalFromAny(sel?.name || sel?.bank || "");
+      return offerBank && selectedBank && offerBank === selectedBank;
+    })
+  );
+
+  return sameBank;
+}
 
 function buildInfoOffersForPortal(
   offers,
@@ -2509,8 +2600,7 @@ function buildInfoOffersForPortal(
   limit = 5
 ) {
    
-  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
-  if (sel.length === 0) return [];
+ const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
 
   const info = [];
   const seen = new Set();
@@ -2585,7 +2675,7 @@ if (isSuspiciousGenericOffer(offer, offers)) continue;
         })
       );
 
-   const infoEval = evaluateOfferForFlight({
+  const infoEval = evaluateOfferForFlight({
   offer,
   portal,
   baseAmount: 10000,
@@ -2599,8 +2689,18 @@ if (isSuspiciousGenericOffer(offer, offers)) continue;
   allOffers: offers,
 });
 
+const showReferenceInfo = shouldShowAsReferenceInfoOffer({
+  offer,
+  portal,
+  selectedPaymentMethods,
+  cabin,
+  isDomestic,
+  appliedCouponCode,
+});
+
 const canBeShownAsMatchedInfo =
   infoEval.ok ||
+  showReferenceInfo ||
   isSpecificFamilyInfoOnly ||
   (
     isBroadBankMatch &&
@@ -2663,12 +2763,17 @@ if (!canBeShownAsMatchedInfo) continue;
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
             infoLabel:
-        isSpecificFamilyInfoOnly
-          ? "Specific card required"
+  isSpecificFamilyInfoOnly
+    ? "Specific card required"
+    : (
+        infoEval.ok
+          ? "Another applicable offer"
           : (
               getInfoOfferReasonLabel(offer, selectedPaymentMethods) ||
-              getInfoOfferDisplayLabel(offer, selectedPaymentMethods)
-            ),
+              getInfoOfferDisplayLabel(offer, selectedPaymentMethods) ||
+              "Shown for reference only"
+            )
+      ),
     });
   }
 
