@@ -857,6 +857,13 @@ function offerTargetsThisAirline(offer, airlineName) {
 function getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName) {
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
   const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
+    if (offer?.offerKind === "portal") {
+    return { kind: "portal" };
+  }
+
+  if (offer?.offerKind === "airline") {
+    return { kind: "airline" };
+  }
 
   // 1) Payment-required offers must not apply when user selected nothing
      if (hasExplicitPM) {
@@ -912,16 +919,16 @@ function offerCannotBeClubbed(offer) {
 }
 function offerRequiresRoundTrip(offer) {
   const blob = normalizeText(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""}`
+    `${offer?.title || ""} ${offer?.rawDiscount || ""}`
   );
 
   return (
-    blob.includes("return flight") ||
-    blob.includes("return flights") ||
-    blob.includes("return booking") ||
-    blob.includes("round trip") ||
-    blob.includes("round-trip") ||
-    blob.includes("roundtrip")
+    /\bround trip only\b/.test(blob) ||
+    /\broundtrip only\b/.test(blob) ||
+    /\bround-trip only\b/.test(blob) ||
+    /\breturn trip only\b/.test(blob) ||
+    /\breturn booking only\b/.test(blob) ||
+    /\breturn flight only\b/.test(blob)
   );
 }
 
@@ -2639,7 +2646,7 @@ if (isSuspiciousGenericOffer(offer, offers)) continue;
       }
     }
 
-    if (offerRequiresRoundTrip(offer)) continue;
+   if (offerRequiresRoundTrip(offer) && appliedCouponCode) continue;
 
     const offerCouponCode =
       offer?.couponCode ||
@@ -3194,9 +3201,11 @@ if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       if (scope) stats.scopeOK++;
       else failReasons.push("SCOPE_MISMATCH");
 
-      const pay = offerMatchesSelectedPayment(offer, selectedPaymentMethods);
-      if (pay) stats.matchesPayment++;
-      else failReasons.push("PAYMENT_MISMATCH");
+     const paymentRequired = hasExplicitOfferPaymentMethods(offer) && offer?.offerKind !== "portal" && offer?.offerKind !== "airline";
+const pay = !paymentRequired || offerMatchesSelectedPayment(offer, selectedPaymentMethods);
+
+if (pay) stats.matchesPayment++;
+else failReasons.push("PAYMENT_MISMATCH");
       const offerPMs = extractOfferPaymentMethods(offer);
       const inferredOnly = Array.isArray(offerPMs) && offerPMs.length > 0 && offerPMs.every((pm) => pm?.inferred === true);
       if (inferredOnly) stats.inferredOnly++;
