@@ -2783,17 +2783,27 @@ if (!canBeShownAsMatchedInfo) continue;
       rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
       offerSummary: offer?.offerSummary || offer?.parsedFields?.offerSummary || null,
       terms: offer?.terms || offer?.parsedFields?.terms || null,
-      paymentHint: getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) || null,
+      paymentHint:
+  getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) ||
+  (() => {
+    const pm = extractOfferPaymentMethodsNoInference(offer)?.[0];
+    if (!pm) return null;
+
+    const bank = pm?.bank || pm?.name || null;
+    const type = pm?.type || pm?.methodCanonical || null;
+
+    return [bank, type].filter(Boolean).join(" • ") || null;
+  })(),
       sourcePortal: offer?.sourceMetadata?.sourcePortal || offer?.sourcePortal || null,
       requiresSpecificCardType: isSpecificFamilyInfoOnly === true,
-            infoLabel:
+           infoLabel:
   isSpecificFamilyInfoOnly
     ? "Specific card required"
     : infoEval.ok
-      ? "Another applicable offer"
-      : isValidBestOffer(offer)
-        ? "Available offer (conditions not met)"
-        : "Shown for reference only",
+      ? "Applicable offer"
+      : hasExplicitOfferPaymentMethods(offer)
+        ? "Requires different card/payment"
+        : "Available on this portal",
     });
   }
 
@@ -2803,10 +2813,21 @@ if (!canBeShownAsMatchedInfo) continue;
     .map(({ _score, ...rest }) => rest);
 }
 function isJunkInfoOffer(offer) {
-  const title = String(offer?.title || "");
-  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+  const title = String(offer?.title || "").toLowerCase();
+  const rawDiscount = String(offer?.rawDiscount || "").toLowerCase();
 
-  return /rupay|platinum|select|corporate|business/i.test(`${title} ${rawDiscount}`);
+  const blob = `${title} ${rawDiscount}`;
+
+  // Remove card-tier noise
+  if (/(rupay|platinum|select|corporate|business)/i.test(blob)) return true;
+
+  // Remove generic "all cards" noise
+  if (/(all cards|all users|all customers)/i.test(blob)) return true;
+
+  // Remove offers without strong discount signal
+  if (!/(%|rs|₹|discount|off)/i.test(blob)) return true;
+
+  return false;
 }
 
 function cleanInfoOffers(infoOffers, limit = 5) {
@@ -2849,6 +2870,7 @@ async function applyOffersToFlight(
 
 
 for (const offer of offers) {
+  if (isJunkInfoOffer(offer)) continue;
   const ev = evaluateOfferForFlight({
     offer,
     portal,
