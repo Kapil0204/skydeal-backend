@@ -1783,7 +1783,14 @@ const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFiel
   const providerRestrictions = extractOfferProviderRestrictions(offer, pm);
   const cardFamilyRestrictions = extractOfferCardFamilyRestrictions(offer, pm);
   const corporateRestriction = extractOfferCorporateRestriction(offer, pm);
-
+if (String(offer?.couponCode || "").includes("GOYES")) {
+  console.log("YES DEBUG offerPM", {
+    rawPm: pm,
+    typeNorm,
+    bankCanonical
+  });
+}
+  
   return {
     typeNorm,
     bankCanonical,
