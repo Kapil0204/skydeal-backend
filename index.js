@@ -423,9 +423,8 @@ if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn && !hasTierDiscount) retur
 
   if (offer?.couponRequired && !code) return false;
 
-  // 6. Percent-only offers without cap are too vague for best-price selection
-  // Example: "Up to 15% OFF*" with no max cap
-  if (hasPercent && !hasFlat && !hasCap) return false;
+// 6. Allow percent-only offers if they are NOT vague "up to"
+if (hasPercent && !hasFlat && !hasCap && mentionsUpTo) return false;
 
   return true;
 }
@@ -1490,8 +1489,10 @@ if (applicableTier) {
       discountAmount = Math.round(base * (pct / 100));
 
       if (Number.isFinite(maxCap) && maxCap > 0) {
-        discountAmount = Math.min(discountAmount, maxCap);
-      }
+  discountAmount = Math.min(discountAmount, maxCap);
+} else if (/\bup\s*to\b|\bupto\b/.test(String(offer?.rawDiscount || "").toLowerCase())) {
+  discountAmount = Math.min(discountAmount, 1500);
+}
     }
 
     const discounted = Math.round(base - discountAmount);
