@@ -1770,8 +1770,9 @@ function normalizeOfferPM(pm, offer = null) {
      /emi/.test(typeRaw) ? "EMI" :
      null);
 
-  const bankFromFields = pm?.bankCanonical || pm?.bank || pm?.name || pm?.raw || "";
-  const bankCanonical = bankCanonicalFromAny(bankFromFields);
+const explicitBankCanonical = pm?.bankCanonical ? String(pm.bankCanonical).toUpperCase().trim() : null;
+const bankFromFields = explicitBankCanonical || pm?.bank || pm?.name || pm?.raw || "";
+const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFields);
 
   const explicitTenure =
     Number(pm?.tenureMonths) ||
