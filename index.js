@@ -332,7 +332,6 @@ return true;
 function isValidBestOffer(offer) {
   if (!offer || typeof offer !== "object") return false;
 
-  // 1. Expiry
   if (isOfferExpired(offer)) return false;
 
   const rawDiscount = String(
@@ -342,7 +341,6 @@ function isValidBestOffer(offer) {
   ).trim();
 
   const title = String(offer?.title || "").trim();
-
   const blob = `${title} ${rawDiscount}`.toLowerCase();
 
   const percent = Number(
@@ -369,23 +367,23 @@ function isValidBestOffer(offer) {
     0
   );
 
-const tiers =
-  offer?.discountTiers ||
-  offer?.parsedFields?.discountTiers ||
-  [];
+  const tiers =
+    offer?.discountTiers ||
+    offer?.parsedFields?.discountTiers ||
+    [];
 
-const hasTierDiscount =
-  Array.isArray(tiers) &&
-  tiers.some((t) => {
-    const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
-    const tierPct = Number(t?.discountPercent || 0);
-    return tierFlat > 0 || tierPct > 0;
-  });
+  const hasTierDiscount =
+    Array.isArray(tiers) &&
+    tiers.some((t) => {
+      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const tierPct = Number(t?.discountPercent || 0);
+      return tierFlat > 0 || tierPct > 0;
+    });
 
-const hasPercent = Number.isFinite(percent) && percent > 0;
-const hasFlat = Number.isFinite(flat) && flat > 0;
-const hasCap = Number.isFinite(maxCap) && maxCap > 0;
-const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
+  const hasPercent = Number.isFinite(percent) && percent > 0;
+  const hasFlat = Number.isFinite(flat) && flat > 0;
+  const hasCap = Number.isFinite(maxCap) && maxCap > 0;
+  const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
 
   const mentionsUpTo = /\bup\s*to\b|\bupto\b/.test(blob);
   const mentionsCashback = /\bcashback\b/.test(blob);
@@ -396,24 +394,6 @@ const hasMinTxn = Number.isFinite(minTxn) && minTxn > 0;
     /\boff\b/.test(blob) ||
     /\bdiscount\b/.test(blob);
 
-  // 2. Must have some real discount signal
-  if (!hasPercent && !hasFlat && !hasTierDiscount) return false;
-
-  // 3. Cashback-only should never become best offer
-  // Allow mixed offers only if they also have a real instant-discount structure
-  if (mentionsCashback && !mentionsInstantDiscount) return false;
-
-  // 4. Pure vague "up to" rows should never become best offer
-  // Examples:
-  // - "Up to 25% OFF*"
-  // - "Up to 15% OFF on Domestic Flights for All Users"
-  // Allow only if there is a calculable structure:
-  // - cap
-  // - flat amount
-  // - or min transaction
-if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn && !hasTierDiscount) return false;
-
-  // 5. Coupon required but missing code
   const code =
     offer?.couponCode ||
     offer?.code ||
@@ -423,8 +403,24 @@ if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn && !hasTierDiscount) retur
 
   if (offer?.couponRequired && !code) return false;
 
-// 6. Allow percent-only offers if they are NOT vague "up to"
-if (hasPercent && !hasFlat && !hasCap && mentionsUpTo) return false;
+  if (!hasPercent && !hasFlat && !hasTierDiscount) return false;
+
+  if (mentionsCashback && !mentionsInstantDiscount) return false;
+
+  // Approved clean portal/airline/payment rules with a computable percent + cap are valid,
+  // even when text says "up to". Example: Cleartrip CTDOM = 25% capped at ₹1500.
+  if (
+    offer?.pricingEligible === true &&
+    offer?.hasDeterministicDiscount === true &&
+    hasPercent &&
+    hasCap
+  ) {
+    return true;
+  }
+
+  if (mentionsUpTo && !hasFlat && !hasCap && !hasMinTxn && !hasTierDiscount) return false;
+
+  if (hasPercent && !hasFlat && !hasCap && mentionsUpTo) return false;
 
   return true;
 }
@@ -2382,13 +2378,22 @@ const hasTiers =
 
 const hasStructuredCapOrFlat =
   Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0) > 0 ||
-  Number(offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0) > 0 ||
+  Number(offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0) > 0;
+
+const hasStructuredPercent =
   Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0) > 0;
+
+const isTrustedCappedPercentOffer =
+  offer?.pricingEligible === true &&
+  offer?.hasDeterministicDiscount === true &&
+  hasStructuredPercent &&
+  hasStructuredCapOrFlat;
 
 const isUnsafeUpToOnly =
   /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
   !hasTiers &&
-  !hasStructuredCapOrFlat;
+  !hasStructuredCapOrFlat &&
+  !isTrustedCappedPercentOffer;
 
 if (isUnsafeUpToOnly) {
   return { ok: false, reasons: ["UNSAFE_UPTO_OFFER"] };
