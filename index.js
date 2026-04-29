@@ -2821,7 +2821,7 @@ async function applyOffersToFlight(
     const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
 
   const matchingCandidates = [];
-const rejectedOfferDebug = [];
+
 
 for (const offer of offers) {
   const ev = evaluateOfferForFlight({
@@ -2838,23 +2838,7 @@ for (const offer of offers) {
     allOffers: offers,
   });
 
-  if (!ev.ok) {
-    if (
-      portal === "Cleartrip" &&
-      (
-        offer?.couponCode === "CTDOM" ||
-        offer?.couponCode === "CTPREMIUM"
-      )
-    ) {
-      rejectedOfferDebug.push({
-        couponCode: offer?.couponCode || null,
-        title: offer?.title || null,
-        rawDiscount: offer?.rawDiscount || null,
-        reasons: ev.reasons || []
-      });
-    }
-    continue;
-  }
+  if (!ev.ok) continue;
 
   matchingCandidates.push({
         offer,
@@ -2978,7 +2962,6 @@ return {
   ],
   debugCounts: {
   offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
-  rejectedOfferDebug,
 },
 };
 
