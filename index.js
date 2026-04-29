@@ -1813,9 +1813,11 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
   // -----------------------------
   // 1) Hard bank guard from code/title/raw text
   // -----------------------------
- const inferredBankFromCodeOrText = bankCanonicalFromAny(
+ // Do NOT infer bank from coupon code here.
+// Coupons like GOYES can look bank-related but are not reliable enough for hard rejection.
+// Structured eligiblePaymentMethods should be the source of truth.
+const inferredBankFromCodeOrText = bankCanonicalFromAny(
   [
-    offer?.couponCode || offer?.code || "",
     offer?.title || "",
     offer?.rawDiscount || "",
     typeof offer?.offerSummary === "string"
