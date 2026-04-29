@@ -2802,6 +2802,32 @@ if (!canBeShownAsMatchedInfo) continue;
     .slice(0, limit)
     .map(({ _score, ...rest }) => rest);
 }
+function isJunkInfoOffer(offer) {
+  const title = String(offer?.title || "");
+  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+
+  return /rupay|platinum|select|corporate|business/i.test(`${title} ${rawDiscount}`);
+}
+
+function cleanInfoOffers(infoOffers, limit = 5) {
+  const seen = new Set();
+
+  return (Array.isArray(infoOffers) ? infoOffers : [])
+    .filter((offer) => {
+      const code = String(offer?.couponCode || "").trim().toUpperCase();
+      const title = String(offer?.title || "").trim().toLowerCase();
+      const rawDiscount = String(offer?.rawDiscount || "").trim().toLowerCase();
+
+      const key = code || `${title}|${rawDiscount}`;
+
+      if (!key) return false;
+      if (seen.has(key)) return false;
+
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
+}
 
 async function applyOffersToFlight(
   flight,
@@ -2872,6 +2898,7 @@ const nonAppliedButRelevantOffers = offers
     if (!isFlightOffer(offer)) return false;
     if (isOfferExpired(offer)) return false;
     if (!offerAppliesToPortal(offer, portal)) return false;
+    if (isJunkInfoOffer(offer)) return false;
 
     // skip already included
     const code =
@@ -2892,7 +2919,7 @@ const nonAppliedButRelevantOffers = offers
       return cCode === code;
     });
   })
-  .slice(0, 3); // limit
+  .slice(0, 5); // limit
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
     ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
@@ -2956,7 +2983,7 @@ return {
   explain: best
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
-        infoOffers: [
+       infoOffers: cleanInfoOffers([
   ...buildInfoOffersForPortal(
     offers,
     portal,
@@ -2980,7 +3007,7 @@ return {
       row.offer?.parsedFields?.code ||
       null,
     rawDiscount: row.offer?.rawDiscount || null,
-    infoLabel: "Another applicable offer",
+    infoLabel: "Applicable offer",
   })),
 
   ...nonAppliedButRelevantOffers.map((offer) => ({
@@ -2992,9 +3019,11 @@ return {
       offer?.parsedFields?.code ||
       null,
     rawDiscount: offer?.rawDiscount || null,
-    infoLabel: "Available offer",
+    infoLabel: hasExplicitOfferPaymentMethods(offer)
+      ? "Requires different card/payment"
+      : "Available on this portal",
   }))
-],
+], 5),
   debugCounts: {
   offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
 },
