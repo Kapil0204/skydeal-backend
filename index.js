@@ -1783,13 +1783,7 @@ const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFiel
   const providerRestrictions = extractOfferProviderRestrictions(offer, pm);
   const cardFamilyRestrictions = extractOfferCardFamilyRestrictions(offer, pm);
   const corporateRestriction = extractOfferCorporateRestriction(offer, pm);
-if (String(offer?.couponCode || "").includes("GOYES")) {
-  console.log("YES DEBUG offerPM", {
-    rawPm: pm,
-    typeNorm,
-    bankCanonical
-  });
-}
+
   
   return {
     typeNorm,
@@ -1824,38 +1818,9 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
  // Do NOT infer bank from coupon code here.
 // Coupons like GOYES can look bank-related but are not reliable enough for hard rejection.
 // Structured eligiblePaymentMethods should be the source of truth.
-const inferredBankFromCodeOrText = bankCanonicalFromAny(
-  [
-    offer?.title || "",
-    offer?.rawDiscount || "",
-    typeof offer?.offerSummary === "string"
-      ? offer.offerSummary
-      : offer?.offerSummary
-        ? JSON.stringify(offer.offerSummary)
-        : "",
-  ].join(" ")
-);
-
-const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
-
-if (
-  inferredBankFromCodeOrText &&
-  selectedBanks.length > 0 &&
-  !selectedBanks.includes(inferredBankFromCodeOrText)
-) {
-  return false;
-}
-
-  const selectedBanks = selNorm.map((x) => x.bankCanonical).filter(Boolean);
-
-  if (
-    inferredBankFromCodeOrText &&
-    selectedBanks.length > 0 &&
-    !selectedBanks.includes(inferredBankFromCodeOrText)
-  ) {
-    return false;
-  }
-
+// Hard bank guard disabled.
+// Structured eligiblePaymentMethods is the source of truth.
+// This prevents valid offers like GOYES from being rejected before structured matching.
   // -----------------------------
   // 2) Structured PM match only
   // -----------------------------
