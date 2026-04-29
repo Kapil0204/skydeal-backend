@@ -2416,12 +2416,19 @@ if (isCashbackStyleOffer(offer)) {
     };
   }
   const hasExplicitPM = hasExplicitOfferPaymentMethods(offer);
-  const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
+const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
-  if (hasExplicitPM && !hasSelectedPM) {
-    return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
-  }
+// ✅ FIX: only block payment-type offers, not portal/airline offers
+const offerKindCheck = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
 
+if (
+  hasExplicitPM &&
+  !hasSelectedPM &&
+  offerKindCheck.kind === null &&
+  offerKindCheck.reason === "PAYMENT_REQUIRED_NOT_SELECTED"
+) {
+  return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
+}
   const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
   if (!kindInfo.kind) {
     return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
