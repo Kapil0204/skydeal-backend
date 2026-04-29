@@ -2835,7 +2835,14 @@ function isJunkInfoOffer(offer) {
 function cleanInfoOffers(infoOffers, limit = 5) {
   const seen = new Set();
 
-  return (Array.isArray(infoOffers) ? infoOffers : [])
+ return (Array.isArray(infoOffers) ? infoOffers : [])
+  .sort((a, b) => {
+    const extract = (txt) => {
+      const m = String(txt || "").match(/(\d+)%|(\d{3,5})/);
+      return m ? Number(m[1] || m[2]) : 0;
+    };
+    return extract(b.rawDiscount) - extract(a.rawDiscount);
+  })
     .filter((offer) => {
       const code = String(offer?.couponCode || "").trim().toUpperCase();
       const title = String(offer?.title || "").trim().toLowerCase();
