@@ -3452,10 +3452,13 @@ meta.mongoDb = MONGODB_DB;
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
-    const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
+        const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
-        const routeIsDomestic = isDomesticRoute(from, to);
+    meta.outRawFlights = outFlightsRaw.length;
+    meta.outReturnedFlights = outFlightsLimited.length;
+
+    const routeIsDomestic = isDomesticRoute(from, to);
 
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
@@ -3486,8 +3489,11 @@ meta.mongoDb = MONGODB_DB;
       meta.retStatus = retRes.status;
       meta.request.retTried = retRes.tried;
 
-      const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
+           const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
+
+      meta.retRawFlights = retFlightsRaw.length;
+      meta.retReturnedFlights = retFlightsLimited.length;
 
       const returnRouteIsDomestic = isDomesticRoute(to, from);
 
