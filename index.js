@@ -265,6 +265,7 @@ function mapFlightsFromFlightAPI(raw) {
 }
 
 // --------------------
+// --------------------
 // Limit results
 // --------------------
 const MAX_RESULTS_PER_DIRECTION = 100;
@@ -289,10 +290,22 @@ function isIndianCarrier(airlineName) {
 }
 
 function limitAndSortFlights(flights) {
-  const indian = flights.filter((f) => isIndianCarrier(f.airlineName));
-  const pool = indian.length > 0 ? indian : flights;
+  const pool = Array.isArray(flights) ? [...flights] : [];
 
-  pool.sort((a, b) => (a.stops || 0) - (b.stops || 0));
+  pool.sort((a, b) => {
+    const aIndian = isIndianCarrier(a.airlineName) ? 0 : 1;
+    const bIndian = isIndianCarrier(b.airlineName) ? 0 : 1;
+
+    if (aIndian !== bIndian) return aIndian - bIndian;
+
+    const aPrice = Number(a.price || 0);
+    const bPrice = Number(b.price || 0);
+
+    if (aPrice !== bPrice) return aPrice - bPrice;
+
+    return Number(a.stops || 0) - Number(b.stops || 0);
+  });
+
   return pool.slice(0, MAX_RESULTS_PER_DIRECTION);
 }
 
