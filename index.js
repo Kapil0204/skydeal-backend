@@ -267,7 +267,7 @@ function mapFlightsFromFlightAPI(raw) {
 // --------------------
 // Limit results
 // --------------------
-const MAX_RESULTS_PER_DIRECTION = 25;
+const MAX_RESULTS_PER_DIRECTION = 100;
 
 const INDIAN_CARRIERS = [
   "air india express",
