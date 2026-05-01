@@ -320,6 +320,65 @@ function getPricingOptionAmount(opt) {
   return null;
 }
 
+function getFlightApiCarrierDebug(raw) {
+  const itineraries = Array.isArray(raw?.itineraries) ? raw.itineraries : [];
+  const legs = Array.isArray(raw?.legs) ? raw.legs : [];
+  const carriers = Array.isArray(raw?.carriers) ? raw.carriers : [];
+  const segments = Array.isArray(raw?.segments) ? raw.segments : [];
+  const agents = Array.isArray(raw?.agents) ? raw.agents : [];
+
+  const legById = Object.fromEntries(legs.map((l) => [l.id, l]));
+  const carrierById = Object.fromEntries(carriers.map((c) => [String(c.id), c]));
+  const segmentById = Object.fromEntries(segments.map((s) => [s.id, s]));
+  const agentById = Object.fromEntries(agents.map((a) => [String(a.id), a]));
+
+  return itineraries.map((it) => {
+    const legId = Array.isArray(it.leg_ids) ? it.leg_ids[0] : null;
+    const leg = legId ? legById[legId] : null;
+
+    const marketingCarrierId = Array.isArray(leg?.marketing_carrier_ids)
+      ? leg.marketing_carrier_ids[0]
+      : null;
+
+    const carrier = marketingCarrierId != null
+      ? carrierById[String(marketingCarrierId)]
+      : null;
+
+    let flightNumber = "-";
+    if (Array.isArray(leg?.segment_ids) && leg.segment_ids.length > 0) {
+      const seg = segmentById[leg.segment_ids[0]];
+      flightNumber = String(seg?.flight_number || seg?.marketing_flight_number || "-");
+    }
+
+    const pricingOptions = Array.isArray(it.pricing_options) ? it.pricing_options : [];
+
+    return {
+      airlineName: carrier?.name || carrier?.display_name || carrier?.code || "-",
+      carrierId: marketingCarrierId,
+      carrierCode: carrier?.code || carrier?.display_code || carrier?.iata || null,
+      flightNumber,
+      departure: leg?.departure || null,
+      arrival: leg?.arrival || null,
+      pricingOptions: pricingOptions.map((opt) => {
+        const agentIds = [
+          ...(Array.isArray(opt?.agent_ids) ? opt.agent_ids : []),
+          ...(Array.isArray(opt?.items) ? opt.items.map((item) => item?.agent_id).filter(Boolean) : [])
+        ].map(String);
+
+        return {
+          amount: getPricingOptionAmount(opt),
+          agentIds: [...new Set(agentIds)],
+          agents: [...new Set(agentIds)].map((id) => ({
+            id,
+            name: agentById[id]?.name || agentById[id]?.display_name || null,
+            type: agentById[id]?.type || agentById[id]?.category || null
+          }))
+        };
+      })
+    };
+  });
+}
+
 // --------------------
 // Map FlightAPI response to consistent flights
 // IMPORTANT:
@@ -3606,11 +3665,12 @@ meta.mongoDb = MONGODB_DB;
 
         meta.outRawFlights = outFlightsRaw.length;
     meta.outReturnedFlights = outFlightsLimited.length;
-    meta.outCarrierPriceRule = {
+       meta.outCarrierPriceRule = {
       flightApiItineraries: Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0,
       keptWithCarrierPrice: outFlightsRaw.length,
       skippedWithoutCarrierPrice:
-        (Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0) - outFlightsRaw.length
+        (Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0) - outFlightsRaw.length,
+      debug: getFlightApiCarrierDebug(outRes.data)
     };
 
     const routeIsDomestic = isDomesticRoute(from, to);
