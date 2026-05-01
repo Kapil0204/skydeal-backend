@@ -250,13 +250,15 @@ function mapFlightsFromFlightAPI(raw) {
     const arrivalTime = leg?.arrival || null;
     const stops = typeof leg?.stop_count === "number" ? leg.stop_count : 0;
 
-    flights.push({
+        flights.push({
       airlineName,
       flightNumber,
       departureTime,
       arrivalTime,
       stops,
       price: typeof cheapestAmount === "number" ? cheapestAmount : 0,
+      priceSource: "cheapest_pricing_option",
+      pricingOptionCount: pricingOptions.length,
       raw: { itinerary: it, leg },
     });
   }
@@ -3445,7 +3447,19 @@ meta.mongoDb = MONGODB_DB;
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
-        const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
+        meta.flightApiRawShape = {
+      topLevelKeys: Object.keys(outRes.data || {}),
+      itineraries: Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0,
+      legs: Array.isArray(outRes.data?.legs) ? outRes.data.legs.length : 0,
+      segments: Array.isArray(outRes.data?.segments) ? outRes.data.segments.length : 0,
+      carriers: Array.isArray(outRes.data?.carriers) ? outRes.data.carriers.length : 0,
+      agents: Array.isArray(outRes.data?.agents) ? outRes.data.agents.length : 0,
+      quotes: Array.isArray(outRes.data?.quotes) ? outRes.data.quotes.length : 0,
+      results: Array.isArray(outRes.data?.results) ? outRes.data.results.length : 0,
+      data: Array.isArray(outRes.data?.data) ? outRes.data.data.length : 0
+    };
+
+    const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
     meta.outRawFlights = outFlightsRaw.length;
