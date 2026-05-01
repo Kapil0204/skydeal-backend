@@ -207,15 +207,136 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
 // --------------------
 // Map FlightAPI response to consistent flights
 // --------------------
+function normalizeForMatch(v) {
+  return String(v || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getCarrierAliases(airlineName, carrier = {}) {
+  const name = normalizeForMatch(airlineName);
+  const code = normalizeForMatch(carrier?.code || carrier?.iata || carrier?.display_code || "");
+
+  const aliases = new Set([name, code].filter(Boolean));
+
+  if (name.includes("indigo")) {
+    aliases.add("indigo");
+    aliases.add("6e");
+  }
+
+  if (name.includes("air india express")) {
+    aliases.add("air india express");
+    aliases.add("air india");
+    aliases.add("aix");
+    aliases.add("ix");
+    aliases.add("aind");
+  } else if (name.includes("air india")) {
+    aliases.add("air india");
+    aliases.add("ai");
+    aliases.add("aind");
+  }
+
+  if (name.includes("akasa")) {
+    aliases.add("akasa");
+    aliases.add("akasa air");
+    aliases.add("qp");
+  }
+
+  if (name.includes("spicejet")) {
+    aliases.add("spicejet");
+    aliases.add("sg");
+  }
+
+  if (name.includes("vistara")) {
+    aliases.add("vistara");
+    aliases.add("uk");
+  }
+
+  if (name.includes("alliance air")) {
+    aliases.add("alliance air");
+    aliases.add("9i");
+  }
+
+  if (name.includes("star air")) {
+    aliases.add("star air");
+    aliases.add("s5");
+  }
+
+  return Array.from(aliases).filter(Boolean);
+}
+
+function getAgentText(agentId, agentById) {
+  const agent = agentById[String(agentId)] || {};
+  return normalizeForMatch([
+    agentId,
+    agent?.name,
+    agent?.display_name,
+    agent?.type,
+    agent?.category,
+    agent?.booking_provider_type
+  ].filter(Boolean).join(" "));
+}
+
+function pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentById) {
+  const agentIds = new Set();
+
+  if (Array.isArray(opt?.agent_ids)) {
+    opt.agent_ids.forEach((id) => agentIds.add(String(id)));
+  }
+
+  if (Array.isArray(opt?.items)) {
+    opt.items.forEach((item) => {
+      if (item?.agent_id) agentIds.add(String(item.agent_id));
+    });
+  }
+
+  if (agentIds.size === 0) return false;
+
+  const aliases = getCarrierAliases(airlineName, carrier);
+  const allAgentText = Array.from(agentIds)
+    .map((id) => getAgentText(id, agentById))
+    .join(" ");
+
+  return aliases.some((alias) => {
+    if (!alias) return false;
+    return allAgentText.includes(alias);
+  });
+}
+
+function getPricingOptionAmount(opt) {
+  const direct = opt?.price?.amount;
+  if (typeof direct === "number" && Number.isFinite(direct)) return direct;
+
+  const itemAmounts = Array.isArray(opt?.items)
+    ? opt.items
+        .map((item) => item?.price?.amount)
+        .filter((n) => typeof n === "number" && Number.isFinite(n))
+    : [];
+
+  if (itemAmounts.length > 0) return Math.min(...itemAmounts);
+
+  return null;
+}
+
+// --------------------
+// Map FlightAPI response to consistent flights
+// IMPORTANT:
+// SkyDeal base fare must come from the flight carrier/airline source only.
+// We do NOT use OTA/cheapest marketplace pricing as base fare.
+// --------------------
 function mapFlightsFromFlightAPI(raw) {
   const itineraries = Array.isArray(raw?.itineraries) ? raw.itineraries : [];
   const legs = Array.isArray(raw?.legs) ? raw.legs : [];
   const carriers = Array.isArray(raw?.carriers) ? raw.carriers : [];
   const segments = Array.isArray(raw?.segments) ? raw.segments : [];
+  const agents = Array.isArray(raw?.agents) ? raw.agents : [];
 
   const legById = Object.fromEntries(legs.map((l) => [l.id, l]));
   const carrierById = Object.fromEntries(carriers.map((c) => [String(c.id), c]));
   const segmentById = Object.fromEntries(segments.map((s) => [s.id, s]));
+  const agentById = Object.fromEntries(agents.map((a) => [String(a.id), a]));
 
   const flights = [];
 
@@ -223,22 +344,34 @@ function mapFlightsFromFlightAPI(raw) {
     const legId = Array.isArray(it.leg_ids) ? it.leg_ids[0] : null;
     const leg = legId ? legById[legId] : null;
 
-    // cheapest price
-    let cheapestAmount = null;
-    const pricingOptions = Array.isArray(it.pricing_options) ? it.pricing_options : [];
-    for (const opt of pricingOptions) {
-      const amount = opt?.price?.amount;
-      if (typeof amount === "number") {
-        if (cheapestAmount === null || amount < cheapestAmount) cheapestAmount = amount;
-      }
-    }
+    const marketingCarrierId = Array.isArray(leg?.marketing_carrier_ids)
+      ? leg.marketing_carrier_ids[0]
+      : null;
 
-    // Carrier name
-    const marketingCarrierId = Array.isArray(leg?.marketing_carrier_ids) ? leg.marketing_carrier_ids[0] : null;
-    const carrier = marketingCarrierId != null ? carrierById[String(marketingCarrierId)] : null;
+    const carrier = marketingCarrierId != null
+      ? carrierById[String(marketingCarrierId)]
+      : null;
+
     const airlineName = carrier?.name || carrier?.display_name || carrier?.code || "-";
 
-    // flight number guess from first segment
+    const pricingOptions = Array.isArray(it.pricing_options) ? it.pricing_options : [];
+
+    const carrierPricingOptions = pricingOptions.filter((opt) =>
+      pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentById)
+    );
+
+    const carrierAmounts = carrierPricingOptions
+      .map(getPricingOptionAmount)
+      .filter((n) => typeof n === "number" && Number.isFinite(n) && n > 0);
+
+    // Strict SkyDeal rule:
+    // If FlightAPI does not expose the carrier-airline price, do not use OTA/cheapest price.
+    if (carrierAmounts.length === 0) {
+      continue;
+    }
+
+    const carrierAmount = Math.min(...carrierAmounts);
+
     let flightNumber = "-";
     if (Array.isArray(leg?.segment_ids) && leg.segment_ids.length > 0) {
       const seg = segmentById[leg.segment_ids[0]];
@@ -250,15 +383,24 @@ function mapFlightsFromFlightAPI(raw) {
     const arrivalTime = leg?.arrival || null;
     const stops = typeof leg?.stop_count === "number" ? leg.stop_count : 0;
 
-        flights.push({
+    const carrierAgentIds = Array.from(new Set(
+      carrierPricingOptions.flatMap((opt) => [
+        ...(Array.isArray(opt?.agent_ids) ? opt.agent_ids : []),
+        ...(Array.isArray(opt?.items) ? opt.items.map((item) => item?.agent_id).filter(Boolean) : [])
+      ]).map(String)
+    ));
+
+    flights.push({
       airlineName,
       flightNumber,
       departureTime,
       arrivalTime,
       stops,
-      price: typeof cheapestAmount === "number" ? cheapestAmount : 0,
-      priceSource: "cheapest_pricing_option",
+      price: carrierAmount,
+      priceSource: "carrier_airline",
+      carrierAgentIds,
       pricingOptionCount: pricingOptions.length,
+      carrierPricingOptionCount: carrierPricingOptions.length,
       raw: { itinerary: it, leg },
     });
   }
@@ -3462,8 +3604,14 @@ meta.mongoDb = MONGODB_DB;
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
 
-    meta.outRawFlights = outFlightsRaw.length;
+        meta.outRawFlights = outFlightsRaw.length;
     meta.outReturnedFlights = outFlightsLimited.length;
+    meta.outCarrierPriceRule = {
+      flightApiItineraries: Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0,
+      keptWithCarrierPrice: outFlightsRaw.length,
+      skippedWithoutCarrierPrice:
+        (Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0) - outFlightsRaw.length
+    };
 
     const routeIsDomestic = isDomesticRoute(from, to);
 
@@ -3499,8 +3647,14 @@ meta.mongoDb = MONGODB_DB;
            const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
 
-      meta.retRawFlights = retFlightsRaw.length;
+           meta.retRawFlights = retFlightsRaw.length;
       meta.retReturnedFlights = retFlightsLimited.length;
+      meta.retCarrierPriceRule = {
+        flightApiItineraries: Array.isArray(retRes.data?.itineraries) ? retRes.data.itineraries.length : 0,
+        keptWithCarrierPrice: retFlightsRaw.length,
+        skippedWithoutCarrierPrice:
+          (Array.isArray(retRes.data?.itineraries) ? retRes.data.itineraries.length : 0) - retFlightsRaw.length
+      };
 
       const returnRouteIsDomestic = isDomesticRoute(to, from);
 
