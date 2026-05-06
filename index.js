@@ -2176,8 +2176,14 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
         continue;
       }
 
-      // Credit / Debit / NetBanking / Wallet
+           // Credit / Debit / NetBanking / Wallet
       if (s.typeNorm === o.typeNorm) {
+        // EMI-only credit card offers must not apply to normal credit-card selections.
+        // Example: MMTAUEMI should apply only when user selects EMI, not Credit Card.
+        if (o.emiOnly === true) {
+          continue;
+        }
+
         if (
           Array.isArray(o.allowedNetworks) &&
           o.allowedNetworks.length > 0 &&
