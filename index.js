@@ -3472,6 +3472,7 @@ async function computePaymentOptionsFromOffers() {
   };
 
   return { usedFallback: false, options };
+}
 
 // --------------------
 // ✅ RESTORED: /payment-options
