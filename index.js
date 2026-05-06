@@ -1741,19 +1741,19 @@ function bankCanonicalFromAny(raw) {
   if (/\bKOTAK\b/.test(s)) return "KOTAK_BANK";
   if (/\bYES\b/.test(s)) return "YES_BANK";
   if (/\bRBL\b/.test(s)) return "RBL_BANK";
-  if (/\bAU\b|\bAU SMALL\b/.test(s)) return "AU_BANK";
+ if (/\bAU\b|\bAU SMALL\b/.test(s)) return "AU_SMALL_FINANCE_BANK";
   if (/\bFEDERAL\b/.test(s)) return "FEDERAL_BANK";
   if (/\bIDFC\b/.test(s)) return "IDFC_FIRST_BANK";
   if (/\bINDUSIND\b/.test(s)) return "INDUSIND_BANK";
   if (/\bAMEX\b|\bAMERICAN EXPRESS\b/.test(s)) return "AMERICAN_EXPRESS";
   if (/\bONECARD\b|\bONE CARD\b/.test(s)) return "ONECARD";
- if (/\bBOB\b|\bBOBCARD\b|\bBANK OF BARODA\b/.test(s)) return "BOB";
+ if (/\bBOB\b|\bBOBCARD\b|\bBANK OF BARODA\b/.test(s)) return "BANK_OF_BARODA";
 if (/\bCANARA\b/.test(s)) return "CANARA_BANK";
 if (/\bDBS\b/.test(s)) return "DBS";
 if (/\bCENTRAL BANK\b|\bCENTRAL BANK OF INDIA\b/.test(s)) return "CENTRAL_BANK_OF_INDIA";
 
   const cleaned = s.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  return cleaned || null;
+  return normalizeBankCanonicalAlias(cleaned) || cleaned || null;
 }
 
 function normalizeSelectedPM(pm) {
@@ -1997,6 +1997,35 @@ function extractOfferCorporateRestriction(offer, pm = null) {
   return { excludesCorporate, corporateOnly };
 }
 
+function normalizeBankCanonicalAlias(value) {
+  const s = String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!s) return null;
+
+  if (s === "AU_BANK" || s === "AU_SMALL_BANK" || s === "AU_SMALL_FINANCE") {
+    return "AU_SMALL_FINANCE_BANK";
+  }
+
+  if (
+    s === "BOB" ||
+    s === "BOBCARD" ||
+    s === "BOBCARD_LTD" ||
+    s === "BANK_OF_BARODA" ||
+    s === "BANK_OF_BARODA_CARD"
+  ) {
+    return "BANK_OF_BARODA";
+  }
+
+  if (s === "AMEX") return "AMERICAN_EXPRESS";
+  if (s === "SBI" || s === "STATE_BANK") return "STATE_BANK_OF_INDIA";
+  if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
+
+  return s;
+}
+
 function normalizeOfferPM(pm, offer = null) {
   const methodCanonical = pm?.methodCanonical ? String(pm.methodCanonical).toUpperCase() : null;
   const typeRaw = String(pm?.type || "").toLowerCase();
@@ -2011,7 +2040,7 @@ function normalizeOfferPM(pm, offer = null) {
      /emi/.test(typeRaw) ? "EMI" :
      null);
 
-const explicitBankCanonical = pm?.bankCanonical ? String(pm.bankCanonical).toUpperCase().trim() : null;
+const explicitBankCanonical = pm?.bankCanonical ? normalizeBankCanonicalAlias(pm.bankCanonical) : null;
 const bankFromFields = explicitBankCanonical || pm?.bank || pm?.name || pm?.raw || "";
 const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFields);
 
@@ -3420,16 +3449,29 @@ async function computePaymentOptionsFromOffers() {
     }
   }
 
+    const creditCard = Array.from(buckets.CreditCard).sort();
+  const debitCard = Array.from(buckets.DebitCard).sort();
+  const netBanking = Array.from(buckets.NetBanking).sort();
+  const emi = Array.from(buckets.EMI).sort();
+  const upi = Array.from(buckets.UPI).sort();
+  const wallet = Array.from(buckets.Wallet).sort();
+
   const options = {
-  EMI: Array.from(buckets.EMI).sort(),
-  "Credit Card": Array.from(buckets.CreditCard).sort(),
-  "Debit Card": Array.from(buckets.DebitCard).sort(),
-  "Net Banking": Array.from(buckets.NetBanking).sort(),
-  UPI: Array.from(buckets.UPI).sort(),
-  Wallet: Array.from(buckets.Wallet).sort(),
-};
+    // Legacy keys used by frontend/tests
+    EMI: emi,
+    CreditCard: creditCard,
+    DebitCard: debitCard,
+    NetBanking: netBanking,
+    UPI: upi,
+    Wallet: wallet,
+
+    // Friendly aliases for future UI
+    "Credit Card": creditCard,
+    "Debit Card": debitCard,
+    "Net Banking": netBanking,
+  };
+
   return { usedFallback: false, options };
-}
 
 // --------------------
 // ✅ RESTORED: /payment-options
@@ -3462,9 +3504,14 @@ const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
     const selectedPaymentMethods =
   bank && type ? [{ type, name: bank }] : [];
 
-    const col = await getOffersCollection();
+        const col = await getOffersCollection();
     const offers = await col.find(
-      { "sourceMetadata.sourcePortal": portal },
+      {
+        $or: [
+          { sourcePortal: portal },
+          { "sourceMetadata.sourcePortal": portal }
+        ]
+      },
       { projection: { _id: 0 } }
     ).toArray();
     const filteredOffers = q
@@ -3560,14 +3607,17 @@ else failReasons.push("PAYMENT_MISMATCH");
       else stats.notOk++;
 
      if (samples.length < limit) {
-        samples.push({
+               samples.push({
           title: offer?.title || null,
           code: offer?.couponCode || offer?.code || null,
+          couponCode: offer?.couponCode || offer?.code || null,
           rawDiscount: offer?.rawDiscount || null,
+          discountPercent: offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null,
+          flatDiscountAmount: offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null,
+          maxDiscountAmount: offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? null,
           minTransactionValue: minTxn || 0,
           expired: !!expired,
           isFlight: !!flight,
-                inferredOnly: 0,
           hotelOnly: !!hotelOnly,
           inferredOnly: inferredOnly,
           roundTripBlocked: !!roundTripBlocked,
