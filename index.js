@@ -2025,19 +2025,64 @@ function normalizeBankCanonicalAlias(value) {
 
   return s;
 }
+function normalizeMethodCanonicalAlias(value) {
+  const s = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!s) return null;
+
+  if (
+    s === "NETBANKING" ||
+    s === "NET_BANKING" ||
+    s === "NET_BANK" ||
+    s === "NETBANK" ||
+    s === "INTERNET_BANKING" ||
+    s === "ONLINE_BANKING"
+  ) {
+    return "NET_BANKING";
+  }
+
+  if (
+    s === "CREDITCARD" ||
+    s === "CREDIT_CARD" ||
+    s === "CC"
+  ) {
+    return "CREDIT_CARD";
+  }
+
+  if (
+    s === "DEBITCARD" ||
+    s === "DEBIT_CARD" ||
+    s === "DC"
+  ) {
+    return "DEBIT_CARD";
+  }
+
+  if (s === "EMI" || s.includes("NO_COST_EMI") || s.includes("NOCOST_EMI")) {
+    return "EMI";
+  }
+
+  if (s === "UPI") return "UPI";
+  if (s === "WALLET") return "WALLET";
+
+  return s;
+}
 
 function normalizeOfferPM(pm, offer = null) {
-  const methodCanonical = pm?.methodCanonical ? String(pm.methodCanonical).toUpperCase() : null;
+  const methodCanonical = normalizeMethodCanonicalAlias(pm?.methodCanonical);
   const typeRaw = String(pm?.type || "").toLowerCase();
 
   const typeNorm =
     methodCanonical ||
-    (/credit/.test(typeRaw) ? "CREDIT_CARD" :
+    (/emi/.test(typeRaw) ? "EMI" :
+     /credit/.test(typeRaw) ? "CREDIT_CARD" :
      /debit/.test(typeRaw) ? "DEBIT_CARD" :
-     /net\s*bank/.test(typeRaw) ? "NET_BANKING" :
+     /net\s*bank/.test(typeRaw) || /netbank/.test(typeRaw) || /internet\s*bank/.test(typeRaw) ? "NET_BANKING" :
      /upi/.test(typeRaw) ? "UPI" :
      /wallet/.test(typeRaw) ? "WALLET" :
-     /emi/.test(typeRaw) ? "EMI" :
      null);
 
 const explicitBankCanonical = pm?.bankCanonical ? normalizeBankCanonicalAlias(pm.bankCanonical) : null;
@@ -3347,16 +3392,18 @@ function canonicalTypeToFrontendBucket(methodCanonicalOrType) {
 }
 
 function offerPmToCanonical(pm) {
-  const method = String(pm?.methodCanonical || "").toUpperCase();
+  const method = normalizeMethodCanonicalAlias(pm?.methodCanonical);
   if (method) return method;
 
-  const t = String(pm?.type || "").toLowerCase();
+  const t = String(pm?.type || "").toLowerCase().replace(/\s+/g, "");
+
   if (t.includes("emi")) return "EMI";
   if (t.includes("credit")) return "CREDIT_CARD";
   if (t.includes("debit")) return "DEBIT_CARD";
-  if (t.includes("net")) return "NET_BANKING";
+  if (t.includes("netbank") || t.includes("netbanking") || t.includes("internetbanking")) return "NET_BANKING";
   if (t.includes("upi")) return "UPI";
   if (t.includes("wallet")) return "WALLET";
+
   return null;
 }
 function canonicalTypeToUiLabel(bucket) {
