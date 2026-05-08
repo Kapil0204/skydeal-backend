@@ -1563,7 +1563,44 @@ function getSelectedEmiTenure(selectedPaymentMethods = []) {
   return null;
 }
 
-function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMethods = []) {
+function tierScopeMatchesTrip(tier, isDomestic) {
+  const rawScope = String(
+    tier?.flightScope ||
+    tier?.scope ||
+    tier?.routeScope ||
+    tier?.applicableRouteType ||
+    tier?.routeType ||
+    ""
+  ).toUpperCase();
+
+  const notes = String(tier?.notes || "").toUpperCase();
+
+  const scopeBlob = `${rawScope} ${notes}`;
+
+  const tierSaysDomestic =
+    /\bDOMESTIC\b/.test(scopeBlob) ||
+    /\bDOMESTIC\s+FLIGHT/.test(scopeBlob);
+
+  const tierSaysInternational =
+    /\bINTERNATIONAL\b/.test(scopeBlob) ||
+    /\bINTERNATIONAL\s+FLIGHT/.test(scopeBlob);
+
+  // Generic tier with no route scope applies to both.
+  if (!tierSaysDomestic && !tierSaysInternational) return true;
+
+  if (isDomestic) {
+    return tierSaysDomestic && !tierSaysInternational;
+  }
+
+  return tierSaysInternational && !tierSaysDomestic;
+}
+
+function pickApplicableDiscountTier(
+  offer,
+  eligibilityAmount,
+  selectedPaymentMethods = [],
+  isDomestic = true
+) {
   const tiers = offer?.discountTiers || offer?.parsedFields?.discountTiers || [];
   if (!Array.isArray(tiers) || tiers.length === 0) return null;
 
@@ -1574,53 +1611,57 @@ function pickApplicableDiscountTier(offer, eligibilityAmount, selectedPaymentMet
 
   const eligible = tiers
     .filter((t) => {
+      if (!tierScopeMatchesTrip(t, isDomestic)) return false;
+
       const min = Number(t?.minTransactionValue || 0);
       if (min > 0 && amount < min) return false;
+
+      const max = Number(t?.maxTransactionValue || 0);
+      if (max > 0 && amount > max) return false;
 
       const tierTenure = Number(t?.tenureMonths || 0);
 
       // If user selected EMI tenure, allow exact tenure or generic all-tenure tier.
-// If user did NOT select tenure, do NOT apply tenure-specific slabs like 6/9 months.
-// This prevents over-discounting ₹2000 when actual/default 3-month discount is ₹1500.
-if (selectedTenure) {
-  if (tierTenure > 0 && tierTenure !== selectedTenure) return false;
-} else {
-  if (tierTenure > 0) return false;
-}
+      // If user did NOT select tenure, do NOT apply tenure-specific slabs like 6/9 months.
+      if (selectedTenure) {
+        if (tierTenure > 0 && tierTenure !== selectedTenure) return false;
+      } else {
+        if (tierTenure > 0) return false;
+      }
 
       const flat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
       const pct = Number(t?.discountPercent || 0);
 
       return flat > 0 || pct > 0;
     })
- .sort((a, b) => {
-  const aMin = Number(a?.minTransactionValue || 0);
-  const bMin = Number(b?.minTransactionValue || 0);
+    .sort((a, b) => {
+      const aMin = Number(a?.minTransactionValue || 0);
+      const bMin = Number(b?.minTransactionValue || 0);
 
-  // Higher applicable slab should win first.
-  // Example: amount 15000 should prefer 15000+ slab over 7500+ slab.
-  if (aMin !== bMin) return bMin - aMin;
+      // Higher applicable slab should win first.
+      if (aMin !== bMin) return bMin - aMin;
 
-  const aTenure = Number(a?.tenureMonths || 0);
-  const bTenure = Number(b?.tenureMonths || 0);
+      const aTenure = Number(a?.tenureMonths || 0);
+      const bTenure = Number(b?.tenureMonths || 0);
 
-  // If same slab, exact EMI tenure wins over generic tier.
-  if (selectedTenure) {
-    const aExact = aTenure === selectedTenure ? 1 : 0;
-    const bExact = bTenure === selectedTenure ? 1 : 0;
-    if (aExact !== bExact) return bExact - aExact;
-  }
-   // If no tenure selected, generic all-tenure tier should win.
-if (!selectedTenure) {
-  const aGeneric = aTenure === 0 ? 1 : 0;
-  const bGeneric = bTenure === 0 ? 1 : 0;
-  if (aGeneric !== bGeneric) return bGeneric - aGeneric;
-}
+      // Exact EMI tenure wins over generic tier.
+      if (selectedTenure) {
+        const aExact = aTenure === selectedTenure ? 1 : 0;
+        const bExact = bTenure === selectedTenure ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+      }
 
-  const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
-  const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
-  return bVal - aVal;
-});
+      // If no tenure selected, generic all-tenure tier should win.
+      if (!selectedTenure) {
+        const aGeneric = aTenure === 0 ? 1 : 0;
+        const bGeneric = bTenure === 0 ? 1 : 0;
+        if (aGeneric !== bGeneric) return bGeneric - aGeneric;
+      }
+
+      const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
+      const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
+      return bVal - aVal;
+    });
 
   return eligible[0] || null;
 }
@@ -1636,7 +1677,8 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, s
   const applicableTier = pickApplicableDiscountTier(
   offer,
   eligibilityAmount,
-  selectedPaymentMethods
+  selectedPaymentMethods,
+  isDomestic
 );
 
 if (applicableTier) {
@@ -3555,8 +3597,16 @@ const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
   return res.status(400).json({ error: "Missing portal" });
 }
 
-    const selectedPaymentMethods =
-  bank && type ? [{ type, name: bank }] : [];
+    const tenureMonths = Number(req.query.tenureMonths || req.query.emiTenureMonths || 0);
+
+const selectedPaymentMethods =
+  bank && type
+    ? [{
+        type,
+        name: bank,
+        ...(Number.isFinite(tenureMonths) && tenureMonths > 0 ? { tenureMonths } : {})
+      }]
+    : [];
 
         const col = await getOffersCollection();
     const offers = await col.find(
