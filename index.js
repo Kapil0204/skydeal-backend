@@ -3294,6 +3294,10 @@ const nonAppliedButRelevantOffers = offers
     if (!offerAppliesToPortal(offer, portal)) return false;
     if (isJunkInfoOffer(offer)) return false;
 
+    // Do not show wrong-tenure EMI offers as related/info offers.
+    // Example: if user selected 3-month HDFC EMI, do not show 6-month Yatra EMI in infoOffers.
+    if (!offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods)) return false;
+
     // skip already included
     const code =
       offer?.couponCode ||
