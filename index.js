@@ -2878,6 +2878,37 @@ const all = [
 // If multiple candidates exist, cheapest valid one wins.
 return all.length > 0 ? all[0] : null;
 }
+function offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods = []) {
+  const selectedTenure = getSelectedEmiTenure(selectedPaymentMethods);
+
+  // If user did not select EMI tenure, do not block info offers.
+  if (!selectedTenure) return true;
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return true;
+
+  const offerNorm = offerPMs
+    .map((pm) => normalizeOfferPM(pm, offer))
+    .filter((x) => x.typeNorm);
+
+  const hasEmiPayment = offerNorm.some((o) => o.typeNorm === "EMI" || o.emiOnly === true);
+  if (!hasEmiPayment) return true;
+
+  return offerNorm.some((o) => {
+    if (o.typeNorm !== "EMI" && o.emiOnly !== true) return false;
+
+    if (Number.isFinite(o.tenureMonths) && o.tenureMonths > 0) {
+      return Number(o.tenureMonths) === Number(selectedTenure);
+    }
+
+    if (Array.isArray(o.allowedTenures) && o.allowedTenures.length > 0) {
+      return o.allowedTenures.includes(Number(selectedTenure));
+    }
+
+    // Generic EMI offer without tenure restriction can still be shown.
+    return true;
+  });
+}
 function shouldShowAsReferenceInfoOffer({
   offer,
   portal,
@@ -2965,6 +2996,7 @@ if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
 if (!offerAppliesToPortal(offer, portal)) continue;
 if (isSuspiciousGenericOffer(offer, offers)) continue;
+if (!offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods)) continue;
 
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
