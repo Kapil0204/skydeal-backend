@@ -1778,7 +1778,8 @@ function bankCanonicalFromAny(raw) {
 
   if (/\bHDFC\b/.test(s)) return "HDFC_BANK";
   if (/\bICICI\b/.test(s)) return "ICICI_BANK";
-  if (/\bHSBC\b/.test(s)) return "HSBC";
+    if (/\bHSBC\b/.test(s)) return "HSBC";
+  if (/\bSTANDARD CHARTERED\b|\bSTANDARD_CHARTERED\b|\bSTANCHART\b|\bSCB\b/.test(s)) return "STANDARD_CHARTERED_BANK";
   if (/\bSBI\b|\bSTATE BANK\b|\bSTATE_BANK\b/.test(s)) return "STATE_BANK_OF_INDIA";
   if (/\bKOTAK\b/.test(s)) return "KOTAK_BANK";
   if (/\bYES\b/.test(s)) return "YES_BANK";
@@ -2128,7 +2129,12 @@ function normalizeOfferPM(pm, offer = null) {
      null);
 
 const explicitBankCanonical = pm?.bankCanonical ? normalizeBankCanonicalAlias(pm.bankCanonical) : null;
-const bankFromFields = explicitBankCanonical || pm?.bank || pm?.name || pm?.raw || "";
+
+// Important:
+// Do not use pm.raw as a bank source for structured payment matching.
+// Example: UPIPAY has raw = "UPI payment method". If we pass that to
+// bankCanonicalFromAny(), it becomes UPI_PAYMENT_METHOD and blocks generic UPI matching.
+const bankFromFields = pm?.bank || pm?.name || "";
 const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFields);
 
   const explicitTenure =
@@ -3504,7 +3510,8 @@ function normalizeBankDisplayName(raw) {
   if (u === "AXIS" || u === "AXIS BANK") return "Axis Bank";
   if (u === "HDFC" || u === "HDFC BANK") return "HDFC Bank";
   if (u === "ICICI" || u === "ICICI BANK") return "ICICI Bank";
-  if (u === "HSBC" || u === "HSBC BANK" || u === "HSBC CREDIT") return "HSBC";
+   if (u === "HSBC" || u === "HSBC BANK" || u === "HSBC CREDIT") return "HSBC";
+  if (u === "STANDARD CHARTERED" || u === "STANDARD CHARTERED BANK" || u === "STANDARD_CHARTERED_BANK" || u === "STANCHART" || u === "SCB") return "Standard Chartered Bank";
   if (u === "SBI" || u === "STATE BANK OF INDIA") return "SBI";
   if (u === "KOTAK" || u === "KOTAK BANK" || u === "KOTAK MAHINDRA BANK" || u === "KOTAK BANK LTD") return "Kotak Bank";
   if (u === "YES" || u === "YES BANK" || u === "YES BANK LTD" || u === "YES BANK CREDIT CARD") return "Yes Bank";
