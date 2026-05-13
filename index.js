@@ -3634,6 +3634,12 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const type = String(req.query.type || "").trim(); // e.g. EMI
     const amount = Number(req.query.amount || 0) || 0;
     const q = req.query.q ? String(req.query.q).trim() : null;
+    const from = String(req.query.from || "").trim().toUpperCase();
+    const to = String(req.query.to || "").trim().toUpperCase();
+    const debugIsDomestic =
+      from && to
+        ? isDomesticRoute(from, to)
+        : true;
 const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
     if (!portal) {
@@ -3711,7 +3717,7 @@ const selectedPaymentMethods =
       if (pMatch) stats.portalMatch++;
       else failReasons.push("PORTAL_MISMATCH");
 
-      const scope = offerScopeMatchesTrip(offer, true, "Economy");
+      const scope = offerScopeMatchesTrip(offer, debugIsDomestic, "Economy");
       const roundTripBlocked = offerRequiresRoundTrip(offer);
 if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       
@@ -3749,7 +3755,7 @@ else failReasons.push("PAYMENT_MISMATCH");
         discounted = computeDiscountedPrice(
           offer,
           amount,
-          true,
+          debugIsDomestic,
           1,
           selectedPaymentMethods,
           amount
@@ -3791,6 +3797,9 @@ else failReasons.push("PAYMENT_MISMATCH");
     res.json({
   selectedPaymentMethods,
   baseAmount: amount,
+  from: from || null,
+  to: to || null,
+  isDomestic: debugIsDomestic,
   q,
   evaluatedCount: filteredOffers.length,
   stats,
