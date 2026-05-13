@@ -1856,6 +1856,11 @@ function normalizeSelectedPM(pm) {
     /regalia/i.test(cardFamilyRaw) ? "REGALIA" :
     /millennia/i.test(cardFamilyRaw) ? "MILLENNIA" :
     /sbi\s*cashback/i.test(cardFamilyRaw) ? "SBI_CASHBACK" :
+    /business\s*platinum/i.test(cardFamilyRaw) ? "BUSINESS_PLATINUM" :
+    /platinum/i.test(cardFamilyRaw) ? "PLATINUM" :
+    /select/i.test(cardFamilyRaw) ? "SELECT" :
+    /signature/i.test(cardFamilyRaw) ? "SIGNATURE" :
+    /gold/i.test(cardFamilyRaw) ? "GOLD" :
     /simplyclick/i.test(cardFamilyRaw) ? "SIMPLYCLICK" :
     /simplysave/i.test(cardFamilyRaw) ? "SIMPLYSAVE" :
     /coral/i.test(cardFamilyRaw) ? "CORAL" :
@@ -2009,6 +2014,13 @@ function extractOfferCardFamilyRestrictions(offer, pm = null) {
   if (/\bmillennia\b/.test(blob)) allowed.add("MILLENNIA");
 
   if (/\bsbi\s*cashback\b/.test(blob)) allowed.add("SBI_CASHBACK");
+
+  if (/\bbusiness\s*platinum\b/.test(blob)) allowed.add("BUSINESS_PLATINUM");
+  if (/\bplatinum\b/.test(blob)) allowed.add("PLATINUM");
+  if (/\bselect\b/.test(blob)) allowed.add("SELECT");
+  if (/\bsignature\b/.test(blob)) allowed.add("SIGNATURE");
+  if (/\bgold\b/.test(blob)) allowed.add("GOLD");
+
   if (/\bsimplyclick\b/.test(blob)) allowed.add("SIMPLYCLICK");
   if (/\bsimplysave\b/.test(blob)) allowed.add("SIMPLYSAVE");
 
@@ -2031,7 +2043,12 @@ function extractOfferCorporateRestriction(offer, pm = null) {
     /\bexcluding corporate\b/.test(blob) ||
     /\bnot valid on commercial\b/.test(blob) ||
     /\bnot applicable on commercial\b/.test(blob) ||
-    /\bexcluding commercial\b/.test(blob);
+    /\bexcluding commercial\b/.test(blob) ||
+    /\bnot valid on business\b[^.]{0,120}\bcard(s)?\b/.test(blob) ||
+    /\bnot applicable on business\b[^.]{0,120}\bcard(s)?\b/.test(blob) ||
+    /\bexcluding business\b[^.]{0,120}\bcard(s)?\b/.test(blob) ||
+    /\bnot valid on\b[^.]{0,120}\b(business|commercial|corporate)\b[^.]{0,120}\bcard(s)?\b/.test(blob) ||
+    /\bnot applicable on\b[^.]{0,120}\b(business|commercial|corporate)\b[^.]{0,120}\bcard(s)?\b/.test(blob);
 
   const corporateOnly =
     /\bcorporate cards only\b/.test(blob) ||
@@ -2248,6 +2265,36 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
         }
 
         if (
+          Array.isArray(o.allowedNetworks) &&
+          o.allowedNetworks.length > 0
+        ) {
+          if (!s.networkCanonical) {
+            continue;
+          }
+          if (!o.allowedNetworks.includes(s.networkCanonical)) {
+            continue;
+          }
+        }
+
+        if (
+          Array.isArray(o.excludedNetworks) &&
+          o.excludedNetworks.length > 0 &&
+          s.networkCanonical &&
+          o.excludedNetworks.includes(s.networkCanonical)
+        ) {
+          continue;
+        }
+
+        if (Array.isArray(o.allowedCardFamilies) && o.allowedCardFamilies.length > 0) {
+          if (!s.cardFamilyCanonical) {
+            continue;
+          }
+          if (!o.allowedCardFamilies.includes(s.cardFamilyCanonical)) {
+            continue;
+          }
+        }
+
+        if (
           o.excludesCorporate === true &&
           s.isCorporate === true
         ) {
@@ -2279,11 +2326,14 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
         if (
           Array.isArray(o.allowedNetworks) &&
-          o.allowedNetworks.length > 0 &&
-          s.networkCanonical &&
-          !o.allowedNetworks.includes(s.networkCanonical)
+          o.allowedNetworks.length > 0
         ) {
-          continue;
+          if (!s.networkCanonical) {
+            continue;
+          }
+          if (!o.allowedNetworks.includes(s.networkCanonical)) {
+            continue;
+          }
         }
 
         if (
@@ -2564,6 +2614,26 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
     : "";
 
   const combined = `${core} ${catBlob}`.trim();
+
+  // Prefer title/rawDiscount for route scope before noisier summaries/terms.
+  const titleDiscountCore = normalizeText(`${title} ${rawDiscount}`);
+  const strictMentionsDomesticFlights =
+    /\bdomestic\s+flight(s)?\b/.test(titleDiscountCore) ||
+    (/\bdomestic\b/.test(titleDiscountCore) && /\bflight(s)?\b/.test(titleDiscountCore));
+
+  const strictMentionsInternationalFlights =
+    /\binternational\s+flight(s)?\b/.test(titleDiscountCore) ||
+    (/\binternational\b/.test(titleDiscountCore) && /\bflight(s)?\b/.test(titleDiscountCore));
+
+  if (isDomestic) {
+    if (strictMentionsInternationalFlights && !strictMentionsDomesticFlights) {
+      return false;
+    }
+  } else {
+    if (strictMentionsDomesticFlights && !strictMentionsInternationalFlights) {
+      return false;
+    }
+  }
 
   // Reject clear non-flight verticals unless flights are explicitly mentioned in core/categories
   const hasFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(combined);
