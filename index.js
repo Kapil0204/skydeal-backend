@@ -3298,6 +3298,24 @@ function cleanInfoOffers(infoOffers, limit = 5) {
     .slice(0, limit);
 }
 
+function getActualDiscountAmount(basePrice, finalPrice) {
+  const base = Number(basePrice);
+  const final = Number(finalPrice);
+
+  if (!Number.isFinite(base) || !Number.isFinite(final)) return null;
+
+  const discount = Math.round((base - final) * 100) / 100;
+  return discount > 0 ? discount : null;
+}
+
+function formatAppliedDiscountText(basePrice, finalPrice) {
+  const discount = getActualDiscountAmount(basePrice, finalPrice);
+
+  if (!Number.isFinite(discount) || discount <= 0) return null;
+
+  return `Applied discount: ₹${Math.round(discount)}`;
+}
+
 async function applyOffersToFlight(
   flight,
   selectedPaymentMethods,
@@ -3413,6 +3431,8 @@ const bestDeal = best
         null,
       title: best.offer?.title || null,
       rawDiscount: best.offer?.rawDiscount || best.offer?.parsedFields?.rawDiscount || null,
+      actualDiscount: getActualDiscountAmount(portalBase, best.finalPrice),
+      appliedDiscountText: formatAppliedDiscountText(portalBase, best.finalPrice),
       constraints: extractOfferConstraints(best.offer),
       offerTypeLabel: best.offerTypeLabel || null,
       channelLabel: best.channelLabel || null,
@@ -3443,6 +3463,8 @@ return {
   code: bestDeal?.code || null,
   title: bestDeal?.title || null,
   rawDiscount: bestDeal?.rawDiscount || null,
+  actualDiscount: bestDeal?.actualDiscount || null,
+  appliedDiscountText: bestDeal?.appliedDiscountText || null,
   terms: best?.offer?.terms || null,
   constraints: bestDeal?.constraints || null,
   paymentLabel: best
@@ -3519,6 +3541,8 @@ return {
           code: bestPortal.code,
           title: bestPortal.title,
           rawDiscount: bestPortal.rawDiscount,
+          actualDiscount: bestPortal.actualDiscount || null,
+          appliedDiscountText: bestPortal.appliedDiscountText || null,
           constraints: bestPortal.constraints || null,
           paymentLabel: bestPortal.paymentLabel || null,
 offerTypeLabel: bestPortal.offerTypeLabel || null,
