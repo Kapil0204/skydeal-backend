@@ -1738,7 +1738,7 @@ if (applicableTier) {
       if (Number.isFinite(maxCap) && maxCap > 0) {
   discountAmount = Math.min(discountAmount, maxCap);
 } else if (/\bup\s*to\b|\bupto\b/.test(String(offer?.rawDiscount || "").toLowerCase())) {
-  discountAmount = Math.min(discountAmount, 1500);
+  return base;
 }
     }
 
