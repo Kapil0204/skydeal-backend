@@ -3742,16 +3742,24 @@ else failReasons.push("PAYMENT_MISMATCH");
 
       // ok = wouldApplyNow AND compute yields improvement
       let ok = false;
+      let discounted = null;
+      let actualDiscount = null;
+
       if (wouldApplyNow) {
-        const discounted = computeDiscountedPrice(
-  offer,
-  amount,
-  true,
-  1,
-  selectedPaymentMethods,
-  amount
-);
+        discounted = computeDiscountedPrice(
+          offer,
+          amount,
+          true,
+          1,
+          selectedPaymentMethods,
+          amount
+        );
+
         ok = Number.isFinite(discounted) && discounted < amount;
+
+        if (ok) {
+          actualDiscount = Math.round((Number(amount) - Number(discounted)) * 100) / 100;
+        }
       }
 
       if (ok) stats.ok++;
@@ -3767,6 +3775,8 @@ else failReasons.push("PAYMENT_MISMATCH");
           flatDiscountAmount: offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null,
           maxDiscountAmount: offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? null,
           minTransactionValue: minTxn || 0,
+          discountedPrice: Number.isFinite(discounted) ? discounted : null,
+          actualDiscount,
           expired: !!expired,
           isFlight: !!flight,
           hotelOnly: !!hotelOnly,
