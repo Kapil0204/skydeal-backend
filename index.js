@@ -3653,6 +3653,12 @@ const selectedPaymentMethods =
     ? [{
         type,
         name: bank,
+        ...(req.query.network ? { network: String(req.query.network).trim() } : {}),
+        ...(req.query.cardFamily ? { cardFamily: String(req.query.cardFamily).trim() } : {}),
+        ...(req.query.cardVariant ? { cardVariant: String(req.query.cardVariant).trim() } : {}),
+        ...(String(req.query.isCorporate || "").trim()
+          ? { isCorporate: /^(true|1|yes)$/i.test(String(req.query.isCorporate).trim()) }
+          : {}),
         ...(Number.isFinite(tenureMonths) && tenureMonths > 0
           ? { tenureMonths }
           : String(type || "").toLowerCase().includes("emi")
