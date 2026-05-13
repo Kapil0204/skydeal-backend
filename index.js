@@ -3647,7 +3647,11 @@ const selectedPaymentMethods =
     ? [{
         type,
         name: bank,
-        ...(Number.isFinite(tenureMonths) && tenureMonths > 0 ? { tenureMonths } : {})
+        ...(Number.isFinite(tenureMonths) && tenureMonths > 0
+          ? { tenureMonths }
+          : String(type || "").toLowerCase().includes("emi")
+            ? { tenureMonths: 3, defaultedTenure: true }
+            : {})
       }]
     : [];
 
