@@ -3528,28 +3528,27 @@ return {
   });
 
   const bestPortal = portalPrices.reduce((acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc), null);
+  const bestAppliedPortal = bestPortal?.applied ? bestPortal : null;
 
   return {
     ...flight,
     portalPrices,
-    bestDeal: bestPortal
+    bestDeal: bestAppliedPortal
       ? {
-          portal: bestPortal.portal,
-          finalPrice: bestPortal.finalPrice,
-          basePrice: bestPortal.basePrice,
-          applied: bestPortal.applied,
-          code: bestPortal.code,
-          title: bestPortal.title,
-          rawDiscount: bestPortal.rawDiscount,
-          actualDiscount: bestPortal.actualDiscount || null,
-          appliedDiscountText: bestPortal.appliedDiscountText || null,
-          constraints: bestPortal.constraints || null,
-          paymentLabel: bestPortal.paymentLabel || null,
-offerTypeLabel: bestPortal.offerTypeLabel || null,
-channelLabel: bestPortal.channelLabel || null,
-explain: bestPortal?.applied
-            ? `Best price is on ${bestPortal.portal} because ${bestPortal.code || "an offer"} reduced ₹${bestPortal.basePrice} → ₹${bestPortal.finalPrice}`
-            : null,
+          portal: bestAppliedPortal.portal,
+          finalPrice: bestAppliedPortal.finalPrice,
+          basePrice: bestAppliedPortal.basePrice,
+          applied: true,
+          code: bestAppliedPortal.code,
+          title: bestAppliedPortal.title,
+          rawDiscount: bestAppliedPortal.rawDiscount,
+          actualDiscount: bestAppliedPortal.actualDiscount || null,
+          appliedDiscountText: bestAppliedPortal.appliedDiscountText || null,
+          constraints: bestAppliedPortal.constraints || null,
+          paymentLabel: bestAppliedPortal.paymentLabel || null,
+offerTypeLabel: bestAppliedPortal.offerTypeLabel || null,
+channelLabel: bestAppliedPortal.channelLabel || null,
+explain: `Best price is on ${bestAppliedPortal.portal} because ${bestAppliedPortal.code || "an offer"} reduced ₹${bestAppliedPortal.basePrice} → ₹${bestAppliedPortal.finalPrice}`,
         }
       : null,
   };
