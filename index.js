@@ -2728,6 +2728,144 @@ function getBestVariantPerCoupon(offers) {
   return bestVariants;
 }
 // --------------------
+// Booking day / weekday restrictions
+// --------------------
+const WEEKDAY_ALIASES = {
+  monday: "Monday", mon: "Monday",
+  tuesday: "Tuesday", tue: "Tuesday", tues: "Tuesday",
+  wednesday: "Wednesday", wed: "Wednesday",
+  thursday: "Thursday", thu: "Thursday", thur: "Thursday", thurs: "Thursday",
+  friday: "Friday", fri: "Friday",
+  saturday: "Saturday", sat: "Saturday",
+  sunday: "Sunday", sun: "Sunday"
+};
+
+function getBookingDayName(date = new Date()) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    timeZone: "Asia/Kolkata"
+  }).format(date);
+}
+
+function normalizeWeekdayToken(token) {
+  const key = String(token || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+  return WEEKDAY_ALIASES[key] || null;
+}
+
+function extractWeekdaysFromText(text) {
+  const out = new Set();
+  const re = /\b(monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)\b/gi;
+
+  let m;
+  while ((m = re.exec(String(text || ""))) !== null) {
+    const day = normalizeWeekdayToken(m[1]);
+    if (day) out.add(day);
+  }
+
+  return Array.from(out);
+}
+
+function offerWeekdayBlob(offer) {
+  const terms =
+    typeof offer?.terms === "string"
+      ? offer.terms
+      : offer?.terms?.raw
+        ? String(offer.terms.raw)
+        : "";
+
+  return [
+    offer?.bookingDays,
+    offer?.applicableDays,
+    offer?.bookingDayRestriction,
+    offer?.validityPeriod?.raw,
+    offer?.parsedFields?.validityPeriod?.raw,
+    terms,
+    offer?.rawText,
+    offer?.title,
+    offer?.rawDiscount
+  ]
+    .flat()
+    .filter(Boolean)
+    .join(" ");
+}
+
+function extractBookingDayRule(offer) {
+  const blobRaw = offerWeekdayBlob(offer);
+  const blob = String(blobRaw || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (!blob) return null;
+
+  // Explicit everyday/all-days wording means no weekday restriction.
+  // But if it also says "except Tuesday", the exception must still be enforced.
+  const hasAllDaysSignal =
+    /\bevery\s*day\b|\beveryday\b|\ball\s+days\b|\bmonday\s*(?:to|-|–|—)\s*sunday\b|\bmon\s*(?:to|-|–|—)\s*sun\b/.test(blob);
+
+  const exceptMatch = blob.match(/\bexcept\s+((?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)(?:\s*(?:,|&|and|\/)\s*(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun))*)/i);
+
+  if (exceptMatch) {
+    const days = extractWeekdaysFromText(exceptMatch[1]);
+
+    if (days.length > 0) {
+      return {
+        mode: "exclude",
+        days,
+        source: exceptMatch[0]
+      };
+    }
+  }
+
+  if (hasAllDaysSignal) return null;
+
+  // Only treat weekday mentions as restrictions when there is a strong validity/booking-day signal nearby.
+  const restrictionSignals = [
+    /\bvalid\s+(?:only\s+)?(?:on\s+)?(?:all\s+)?(?:every\s+)?(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\bvalid\s+for\s+(?:transactions|bookings)\s+made\s+(?:on\s+)?(?:all\s+)?(?:every\s+)?(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\btransactions\s+made\s+(?:every\s+|on\s+)?(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\bbookings\s+made\s+(?:every\s+|on\s+)?(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\boffer\s+(?:can\s+be\s+availed|is\s+valid)\s+(?:every\s+|on\s+)?(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\bevery\s+(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)/i,
+    /\b(?:sat|saturday)\s*(?:&|and|\/)\s*(?:sun|sunday)\s+only\b/i
+  ];
+
+  const matchedSignal = restrictionSignals.find((re) => re.test(blob));
+
+  if (!matchedSignal) return null;
+
+  const days = extractWeekdaysFromText(blob);
+
+  if (days.length === 0) return null;
+
+  return {
+    mode: "include",
+    days,
+    source: matchedSignal.toString()
+  };
+}
+
+function offerMatchesBookingDay(offer, bookingDate = new Date()) {
+  const rule = extractBookingDayRule(offer);
+  const bookingDay = getBookingDayName(bookingDate);
+
+  if (!rule || !Array.isArray(rule.days) || rule.days.length === 0) {
+    return {
+      ok: true,
+      bookingDay,
+      rule: null
+    };
+  }
+
+  const includesDay = rule.days.includes(bookingDay);
+
+  const ok = rule.mode === "exclude" ? !includesDay : includesDay;
+
+  return {
+    ok,
+    bookingDay,
+    rule
+  };
+}
+
+// --------------------
 // Core evaluator
 function evaluateOfferForFlight({
   offer,
@@ -2762,6 +2900,17 @@ function evaluateOfferForFlight({
   if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
     if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+
+const bookingDayCheck = offerMatchesBookingDay(offer);
+if (!bookingDayCheck.ok) {
+  return {
+    ok: false,
+    reasons: ["BOOKING_DAY_MISMATCH"],
+    bookingDay: bookingDayCheck.bookingDay,
+    allowedBookingDays: bookingDayCheck.rule?.days || null
+  };
+}
+
 if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
 if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
 
@@ -3789,6 +3938,7 @@ const selectedPaymentMethods =
       portalMatch: 0,
       scopeOK: 0,
       minTxnOK: 0,
+      bookingDayOK: 0,
       wouldApplyNow: 0,
       hotelOnly: 0, // ✅ NEW stat
       inferredOnly: 0,
@@ -3811,6 +3961,10 @@ const selectedPaymentMethods =
       const expired = isOfferExpired(offer);
       if (!expired) stats.notExpired++;
       else failReasons.push("EXPIRED");
+
+      const bookingDayCheck = offerMatchesBookingDay(offer);
+      if (bookingDayCheck.ok) stats.bookingDayOK++;
+      else failReasons.push("BOOKING_DAY_MISMATCH");
 
       const pMatch = offerAppliesToPortal(offer, portal);
       if (pMatch) stats.portalMatch++;
@@ -3883,6 +4037,9 @@ else failReasons.push("PAYMENT_MISMATCH");
           discountedPrice: Number.isFinite(discounted) ? discounted : null,
           actualDiscount,
           expired: !!expired,
+          bookingDay: bookingDayCheck.bookingDay,
+          allowedBookingDays: bookingDayCheck.rule?.days || null,
+          bookingDayRuleMode: bookingDayCheck.rule?.mode || null,
           isFlight: !!flight,
           hotelOnly: !!hotelOnly,
           inferredOnly: inferredOnly,
