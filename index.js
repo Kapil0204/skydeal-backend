@@ -2805,11 +2805,24 @@ function offerWeekdayBlob(offer) {
     .join(" ");
 }
 
+const BOOKING_DAY_RULE_CACHE = new WeakMap();
+
+function rememberBookingDayRule(offer, rule) {
+  if (offer && typeof offer === "object") {
+    BOOKING_DAY_RULE_CACHE.set(offer, rule);
+  }
+  return rule;
+}
+
 function extractBookingDayRule(offer) {
+  if (offer && typeof offer === "object" && BOOKING_DAY_RULE_CACHE.has(offer)) {
+    return BOOKING_DAY_RULE_CACHE.get(offer);
+  }
+
   const blobRaw = offerWeekdayBlob(offer);
   const blob = String(blobRaw || "").toLowerCase().replace(/\s+/g, " ").trim();
 
-  if (!blob) return null;
+  if (!blob) return rememberBookingDayRule(offer, null);
 
   // Explicit everyday/all-days wording means no weekday restriction.
   // But if it also says "except Tuesday", the exception must still be enforced.
@@ -2822,15 +2835,15 @@ function extractBookingDayRule(offer) {
     const days = extractWeekdaysFromText(exceptMatch[1]);
 
     if (days.length > 0) {
-      return {
+      return rememberBookingDayRule(offer, {
         mode: "exclude",
         days,
         source: exceptMatch[0]
-      };
+      });
     }
   }
 
-  if (hasAllDaysSignal) return null;
+  if (hasAllDaysSignal) return rememberBookingDayRule(offer, null);
 
   // Only treat weekday mentions as restrictions when there is a strong validity/booking-day signal nearby.
   const restrictionSignals = [
@@ -2845,17 +2858,17 @@ function extractBookingDayRule(offer) {
 
   const matchedSignal = restrictionSignals.find((re) => re.test(blob));
 
-  if (!matchedSignal) return null;
+  if (!matchedSignal) return rememberBookingDayRule(offer, null);
 
   const days = extractWeekdaysFromText(blob);
 
-  if (days.length === 0) return null;
+  if (days.length === 0) return rememberBookingDayRule(offer, null);
 
-  return {
+  return rememberBookingDayRule(offer, {
     mode: "include",
     days,
     source: matchedSignal.toString()
-  };
+  });
 }
 
 function offerMatchesBookingDay(offer, bookingDate = new Date()) {
@@ -4297,7 +4310,7 @@ meta.mongoDb = MONGODB_DB;
 
     logStep("before_map_outbound");
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
-    const outFlightsLimited = limitAndSortFlights(outFlightsRaw);
+    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 25);
     logStep("after_map_outbound", { raw: outFlightsRaw.length, limited: outFlightsLimited.length });
 
         meta.outRawFlights = outFlightsRaw.length;
@@ -4347,7 +4360,7 @@ meta.mongoDb = MONGODB_DB;
 
            logStep("before_map_return");
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
-      const retFlightsLimited = limitAndSortFlights(retFlightsRaw);
+      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 25);
       logStep("after_map_return", { raw: retFlightsRaw.length, limited: retFlightsLimited.length });
 
            meta.retRawFlights = retFlightsRaw.length;
