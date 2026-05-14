@@ -3910,6 +3910,132 @@ else failReasons.push("PAYMENT_MISMATCH");
 });
 
 // --------------------
+// Compare selected round-trip pair
+// --------------------
+app.post("/compare-selected-trip", async (req, res) => {
+  const body = req.body || {};
+  const meta = {
+    source: "selected-trip-comparison",
+    requestType: "round-trip-selected-pair",
+    checkedAt: new Date().toISOString()
+  };
+
+  try {
+    const from = String(body.from || "").trim().toUpperCase();
+    const to = String(body.to || "").trim().toUpperCase();
+
+    const outboundFlight = body.outboundFlight || null;
+    const returnFlight = body.returnFlight || null;
+
+    const adults = Number(body.passengers || 1) || 1;
+    const cabin = normalizeCabin(body.travelClass);
+    const routeIsDomestic = isDomesticRoute(from, to);
+
+    const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
+
+    const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
+      const type = String(pm?.type || "").toLowerCase();
+
+      if (type.includes("emi") && !Number(pm?.tenureMonths)) {
+        return {
+          ...pm,
+          tenureMonths: 3,
+          defaultedTenure: true
+        };
+      }
+
+      return pm;
+    });
+
+    meta.selectedPaymentMethods = selectedPaymentMethods;
+    meta.mongoCollection = MONGO_COL;
+    meta.mongoDb = MONGODB_DB;
+    meta.isDomestic = routeIsDomestic;
+
+    if (!outboundFlight || !returnFlight) {
+      return res.status(400).json({
+        meta: {
+          ...meta,
+          error: "Missing outboundFlight or returnFlight"
+        },
+        tripComparison: null
+      });
+    }
+
+    const outboundBase = Number(outboundFlight.price || outboundFlight.basePrice || 0);
+    const returnBase = Number(returnFlight.price || returnFlight.basePrice || 0);
+
+    if (!Number.isFinite(outboundBase) || outboundBase <= 0 || !Number.isFinite(returnBase) || returnBase <= 0) {
+      return res.status(400).json({
+        meta: {
+          ...meta,
+          error: "Invalid outbound or return flight price"
+        },
+        tripComparison: null
+      });
+    }
+
+    const bundleBase = Math.round((outboundBase + returnBase) * 100) / 100;
+
+    const col = await getOffersCollection();
+    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    meta.offersLoaded = offers.length;
+
+    const bundleFlight = {
+      airlineName: `${outboundFlight.airlineName || "Outbound"} + ${returnFlight.airlineName || "Return"}`,
+      flightNumber: `${outboundFlight.flightNumber || ""}${outboundFlight.flightNumber && returnFlight.flightNumber ? " / " : ""}${returnFlight.flightNumber || ""}`.trim() || "Round Trip",
+      departureTime: outboundFlight.departureTime || null,
+      arrivalTime: returnFlight.arrivalTime || null,
+      stops: Number(outboundFlight.stops || 0) + Number(returnFlight.stops || 0),
+      price: bundleBase,
+      priceSource: "selected_round_trip_bundle",
+      bundle: {
+        type: "round-trip",
+        outboundFlight,
+        returnFlight,
+        outboundBase,
+        returnBase,
+        bundleBase
+      }
+    };
+
+    const enrichedBundle = await applyOffersToFlight(
+      bundleFlight,
+      selectedPaymentMethods,
+      offers,
+      adults,
+      cabin,
+      "round-trip",
+      routeIsDomestic
+    );
+
+    const tripComparison = {
+      tripType: "round-trip",
+      bookingMode: "same-portal",
+      note: "Prices assume outbound and return are booked together on the same portal.",
+      outboundFlight,
+      returnFlight,
+      baseTotal: bundleBase,
+      portalPrices: enrichedBundle.portalPrices || [],
+      bestDeal: enrichedBundle.bestDeal || null
+    };
+
+    return res.json({
+      meta,
+      tripComparison
+    });
+  } catch (e) {
+    return res.status(500).json({
+      meta: {
+        ...meta,
+        error: e?.message || "Selected trip comparison failed"
+      },
+      tripComparison: null
+    });
+  }
+});
+
+// --------------------
 // Search flights + apply offers
 // --------------------
 app.post("/search", async (req, res) => {
