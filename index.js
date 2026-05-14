@@ -4310,7 +4310,7 @@ meta.mongoDb = MONGODB_DB;
 
     logStep("before_map_outbound");
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
-    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 25);
+    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 10);
     logStep("after_map_outbound", { raw: outFlightsRaw.length, limited: outFlightsLimited.length });
 
         meta.outRawFlights = outFlightsRaw.length;
@@ -4360,7 +4360,7 @@ meta.mongoDb = MONGODB_DB;
 
            logStep("before_map_return");
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
-      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 25);
+      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 10);
       logStep("after_map_return", { raw: retFlightsRaw.length, limited: retFlightsLimited.length });
 
            meta.retRawFlights = retFlightsRaw.length;
