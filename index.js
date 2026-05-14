@@ -152,10 +152,16 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
 
   const tried = [];
   let lastError = null;
+  const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+
       const text = await res.text();
 
       const triedRow = {
@@ -184,16 +190,26 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
         };
       }
     } catch (err) {
-      lastError = { error: err.message };
+      clearTimeout(timeout);
+
+      const isAbort = err?.name === "AbortError";
+      lastError = {
+        error: isAbort ? `FlightAPI request timed out after ${timeoutMs}ms` : (err?.message || String(err)),
+      };
+
       tried.push({
         url,
         attempt,
         ...(attempt > 1 ? { retry: true } : {}),
-        error: err.message,
+        status: isAbort ? "TIMEOUT" : "ERROR",
+        timeoutMs,
+        error: lastError.error,
       });
     }
 
-    await new Promise((r) => setTimeout(r, 500));
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 
   const err = new Error(
