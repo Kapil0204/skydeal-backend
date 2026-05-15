@@ -4293,20 +4293,7 @@ function slimFlightForSearchResponse(flight) {
 
 app.post("/search", async (req, res) => {
   const body = req.body || {};
-  const requestId = `search_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const startedAt = Date.now();
-  const logStep = (step, extra = {}) => {
-    console.log("[SkyDeal /search]", JSON.stringify({
-      requestId,
-      step,
-      elapsedMs: Date.now() - startedAt,
-      ...extra
-    }));
-  };
-
-  logStep("start");
-
-  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {}, requestId };
+  const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {} };
 
   try {
     const from = String(body.from || "").trim().toUpperCase();
@@ -4350,16 +4337,12 @@ meta.mongoDb = MONGODB_DB;
     }
 
     // Load offers ONCE per request
-    logStep("before_mongo_offers");
         const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
     meta.offersLoaded = offers.length;
-    logStep("after_mongo_offers", { offersLoaded: offers.length });
 
     // Outbound
-    logStep("before_outbound_flightapi", { from, to, outDate, adults, cabin });
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
-    logStep("after_outbound_flightapi", { status: outRes?.status, tried: outRes?.tried });
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
@@ -4374,11 +4357,8 @@ meta.mongoDb = MONGODB_DB;
       results: Array.isArray(outRes.data?.results) ? outRes.data.results.length : 0,
       data: Array.isArray(outRes.data?.data) ? outRes.data.data.length : 0
     };
-
-    logStep("before_map_outbound");
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 10);
-    logStep("after_map_outbound", { raw: outFlightsRaw.length, limited: outFlightsLimited.length });
 
         meta.outRawFlights = outFlightsRaw.length;
     meta.outReturnedFlights = outFlightsLimited.length;
@@ -4393,7 +4373,6 @@ meta.mongoDb = MONGODB_DB;
     const routeIsDomestic = isDomesticRoute(from, to);
 
     const outboundFlights = [];
-    logStep("before_enrich_outbound", { count: outFlightsLimited.length });
     for (const f of outFlightsLimited) {
       outboundFlights.push(
         await applyOffersToFlight(
@@ -4407,12 +4386,10 @@ meta.mongoDb = MONGODB_DB;
         )
       );
     }
-    logStep("after_enrich_outbound", { count: outboundFlights.length });
 
     // Return
        let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
-      logStep("before_return_flightapi", { from: to, to: from, retDate, adults, cabin });
       const retRes = await fetchOneWayTrip({
         from: to,
         to: from,
@@ -4421,14 +4398,10 @@ meta.mongoDb = MONGODB_DB;
         cabin,
         currency
       });
-      logStep("after_return_flightapi", { status: retRes?.status, tried: retRes?.tried });
       meta.retStatus = retRes.status;
       meta.request.retTried = retRes.tried;
-
-           logStep("before_map_return");
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 10);
-      logStep("after_map_return", { raw: retFlightsRaw.length, limited: retFlightsLimited.length });
 
            meta.retRawFlights = retFlightsRaw.length;
       meta.retReturnedFlights = retFlightsLimited.length;
@@ -4442,7 +4415,6 @@ meta.mongoDb = MONGODB_DB;
       const returnRouteIsDomestic = isDomesticRoute(to, from);
 
       const enriched = [];
-      logStep("before_enrich_return", { count: retFlightsLimited.length });
       for (const f of retFlightsLimited) {
         enriched.push(
           await applyOffersToFlight(
@@ -4457,7 +4429,6 @@ meta.mongoDb = MONGODB_DB;
         );
       }
       returnFlights = enriched;
-      logStep("after_enrich_return", { count: returnFlights.length });
     }
 
     res.json({
