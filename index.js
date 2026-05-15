@@ -4224,6 +4224,73 @@ app.post("/compare-selected-trip", async (req, res) => {
 // --------------------
 // Search flights + apply offers
 // --------------------
+function slimOfferForSearchResponse(offer) {
+  if (!offer || typeof offer !== "object") return offer || null;
+
+  return {
+    title: offer.title || null,
+    couponCode: offer.couponCode || offer.code || null,
+    code: offer.code || offer.couponCode || null,
+    rawDiscount: offer.rawDiscount || null,
+    offerSummary: offer.offerSummary
+      ? {
+          headline: offer.offerSummary.headline || null,
+          keyFacts: Array.isArray(offer.offerSummary.keyFacts) ? offer.offerSummary.keyFacts.slice(0, 4) : [],
+          keyTerms: Array.isArray(offer.offerSummary.keyTerms) ? offer.offerSummary.keyTerms.slice(0, 4) : [],
+          displayBadge: offer.offerSummary.displayBadge || null
+        }
+      : null,
+    paymentHint: offer.paymentHint || offer.paymentLabel || null,
+    sourcePortal: offer.sourcePortal || offer.sourceMetadata?.sourcePortal || null,
+    requiresSpecificCardType: !!offer.requiresSpecificCardType,
+    infoLabel: offer.infoLabel || null
+  };
+}
+
+function slimPortalPriceForSearchResponse(row) {
+  if (!row || typeof row !== "object") return row || null;
+
+  return {
+    portal: row.portal || null,
+    basePrice: row.basePrice ?? null,
+    finalPrice: row.finalPrice ?? row.basePrice ?? null,
+    applied: !!row.applied,
+    code: row.code || row.couponCode || null,
+    title: row.title || null,
+    rawDiscount: row.rawDiscount || null,
+    actualDiscount: row.actualDiscount ?? null,
+    appliedDiscountText: row.appliedDiscountText || null,
+    constraints: row.constraints || null,
+    paymentLabel: row.paymentLabel || null,
+    offerTypeLabel: row.offerTypeLabel || null,
+    channelLabel: row.channelLabel || null,
+    explain: row.explain || null,
+
+    // Keep hints for "more offers", but remove huge terms/raw text from normal search response.
+    infoOffers: Array.isArray(row.infoOffers)
+      ? row.infoOffers.slice(0, 6).map(slimOfferForSearchResponse)
+      : [],
+
+    moreOffers: Array.isArray(row.moreOffers)
+      ? row.moreOffers.slice(0, 6).map(slimOfferForSearchResponse)
+      : [],
+
+    debugCounts: row.debugCounts || null
+  };
+}
+
+function slimFlightForSearchResponse(flight) {
+  if (!flight || typeof flight !== "object") return flight || null;
+
+  return {
+    ...flight,
+    portalPrices: Array.isArray(flight.portalPrices)
+      ? flight.portalPrices.map(slimPortalPriceForSearchResponse)
+      : [],
+    bestDeal: slimPortalPriceForSearchResponse(flight.bestDeal)
+  };
+}
+
 app.post("/search", async (req, res) => {
   const body = req.body || {};
   const requestId = `search_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -4393,7 +4460,11 @@ meta.mongoDb = MONGODB_DB;
       logStep("after_enrich_return", { count: returnFlights.length });
     }
 
-    res.json({ meta, outboundFlights, returnFlights });
+    res.json({
+      meta,
+      outboundFlights: outboundFlights.map(slimFlightForSearchResponse),
+      returnFlights: returnFlights.map(slimFlightForSearchResponse)
+    });
   } catch (e) {
     const status = e?.status || e?.response?.status || 500;
     meta.outStatus = meta.outStatus || status;
