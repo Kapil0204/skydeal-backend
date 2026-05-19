@@ -4365,7 +4365,8 @@ app.get("/debug/generic-offers-count", async (req, res) => {
     const dbName = process.env.MONGODB_DB || "skydeal";
     const colName = process.env.MONGO_COL || "offer_rules";
 
-    const offers = await loadOffers();
+    const col = await getOffersCollection();
+    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
 
     const arr = (v) => Array.isArray(v) ? v : [];
 
@@ -4459,9 +4460,9 @@ app.get("/debug/generic-offers-count", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "unsafe-hdfcemi-pricing-block",
-    expectedCommit: "unsafe-hdfcemi-pricing-block",
-    deployedCheck: "If you see this, Render is blocking known unsafe HDFCEMI cap-only pricing rows."
+    buildMarker: "generic-offer-count-endpoint-fixed",
+    expectedCommit: "generic-offer-count-endpoint-fixed",
+    deployedCheck: "If you see this, Render has the fixed generic offer count endpoint."
   });
 });
 
