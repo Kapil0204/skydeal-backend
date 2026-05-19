@@ -2973,7 +2973,22 @@ const structuredPercent = Number(
   offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0
 );
 
-const parsedPercent = Number(parsePercentFromRawDiscount(offer, isDomestic) || 0);
+// For best-deal eligibility, only trust a percent clearly visible in the
+// concise offer fields. Do NOT infer percent from long rawText here, because
+// rawText can contain unrelated terms/tiers and can make cap-only "up to" offers
+// look deterministic.
+const conciseDiscountBlob = String(
+  `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+).toLowerCase();
+
+const concisePercentMatch =
+  conciseDiscountBlob.match(/(?:flat\s*)?(\d{1,2})\s*%\s*(?:instant\s*)?(?:discount|off)/i) ||
+  conciseDiscountBlob.match(/(?:instant\s*)?(?:discount|off)[^%]{0,40}(\d{1,2})\s*%/i) ||
+  conciseDiscountBlob.match(/\b(\d{1,2})\s*%\s*off\b/i);
+
+const parsedPercent = concisePercentMatch
+  ? Number(concisePercentMatch[1])
+  : 0;
 
 const hasStructuredFlat =
   Number.isFinite(structuredFlatAmount) && structuredFlatAmount > 0;
