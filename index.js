@@ -3173,6 +3173,60 @@ if (
     return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
   }
 
+  // Final deterministic-discount guard before price calculation.
+  // maxDiscountAmount is only a cap. It must not become the discount by itself.
+  const finalGuardTiers =
+    offer?.discountTiers ||
+    offer?.parsedFields?.discountTiers ||
+    [];
+
+  const finalGuardHasTierDiscount =
+    Array.isArray(finalGuardTiers) &&
+    finalGuardTiers.some((t) => {
+      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const tierPct = Number(t?.discountPercent || 0);
+      return tierFlat > 0 || tierPct > 0;
+    });
+
+  const finalGuardFlat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    offer?.discountAmount ??
+    offer?.parsedFields?.discountAmount ??
+    0
+  );
+
+  const finalGuardPct = Number(
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    0
+  );
+
+  const finalGuardCap = Number(
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    0
+  );
+
+  const finalGuardText = String(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+  ).toLowerCase();
+
+  const finalGuardHasVisiblePct =
+    /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(finalGuardText) ||
+    /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(finalGuardText) ||
+    /\b\d{1,2}\s*%\s*off\b/i.test(finalGuardText);
+
+  const finalGuardHasComputableDiscount =
+    finalGuardHasTierDiscount ||
+    (Number.isFinite(finalGuardFlat) && finalGuardFlat > 0) ||
+    (Number.isFinite(finalGuardPct) && finalGuardPct > 0) ||
+    finalGuardHasVisiblePct;
+
+  if (Number.isFinite(finalGuardCap) && finalGuardCap > 0 && !finalGuardHasComputableDiscount) {
+    return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
+  }
+
   const discounted = computeDiscountedPrice(
   offer,
   baseAmount,
