@@ -4291,9 +4291,9 @@ else failReasons.push("PAYMENT_MISMATCH");
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "hard-block-cap-only-7a531b6",
-    expectedCommit: "7a531b6",
-    deployedCheck: "If you see this, Render is running the hard cap-only discount block."
+    buildMarker: "targeted-evaluate-cap-guard-ca45f3a",
+    expectedCommit: "ca45f3a",
+    deployedCheck: "If you see this, Render is running the targeted evaluate cap-only guard."
   });
 });
 
