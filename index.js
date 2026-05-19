@@ -3621,6 +3621,22 @@ if (!canBeShownAsMatchedInfo) continue;
     .slice(0, limit)
     .map(({ _score, ...rest }) => rest);
 }
+function isKnownUnsafePricingOffer(offer) {
+  const code = String(
+    offer?.couponCode ||
+    offer?.code ||
+    offer?.parsedFields?.couponCode ||
+    offer?.parsedFields?.code ||
+    ""
+  ).trim().toUpperCase();
+
+  // Temporary safety block:
+  // These MMT HDFC EMI rows currently have only maxDiscountAmount/cap data
+  // and no deterministic discount tier/flat/percent source.
+  // Re-enable only after MakeMyTrip is re-scraped/re-parsed with proper tiers.
+  return code === "HDFCEMI" || code === "HDFCINTEMI";
+}
+
 function isJunkInfoOffer(offer) {
   const title = String(offer?.title || "").toLowerCase();
   const rawDiscount = String(offer?.rawDiscount || "").toLowerCase();
@@ -3705,6 +3721,7 @@ async function applyOffersToFlight(
 
 for (const offer of offers) {
   if (isJunkInfoOffer(offer)) continue;
+  if (isKnownUnsafePricingOffer(offer)) continue;
 
   // Runtime safety: never allow cap-only / "up to ₹X" offers into pricing candidates.
   // maxDiscountAmount is only a cap, not the discount itself.
@@ -4346,9 +4363,9 @@ else failReasons.push("PAYMENT_MISMATCH");
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "candidate-loop-cap-only-block",
-    expectedCommit: "candidate-loop-cap-only-block",
-    deployedCheck: "If you see this, Render is running the candidate-loop cap-only blocker."
+    buildMarker: "unsafe-hdfcemi-pricing-block",
+    expectedCommit: "unsafe-hdfcemi-pricing-block",
+    deployedCheck: "If you see this, Render is blocking known unsafe HDFCEMI cap-only pricing rows."
   });
 });
 
