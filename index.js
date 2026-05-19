@@ -3119,6 +3119,60 @@ if (
     }
   }
 
+  // Final deterministic-discount guard before price calculation.
+  // A maxDiscountAmount is only a cap. It must not be treated as the discount itself.
+  const directTiers =
+    offer?.discountTiers ||
+    offer?.parsedFields?.discountTiers ||
+    [];
+
+  const hasRealTierDiscount =
+    Array.isArray(directTiers) &&
+    directTiers.some((t) => {
+      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const tierPct = Number(t?.discountPercent || 0);
+      return tierFlat > 0 || tierPct > 0;
+    });
+
+  const directFlat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    offer?.discountAmount ??
+    offer?.parsedFields?.discountAmount ??
+    0
+  );
+
+  const directPct = Number(
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    0
+  );
+
+  const directCap = Number(
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    0
+  );
+
+  const conciseDiscountText = String(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+  ).toLowerCase();
+
+  const hasVisiblePct =
+    /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(conciseDiscountText) ||
+    /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(conciseDiscountText) ||
+    /\b\d{1,2}\s*%\s*off\b/i.test(conciseDiscountText);
+
+  const hasComputableDiscountBeforeCalc =
+    hasRealTierDiscount ||
+    (Number.isFinite(directFlat) && directFlat > 0) ||
+    (Number.isFinite(directPct) && directPct > 0) ||
+    hasVisiblePct;
+
+  if (Number.isFinite(directCap) && directCap > 0 && !hasComputableDiscountBeforeCalc) {
+    return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
+  }
+
   const discounted = computeDiscountedPrice(
   offer,
   baseAmount,
