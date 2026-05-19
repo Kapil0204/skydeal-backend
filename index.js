@@ -4457,6 +4457,77 @@ app.get("/debug/generic-offers-count", async (req, res) => {
   }
 });
 
+app.get("/debug/offer-rule-mix", async (req, res) => {
+  try {
+    const col = await getOffersCollection();
+    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
+    const arr = (v) => Array.isArray(v) ? v : [];
+
+    const getPortal = (o) =>
+      o?.sourceMetadata?.sourcePortal ||
+      o?.sourcePortal ||
+      o?.portal ||
+      o?.parsedFields?.sourcePortal ||
+      "UNKNOWN";
+
+    const getKind = (o) =>
+      String(o?.offerKind || o?.parsedFields?.offerKind || "MISSING").toLowerCase();
+
+    const hasPM = (o) => {
+      const lists = [
+        o?.paymentMethods,
+        o?.eligiblePaymentMethods,
+        o?.parsedFields?.paymentMethods,
+        o?.parsedFields?.eligiblePaymentMethods
+      ];
+      return lists.some((x) => Array.isArray(x) && x.length > 0);
+    };
+
+    const byKind = {};
+    const byPortal = {};
+    const byPaymentPresence = { hasPaymentMethods: 0, noPaymentMethods: 0 };
+
+    for (const o of offers) {
+      const kind = getKind(o);
+      const portal = getPortal(o);
+
+      byKind[kind] = (byKind[kind] || 0) + 1;
+      byPortal[portal] = (byPortal[portal] || 0) + 1;
+
+      if (hasPM(o)) byPaymentPresence.hasPaymentMethods++;
+      else byPaymentPresence.noPaymentMethods++;
+    }
+
+    const noPaymentSamples = offers
+      .filter((o) => !hasPM(o))
+      .slice(0, 30)
+      .map((o) => ({
+        portal: getPortal(o),
+        title: o.title || null,
+        code: o.couponCode || o.code || o?.parsedFields?.couponCode || null,
+        rawDiscount: o.rawDiscount || o?.parsedFields?.rawDiscount || null,
+        offerKind: o.offerKind || o?.parsedFields?.offerKind || null,
+        discountPercent: o.discountPercent ?? o?.parsedFields?.discountPercent ?? null,
+        flatDiscountAmount: o.flatDiscountAmount ?? o?.parsedFields?.flatDiscountAmount ?? null,
+        maxDiscountAmount: o.maxDiscountAmount ?? o?.parsedFields?.maxDiscountAmount ?? null,
+        minTransactionValue: o.minTransactionValue ?? o?.parsedFields?.minTransactionValue ?? null,
+        isFlight: isFlightOffer(o),
+        isHotelOnly: isHotelOnlyOffer(o)
+      }));
+
+    res.json({
+      total: offers.length,
+      byKind,
+      byPortal,
+      byPaymentPresence,
+      noPaymentSamples
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "offer rule mix failed" });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
