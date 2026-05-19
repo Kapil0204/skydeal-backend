@@ -1690,6 +1690,35 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, s
 
   const perPassenger = offerIsPerPassenger(offer);
   const maxCap = getOfferMaxDiscountAmount(offer, passengers);
+
+  // Hard safety guard:
+  // maxDiscountAmount is only a cap, not the discount itself.
+  // If there is no tier, no flat amount, and no percentage, do not reduce price.
+  const calcTiers = offer?.discountTiers || offer?.parsedFields?.discountTiers || [];
+  const calcHasTiers = Array.isArray(calcTiers) && calcTiers.length > 0;
+  const calcFlat = Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0);
+  const calcPct = Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0);
+  const calcRawDiscount = String(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+  ).toLowerCase();
+
+  const calcVisiblePctMatch =
+    calcRawDiscount.match(/(?:flat\s*)?(\d{1,2})\s*%\s*(?:instant\s*)?(?:discount|off)/i) ||
+    calcRawDiscount.match(/(?:instant\s*)?(?:discount|off)[^%]{0,40}(\d{1,2})\s*%/i) ||
+    calcRawDiscount.match(/\b(\d{1,2})\s*%\s*off\b/i);
+
+  const calcVisiblePct = calcVisiblePctMatch ? Number(calcVisiblePctMatch[1]) : 0;
+
+  const calcHasComputableDiscount =
+    calcHasTiers ||
+    (Number.isFinite(calcFlat) && calcFlat > 0) ||
+    (Number.isFinite(calcPct) && calcPct > 0) ||
+    (Number.isFinite(calcVisiblePct) && calcVisiblePct > 0);
+
+  if (Number.isFinite(maxCap) && maxCap > 0 && !calcHasComputableDiscount) {
+    return base;
+  }
+
   const applicableTier = pickApplicableDiscountTier(
   offer,
   eligibilityAmount,
