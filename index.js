@@ -4151,6 +4151,15 @@ else failReasons.push("PAYMENT_MISMATCH");
 // --------------------
 // Compare selected round-trip pair
 // --------------------
+app.get("/debug/build-version", (req, res) => {
+  res.json({
+    service: "skydeal-backend",
+    buildMarker: "cap-only-strict-392025d",
+    expectedCommit: "392025d",
+    deployedCheck: "If you see this, Render is running the strict cap-only validation code path."
+  });
+});
+
 app.post("/compare-selected-trip", async (req, res) => {
   const body = req.body || {};
   const meta = {
