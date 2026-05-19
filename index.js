@@ -3705,6 +3705,61 @@ async function applyOffersToFlight(
 
 for (const offer of offers) {
   if (isJunkInfoOffer(offer)) continue;
+
+  // Runtime safety: never allow cap-only / "up to ₹X" offers into pricing candidates.
+  // maxDiscountAmount is only a cap, not the discount itself.
+  const candidateTiers =
+    offer?.discountTiers ||
+    offer?.parsedFields?.discountTiers ||
+    [];
+
+  const candidateHasTierDiscount =
+    Array.isArray(candidateTiers) &&
+    candidateTiers.some((t) => {
+      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const tierPct = Number(t?.discountPercent || 0);
+      return tierFlat > 0 || tierPct > 0;
+    });
+
+  const candidateFlat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    offer?.discountAmount ??
+    offer?.parsedFields?.discountAmount ??
+    0
+  );
+
+  const candidatePct = Number(
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    0
+  );
+
+  const candidateCap = Number(
+    offer?.maxDiscountAmount ??
+    offer?.parsedFields?.maxDiscountAmount ??
+    0
+  );
+
+  const candidateText = String(
+    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+  ).toLowerCase();
+
+  const candidateHasVisiblePct =
+    /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(candidateText) ||
+    /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(candidateText) ||
+    /\b\d{1,2}\s*%\s*off\b/i.test(candidateText);
+
+  const candidateHasComputableDiscount =
+    candidateHasTierDiscount ||
+    (Number.isFinite(candidateFlat) && candidateFlat > 0) ||
+    (Number.isFinite(candidatePct) && candidatePct > 0) ||
+    candidateHasVisiblePct;
+
+  if (Number.isFinite(candidateCap) && candidateCap > 0 && !candidateHasComputableDiscount) {
+    continue;
+  }
+
   const ev = evaluateOfferForFlight({
     offer,
     portal,
@@ -4291,9 +4346,9 @@ else failReasons.push("PAYMENT_MISMATCH");
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "targeted-evaluate-cap-guard-ca45f3a",
-    expectedCommit: "ca45f3a",
-    deployedCheck: "If you see this, Render is running the targeted evaluate cap-only guard."
+    buildMarker: "candidate-loop-cap-only-block",
+    expectedCommit: "candidate-loop-cap-only-block",
+    deployedCheck: "If you see this, Render is running the candidate-loop cap-only blocker."
   });
 });
 
