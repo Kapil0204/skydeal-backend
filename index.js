@@ -152,7 +152,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
 
   const tried = [];
   let lastError = null;
-  const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
+  const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 6000);
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const controller = new AbortController();
@@ -2961,24 +2961,62 @@ if (!isValidBestOffer(offer)) {
 const hasTiers =
   Array.isArray(offer?.discountTiers) && offer.discountTiers.length > 0;
 
-const hasStructuredCapOrFlat =
-  Number(offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0) > 0 ||
-  Number(offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0) > 0;
+const structuredFlatAmount = Number(
+  offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0
+);
+
+const structuredMaxCap = Number(
+  offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0
+);
+
+const structuredPercent = Number(
+  offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0
+);
+
+const parsedPercent = Number(parsePercentFromRawDiscount(offer, isDomestic) || 0);
+
+const hasStructuredFlat =
+  Number.isFinite(structuredFlatAmount) && structuredFlatAmount > 0;
+
+const hasStructuredCap =
+  Number.isFinite(structuredMaxCap) && structuredMaxCap > 0;
 
 const hasStructuredPercent =
-  Number(offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0) > 0;
+  Number.isFinite(structuredPercent) && structuredPercent > 0;
+
+const hasParsedPercent =
+  Number.isFinite(parsedPercent) && parsedPercent > 0;
+
+// Important:
+// maxDiscountAmount is only a cap. It is NOT the actual discount by itself.
+// A direct best deal must have a computable discount source:
+// - discount tiers, OR
+// - flat discount, OR
+// - structured/parsed percentage.
+// Cap-only / "up to ₹X" offers must not become applied winners.
+const hasComputableDiscountStructure =
+  hasTiers ||
+  hasStructuredFlat ||
+  hasStructuredPercent ||
+  hasParsedPercent;
 
 const isTrustedCappedPercentOffer =
   offer?.pricingEligible === true &&
   offer?.hasDeterministicDiscount === true &&
-  hasStructuredPercent &&
-  hasStructuredCapOrFlat;
+  (hasStructuredPercent || hasParsedPercent) &&
+  (hasStructuredCap || hasStructuredFlat);
+
+const isCapOnlyDiscount =
+  hasStructuredCap && !hasComputableDiscountStructure;
 
 const isUnsafeUpToOnly =
   /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
-  !hasTiers &&
-  !hasStructuredCapOrFlat &&
+  !hasComputableDiscountStructure &&
   !isTrustedCappedPercentOffer;
+
+if (isCapOnlyDiscount) {
+  return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
+}
 
 if (isUnsafeUpToOnly) {
   return { ok: false, reasons: ["UNSAFE_UPTO_OFFER"] };
