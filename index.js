@@ -4538,8 +4538,8 @@ app.get("/debug/collections-summary", async (req, res) => {
       "offers"
     ];
 
-    const col = await getOffersCollection();
-    const db = col.db;
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
 
     const existing = await db.listCollections().toArray();
     const existingNames = existing.map((c) => c.name);
