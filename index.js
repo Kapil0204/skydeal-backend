@@ -3637,6 +3637,53 @@ function isKnownUnsafePricingOffer(offer) {
   return code === "HDFCEMI" || code === "HDFCINTEMI";
 }
 
+function isDeterministicPortalPricingOffer(offer) {
+  const kind = String(offer?.offerKind || offer?.parsedFields?.offerKind || "").toLowerCase();
+
+  if (kind !== "portal" && kind !== "generic") return false;
+
+  const hasPM =
+    (Array.isArray(offer?.paymentMethods) && offer.paymentMethods.length > 0) ||
+    (Array.isArray(offer?.eligiblePaymentMethods) && offer.eligiblePaymentMethods.length > 0) ||
+    (Array.isArray(offer?.parsedFields?.paymentMethods) && offer.parsedFields.paymentMethods.length > 0) ||
+    (Array.isArray(offer?.parsedFields?.eligiblePaymentMethods) && offer.parsedFields.eligiblePaymentMethods.length > 0);
+
+  if (hasPM) return false;
+
+  const flat = Number(
+    offer?.flatDiscountAmount ??
+    offer?.parsedFields?.flatDiscountAmount ??
+    offer?.discountAmount ??
+    offer?.parsedFields?.discountAmount ??
+    0
+  );
+
+  const pct = Number(
+    offer?.discountPercent ??
+    offer?.parsedFields?.discountPercent ??
+    0
+  );
+
+  const tiers =
+    offer?.discountTiers ||
+    offer?.parsedFields?.discountTiers ||
+    [];
+
+  const hasTier =
+    Array.isArray(tiers) &&
+    tiers.some((t) => {
+      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+      const tierPct = Number(t?.discountPercent || 0);
+      return tierFlat > 0 || tierPct > 0;
+    });
+
+  return (
+    hasTier ||
+    (Number.isFinite(flat) && flat > 0) ||
+    (Number.isFinite(pct) && pct > 0)
+  );
+}
+
 function isJunkInfoOffer(offer) {
   const title = String(offer?.title || "").toLowerCase();
   const rawDiscount = String(offer?.rawDiscount || "").toLowerCase();
@@ -3720,7 +3767,7 @@ async function applyOffersToFlight(
 
 
 for (const offer of offers) {
-  if (isJunkInfoOffer(offer)) continue;
+  if (!isDeterministicPortalPricingOffer(offer) && isJunkInfoOffer(offer)) continue;
   if (isKnownUnsafePricingOffer(offer)) continue;
 
   // Runtime safety: never allow cap-only / "up to ₹X" offers into pricing candidates.
@@ -4870,9 +4917,9 @@ app.post("/debug/promote-safe-generic-offers", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "safe-generic-promotion-endpoint",
-    expectedCommit: "safe-generic-promotion-endpoint",
-    deployedCheck: "If you see this, Render has the safe generic offer promotion endpoint."
+    buildMarker: "allow-deterministic-portal-offers",
+    expectedCommit: "allow-deterministic-portal-offers",
+    deployedCheck: "If you see this, Render allows deterministic portal offers through pricing."
   });
 });
 
