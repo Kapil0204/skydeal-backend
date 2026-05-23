@@ -4914,12 +4914,99 @@ app.post("/debug/promote-safe-generic-offers", async (req, res) => {
   }
 });
 
+app.get("/debug/generic-apply-path", async (req, res) => {
+  try {
+    const from = String(req.query.from || "BLR").toUpperCase();
+    const to = String(req.query.to || "DEL").toUpperCase();
+    const amount = Number(req.query.amount || 20000);
+    const portal = String(req.query.portal || "Goibibo");
+    const titleQuery = String(req.query.q || "Domestic Flight Discount").toLowerCase();
+
+    const col = await getOffersCollection();
+    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
+    const isDomestic = isDomesticRoute(from, to);
+
+    const matchingDocs = offers
+      .filter((o) => String(o?.sourcePortal || o?.sourceMetadata?.sourcePortal || o?.portal || "").toLowerCase() === portal.toLowerCase())
+      .filter((o) => String(o?.title || "").toLowerCase().includes(titleQuery));
+
+    const evals = matchingDocs.map((offer) => {
+      const ev = evaluateOfferForFlight({
+        offer,
+        portal,
+        baseAmount: amount,
+        eligibilityAmount: amount,
+        selectedPaymentMethods: [],
+        isDomestic,
+        cabin: "Economy",
+        flightAirlineName: "IndiGo",
+        tripType: "round-trip",
+        passengers: 1,
+        allOffers: offers
+      });
+
+      return {
+        title: offer.title || null,
+        sourcePortal: offer.sourcePortal || offer?.sourceMetadata?.sourcePortal || null,
+        offerKind: offer.offerKind || null,
+        paymentMethods: offer.paymentMethods || null,
+        rawDiscount: offer.rawDiscount || null,
+        flatDiscountAmount: offer.flatDiscountAmount ?? null,
+        discountPercent: offer.discountPercent ?? null,
+        maxDiscountAmount: offer.maxDiscountAmount ?? null,
+        isJunkInfoOffer: isJunkInfoOffer(offer),
+        isDeterministicPortalPricingOffer: isDeterministicPortalPricingOffer(offer),
+        isKnownUnsafePricingOffer: isKnownUnsafePricingOffer(offer),
+        offerAppliesToPortal: offerAppliesToPortal(offer, portal),
+        isFlightOffer: isFlightOffer(offer),
+        isHotelOnlyOffer: isHotelOnlyOffer(offer),
+        isOfferExpired: isOfferExpired(offer),
+        eval: ev
+      };
+    });
+
+    const flight = {
+      airlineName: "IndiGo",
+      flightNumber: "6E DEBUG",
+      price: amount
+    };
+
+    const applied = await applyOffersToFlight(
+      flight,
+      [],
+      offers,
+      1,
+      "Economy",
+      "round-trip",
+      isDomestic
+    );
+
+    res.json({
+      from,
+      to,
+      isDomestic,
+      amount,
+      offersLoaded: offers.length,
+      matchingDocsCount: matchingDocs.length,
+      evals,
+      goibiboPortalRow: (applied.portalPrices || []).find((p) => p.portal === portal) || null,
+      bestDeal: applied.bestDeal || null
+    });
+  } catch (e) {
+    res.status(500).json({
+      error: e?.message || "generic apply path debug failed",
+      stack: e?.stack || null
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "compare-selected-route-inference",
-    expectedCommit: "compare-selected-route-inference",
-    deployedCheck: "If you see this, Render infers route for selected-trip generic offer scope."
+    buildMarker: "debug-generic-apply-path",
+    expectedCommit: "debug-generic-apply-path",
+    deployedCheck: "If you see this, Render has generic apply path debug endpoint."
   });
 });
 
