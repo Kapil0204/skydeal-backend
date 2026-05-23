@@ -4,6 +4,16 @@ import cors from "cors";
 import axios from "axios";
 import { MongoClient } from "mongodb";
 
+function requireDebugEnabled(req, res) {
+  if (process.env.ENABLE_DEBUG_ENDPOINTS === "true") return true;
+
+  res.status(404).json({
+    error: "Not found"
+  });
+
+  return false;
+}
+
 // --------------------
 // Setup
 // --------------------
@@ -4210,6 +4220,8 @@ app.get("/payment-options", async (req, res) => {
 // ✅ RESTORED: /debug/why-not-applied
 // --------------------
 app.get("/debug/why-not-applied", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const portal = String(req.query.portal || "").trim();
     const bank = String(req.query.bank || "").trim();
@@ -4410,6 +4422,8 @@ else failReasons.push("PAYMENT_MISMATCH");
 // Compare selected round-trip pair
 // --------------------
 app.get("/debug/generic-offers-count", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const dbName = process.env.MONGODB_DB || "skydeal";
     const colName = process.env.MONGO_COL || "offer_rules";
@@ -4507,6 +4521,8 @@ app.get("/debug/generic-offers-count", async (req, res) => {
 });
 
 app.get("/debug/offer-rule-mix", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
@@ -4578,6 +4594,8 @@ app.get("/debug/offer-rule-mix", async (req, res) => {
 });
 
 app.get("/debug/collections-summary", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const dbName = process.env.MONGODB_DB || "skydeal";
     const knownCollections = [
@@ -4699,6 +4717,8 @@ app.get("/debug/collections-summary", async (req, res) => {
 });
 
 app.get("/debug/generic-offer-candidates", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     await getOffersCollection();
     const db = _mongoClient.db(MONGODB_DB);
@@ -4789,6 +4809,8 @@ app.get("/debug/generic-offer-candidates", async (req, res) => {
 });
 
 app.post("/debug/promote-safe-generic-offers", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const dryRun = req.query.dryRun !== "false";
 
@@ -4917,6 +4939,8 @@ app.post("/debug/promote-safe-generic-offers", async (req, res) => {
 });
 
 app.get("/debug/generic-apply-path", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const from = String(req.query.from || "BLR").toUpperCase();
     const to = String(req.query.to || "DEL").toUpperCase();
