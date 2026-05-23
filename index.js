@@ -2978,7 +2978,9 @@ if (isSuspiciousGenericOffer(offer, allOffers || [])) {
 
 // Best-offer trust filter:
 // allow display elsewhere, but never let non-deterministic / vague offers become applied winners
-if (!isValidBestOffer(offer)) {
+// Generic/portal deterministic offers are allowed to become best offers.
+// Example: Goibibo "Domestic Flight Discount" FLAT ₹750 OFF with paymentMethods: [].
+if (!isDeterministicPortalPricingOffer(offer) && !isValidBestOffer(offer)) {
   return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
 }
   const rawDiscountText = String(
@@ -5004,9 +5006,9 @@ app.get("/debug/generic-apply-path", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "debug-generic-apply-path",
-    expectedCommit: "debug-generic-apply-path",
-    deployedCheck: "If you see this, Render has generic apply path debug endpoint."
+    buildMarker: "allow-generic-portal-best-offers",
+    expectedCommit: "allow-generic-portal-best-offers",
+    deployedCheck: "If you see this, Render allows deterministic generic portal offers as best deals."
   });
 });
 
