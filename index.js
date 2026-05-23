@@ -4917,9 +4917,9 @@ app.post("/debug/promote-safe-generic-offers", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "allow-deterministic-portal-offers",
-    expectedCommit: "allow-deterministic-portal-offers",
-    deployedCheck: "If you see this, Render allows deterministic portal offers through pricing."
+    buildMarker: "compare-selected-route-inference",
+    expectedCommit: "compare-selected-route-inference",
+    deployedCheck: "If you see this, Render infers route for selected-trip generic offer scope."
   });
 });
 
@@ -4932,11 +4932,26 @@ app.post("/compare-selected-trip", async (req, res) => {
   };
 
   try {
-    const from = String(body.from || "").trim().toUpperCase();
-    const to = String(body.to || "").trim().toUpperCase();
-
     const outboundFlight = body.outboundFlight || null;
     const returnFlight = body.returnFlight || null;
+
+    // Prefer explicit route fields, but selected-trip comparison often receives
+    // from/to inside the selected flight objects only.
+    const from = String(
+      body.from ||
+      outboundFlight?.from ||
+      outboundFlight?.origin ||
+      outboundFlight?.originCode ||
+      ""
+    ).trim().toUpperCase();
+
+    const to = String(
+      body.to ||
+      outboundFlight?.to ||
+      outboundFlight?.destination ||
+      outboundFlight?.destinationCode ||
+      ""
+    ).trim().toUpperCase();
 
     const adults = Number(body.passengers || 1) || 1;
     const cabin = normalizeCabin(body.travelClass);
