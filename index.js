@@ -4649,6 +4649,96 @@ app.get("/debug/collections-summary", async (req, res) => {
   }
 });
 
+app.get("/debug/generic-offer-candidates", async (req, res) => {
+  try {
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
+
+    const collectionName = String(req.query.collection || "offer_review_queue");
+    const limit = Math.min(Number(req.query.limit || 50), 200);
+
+    const docs = await db.collection(collectionName).find({}, { projection: { _id: 0 } }).toArray();
+
+    const arr = (v) => Array.isArray(v) ? v : [];
+
+    const hasPaymentMethods = (o) => {
+      const lists = [
+        o?.paymentMethods,
+        o?.eligiblePaymentMethods,
+        o?.parsedFields?.paymentMethods,
+        o?.parsedFields?.eligiblePaymentMethods
+      ];
+      return lists.some((x) => Array.isArray(x) && x.length > 0);
+    };
+
+    const isDeterministic = (o) => {
+      const tiers = arr(o?.discountTiers || o?.parsedFields?.discountTiers);
+      const hasTier = tiers.some((t) =>
+        Number(t?.flatDiscountAmount || t?.discountAmount || 0) > 0 ||
+        Number(t?.discountPercent || 0) > 0
+      );
+
+      const flat = Number(o?.flatDiscountAmount ?? o?.parsedFields?.flatDiscountAmount ?? 0);
+      const pct = Number(o?.discountPercent ?? o?.parsedFields?.discountPercent ?? 0);
+
+      const blob = `${o?.title || ""} ${o?.rawDiscount || ""} ${o?.offerSummary || ""} ${o?.parsedFields?.rawDiscount || ""}`.toLowerCase();
+
+      const visiblePct =
+        /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(blob) ||
+        /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(blob) ||
+        /\b\d{1,2}\s*%\s*off\b/i.test(blob);
+
+      const visibleFlat =
+        /\bflat\s*(?:rs\.?|inr|₹)\s*[\d,]+/i.test(blob) ||
+        /(?:rs\.?|inr|₹)\s*[\d,]+\s*(?:off|discount)/i.test(blob);
+
+      return hasTier || flat > 0 || pct > 0 || visiblePct || visibleFlat;
+    };
+
+    const getPortal = (o) =>
+      o?.sourceMetadata?.sourcePortal ||
+      o?.sourcePortal ||
+      o?.portal ||
+      o?.parsedFields?.sourcePortal ||
+      "UNKNOWN";
+
+    const candidates = docs
+      .filter((o) => isFlightOffer(o) && !isHotelOnlyOffer(o))
+      .filter((o) => !hasPaymentMethods(o))
+      .filter(isDeterministic)
+      .slice(0, limit)
+      .map((o) => ({
+        portal: getPortal(o),
+        title: o.title || null,
+        code: o.couponCode || o.code || o?.parsedFields?.couponCode || null,
+        rawDiscount: o.rawDiscount || o?.parsedFields?.rawDiscount || null,
+        discountPercent: o.discountPercent ?? o?.parsedFields?.discountPercent ?? null,
+        flatDiscountAmount: o.flatDiscountAmount ?? o?.parsedFields?.flatDiscountAmount ?? null,
+        maxDiscountAmount: o.maxDiscountAmount ?? o?.parsedFields?.maxDiscountAmount ?? null,
+        minTransactionValue: o.minTransactionValue ?? o?.parsedFields?.minTransactionValue ?? null,
+        offerKind: o.offerKind || o?.parsedFields?.offerKind || null,
+        reviewQueueReasons: o.reviewQueueReasons || o.reviewReasons || o.reasons || [],
+        sourceMetadata: o.sourceMetadata || null,
+        sourceUrl: o.sourceUrl || o?.sourceMetadata?.sourceUrl || null,
+        validityPeriod: o.validityPeriod || o?.parsedFields?.validityPeriod || null,
+        travelPeriod: o.travelPeriod || o?.parsedFields?.travelPeriod || null,
+        parsedApplicablePlatforms: o.parsedApplicablePlatforms || o?.parsedFields?.parsedApplicablePlatforms || [],
+        offerCategories: o.offerCategories || o?.parsedFields?.offerCategories || []
+      }));
+
+    res.json({
+      collectionName,
+      totalDocs: docs.length,
+      candidateCount: candidates.length,
+      candidates
+    });
+  } catch (e) {
+    res.status(500).json({
+      error: e?.message || "generic candidates failed"
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
