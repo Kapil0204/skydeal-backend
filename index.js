@@ -5649,12 +5649,112 @@ app.get("/debug/payment-match-trace", async (req, res) => {
   }
 });
 
+app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  try {
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
+    const rulesCol = db.collection("offer_rules");
+    const now = new Date().toISOString();
+
+    const query = {
+      sourcePortal: "MakeMyTrip",
+      $or: [
+        { couponCode: { $in: ["HDFCEMI", "HDFCINTEMI"] } },
+        { code: { $in: ["HDFCEMI", "HDFCINTEMI"] } }
+      ]
+    };
+
+    const before = await rulesCol.find(query, {
+      projection: {
+        _id: 0,
+        title: 1,
+        code: 1,
+        couponCode: 1,
+        rawDiscount: 1,
+        discountPercent: 1,
+        flatDiscountAmount: 1,
+        maxDiscountAmount: 1,
+        minTransactionValue: 1,
+        pricingEligible: 1,
+        disabledFromPricing: 1,
+        disabledReason: 1,
+        reviewQueueReasons: 1,
+        validityPeriod: 1,
+        sourcePortal: 1,
+        sourceUrl: 1,
+        sourceMetadata: 1
+      }
+    }).toArray();
+
+    const result = await rulesCol.updateMany(query, {
+      $set: {
+        pricingEligible: false,
+        disabledFromPricing: true,
+        disabledAt: now,
+        disabledReason: "CAP_ONLY_UP_TO_OFFER_NOT_DETERMINISTIC",
+        offerKind: "conditional_payment_review",
+        "sourceMetadata.disabledFromPricing": true,
+        "sourceMetadata.disabledAt": now,
+        "sourceMetadata.disabledReason": "HDFC EMI MMT rows are cap-only / up-to offers without deterministic discount tier proof"
+      },
+      $addToSet: {
+        reviewQueueReasons: {
+          $each: [
+            "CAP_ONLY_UP_TO_OFFER",
+            "NOT_DETERMINISTIC_FOR_PRICING",
+            "REQUIRES_REPARSE_WITH_SOURCE_TIERS",
+            "DO_NOT_PRICE_UNTIL_MANUALLY_VERIFIED"
+          ]
+        }
+      }
+    });
+
+    const after = await rulesCol.find(query, {
+      projection: {
+        _id: 0,
+        title: 1,
+        code: 1,
+        couponCode: 1,
+        rawDiscount: 1,
+        discountPercent: 1,
+        flatDiscountAmount: 1,
+        maxDiscountAmount: 1,
+        minTransactionValue: 1,
+        pricingEligible: 1,
+        disabledFromPricing: 1,
+        disabledReason: 1,
+        reviewQueueReasons: 1,
+        validityPeriod: 1,
+        sourcePortal: 1,
+        sourceUrl: 1,
+        sourceMetadata: 1
+      }
+    }).toArray();
+
+    res.json({
+      ok: true,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      before,
+      after
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "disable MMT HDFC cap-only rules failed",
+      stack: e?.stack || null
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "expiry-validity-period-priority",
-    expectedCommit: "expiry-validity-period-priority",
-    deployedCheck: "If you see this, Render prioritizes validityPeriod.to over stale isExpired flags."
+    buildMarker: "disable-mmt-hdfc-cap-only-endpoint",
+    expectedCommit: "disable-mmt-hdfc-cap-only-endpoint",
+    deployedCheck: "If you see this, Render can disable unsafe MMT HDFC cap-only rows."
   });
 });
 
