@@ -2153,6 +2153,7 @@ function normalizeBankCanonicalAlias(value) {
   if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
   if (
     s === "PNB" ||
+    s === "PNB_BANK" ||
     s === "PUNJAB_NATIONAL" ||
     s === "PUNJAB_NATIONAL_BANK"
   ) {
@@ -5764,9 +5765,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "why-not-applied-respects-disabled-pricing",
-    expectedCommit: "why-not-applied-respects-disabled-pricing",
-    deployedCheck: "If you see this, /debug/why-not-applied respects disabled pricing flags."
+    buildMarker: "pnb-bank-canonical-alias-fix",
+    expectedCommit: "pnb-bank-canonical-alias-fix",
+    deployedCheck: "If you see this, Render normalizes PNB_BANK to PUNJAB_NATIONAL_BANK."
   });
 });
 
