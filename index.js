@@ -2076,7 +2076,9 @@ function extractOfferCardFamilyRestrictions(offer, pm = null) {
 
   if (/\bbusiness\s*platinum\b/.test(blob)) allowed.add("BUSINESS_PLATINUM");
   if (/\bplatinum\b/.test(blob)) allowed.add("PLATINUM");
-  if (/\bselect\b/.test(blob)) allowed.add("SELECT");
+  // Do not treat generic "select cards" wording as a hard card-family restriction.
+  // Example: "Applicable to select AU Small Finance Bank credit cards" means eligible cards,
+  // not a product family named SELECT.
   if (/\bsignature\b/.test(blob)) allowed.add("SIGNATURE");
   if (/\bgold\b/.test(blob)) allowed.add("GOLD");
 
@@ -5648,9 +5650,9 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "payment-match-trace-debug",
-    expectedCommit: "payment-match-trace-debug",
-    deployedCheck: "If you see this, Render can trace selected vs offer payment matching."
+    buildMarker: "remove-select-card-family-false-positive",
+    expectedCommit: "remove-select-card-family-false-positive",
+    deployedCheck: "If you see this, Render ignores generic select-card wording as a hard card-family restriction."
   });
 });
 
