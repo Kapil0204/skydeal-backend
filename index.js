@@ -5542,12 +5542,115 @@ app.post("/debug/force-repair-cleartrip-aucc-payment", async (req, res) => {
   }
 });
 
+app.get("/debug/payment-match-trace", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  try {
+    const portal = String(req.query.portal || "").trim();
+    const q = String(req.query.q || "").trim();
+    const bank = String(req.query.bank || "").trim();
+    const type = String(req.query.type || "").trim();
+    const tenureMonths = Number(req.query.tenureMonths || req.query.emiTenureMonths || 0);
+
+    if (!portal || !q || !bank || !type) {
+      return res.status(400).json({
+        error: "Missing required query params: portal, q, bank, type"
+      });
+    }
+
+    const selectedPaymentMethods = [{
+      type,
+      name: bank,
+      ...(Number.isFinite(tenureMonths) && tenureMonths > 0 ? { tenureMonths } : {})
+    }];
+
+    await getOffersCollection();
+    const col = await getOffersCollection();
+
+    const offers = await col.find(
+      {
+        $or: [
+          { sourcePortal: portal },
+          { "sourceMetadata.sourcePortal": portal }
+        ]
+      },
+      { projection: { _id: 0 } }
+    ).toArray();
+
+    const filteredOffers = offers.filter((o) => {
+      const blob = `${o?.title || ""} ${o?.rawDiscount || ""} ${o?.couponCode || o?.code || ""} ${o?.offerSummary?.headline || ""}`;
+      return blob.toLowerCase().includes(q.toLowerCase());
+    });
+
+    const selNorm = selectedPaymentMethods.map(normalizeSelectedPM).filter((x) => x.typeNorm);
+
+    const traces = filteredOffers.map((offer) => {
+      const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+      const offerNorm = offerPMs
+        .map((pm) => normalizeOfferPM(pm, offer))
+        .filter((x) => x.typeNorm);
+
+      const matches = [];
+
+      for (const s of selNorm) {
+        for (const o of offerNorm) {
+          matches.push({
+            selectedType: s.typeNorm,
+            offerType: o.typeNorm,
+            selectedBankCanonical: s.bankCanonical,
+            offerBankCanonical: o.bankCanonical,
+            typeEqual: s.typeNorm === o.typeNorm,
+            bankEqual: !!s.bankCanonical && !!o.bankCanonical && s.bankCanonical === o.bankCanonical,
+            tenureSelected: s.tenureMonths || null,
+            tenureAllowed: o.allowedTenures || null
+          });
+        }
+      }
+
+      return {
+        title: offer.title || null,
+        code: offer.couponCode || offer.code || null,
+        rawDiscount: offer.rawDiscount || null,
+        selectedPaymentMethods,
+        selNorm,
+        rawPaymentFields: {
+          paymentMethods: offer.paymentMethods || null,
+          eligiblePaymentMethods: offer.eligiblePaymentMethods || null,
+          parsedFieldsPaymentMethods: offer?.parsedFields?.paymentMethods || null,
+          parsedFieldsEligiblePaymentMethods: offer?.parsedFields?.eligiblePaymentMethods || null
+        },
+        extractedOfferPMs: offerPMs,
+        offerNorm,
+        matches,
+        offerMatchesSelectedPayment: offerMatchesSelectedPayment(offer, selectedPaymentMethods)
+      };
+    });
+
+    res.json({
+      ok: true,
+      portal,
+      q,
+      bank,
+      type,
+      selectedPaymentMethods,
+      count: traces.length,
+      traces
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "payment match trace failed",
+      stack: e?.stack || null
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "force-cleartrip-aucc-payment-repair",
-    expectedCommit: "force-cleartrip-aucc-payment-repair",
-    deployedCheck: "If you see this, Render can force-repair Cleartrip AUCC payment fields."
+    buildMarker: "payment-match-trace-debug",
+    expectedCommit: "payment-match-trace-debug",
+    deployedCheck: "If you see this, Render can trace selected vs offer payment matching."
   });
 });
 
