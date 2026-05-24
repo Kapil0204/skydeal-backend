@@ -692,6 +692,9 @@ function normalizeBankName(raw) {
     ["icici bank", "icici bank"],
     ["sbi", "state bank of india"],
     ["state bank of india", "state bank of india"],
+    ["pnb", "punjab national bank"],
+    ["punjab national", "punjab national bank"],
+    ["punjab national bank", "punjab national bank"],
     ["au small bank", "au small finance bank"],
     ["au small finance bank", "au small finance bank"],
   ]);
@@ -2137,6 +2140,13 @@ function normalizeBankCanonicalAlias(value) {
   if (s === "AMEX") return "AMERICAN_EXPRESS";
   if (s === "SBI" || s === "STATE_BANK") return "STATE_BANK_OF_INDIA";
   if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
+  if (
+    s === "PNB" ||
+    s === "PUNJAB_NATIONAL" ||
+    s === "PUNJAB_NATIONAL_BANK"
+  ) {
+    return "PUNJAB_NATIONAL_BANK";
+  }
 
   return s;
 }
@@ -5219,9 +5229,9 @@ app.get("/debug/offer-rules-audit-export", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "offer-rules-audit-export",
-    expectedCommit: "offer-rules-audit-export",
-    deployedCheck: "If you see this, Render has offer rules audit export enabled."
+    buildMarker: "pnb-bank-alias-normalization",
+    expectedCommit: "pnb-bank-alias-normalization",
+    deployedCheck: "If you see this, Render normalizes PNB / Punjab National Bank aliases."
   });
 });
 
