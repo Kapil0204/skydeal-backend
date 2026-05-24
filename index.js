@@ -2367,10 +2367,19 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           Array.isArray(o.allowedNetworks) &&
           o.allowedNetworks.length > 0
         ) {
-          if (!s.networkCanonical) {
+          const amexBankSatisfiesAmexNetwork =
+            s.bankCanonical === "AMERICAN_EXPRESS" &&
+            o.allowedNetworks.includes("AMERICAN_EXPRESS");
+
+          if (!s.networkCanonical && !amexBankSatisfiesAmexNetwork) {
             continue;
           }
-          if (!o.allowedNetworks.includes(s.networkCanonical)) {
+
+          if (
+            s.networkCanonical &&
+            !o.allowedNetworks.includes(s.networkCanonical) &&
+            !amexBankSatisfiesAmexNetwork
+          ) {
             continue;
           }
         }
@@ -5787,9 +5796,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "dbs-selected-bank-canonical-fix",
-    expectedCommit: "dbs-selected-bank-canonical-fix",
-    deployedCheck: "If you see this, Render normalizes DBS Bank correctly on selected payment matching."
+    buildMarker: "amex-emi-network-match-fix",
+    expectedCommit: "amex-emi-network-match-fix",
+    deployedCheck: "If you see this, Render allows American Express EMI to satisfy AMEX network restrictions."
   });
 });
 
