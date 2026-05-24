@@ -4322,6 +4322,15 @@ const selectedPaymentMethods =
     for (const offer of filteredOffers) {
       const failReasons = [];
 
+      const disabledForPricing =
+        offer?.pricingEligible === false ||
+        offer?.disabledFromPricing === true ||
+        offer?.sourceMetadata?.disabledFromPricing === true;
+
+      if (disabledForPricing) {
+        failReasons.push("DISABLED_FROM_PRICING");
+      }
+
       const flight = isFlightOffer(offer);
       if (flight) stats.isFlight++;
       else failReasons.push("NOT_FLIGHT_OFFER");
@@ -4403,6 +4412,9 @@ else failReasons.push("PAYMENT_MISMATCH");
           code: offer?.couponCode || offer?.code || null,
           couponCode: offer?.couponCode || offer?.code || null,
           rawDiscount: offer?.rawDiscount || null,
+          pricingEligible: offer?.pricingEligible ?? null,
+          disabledFromPricing: offer?.disabledFromPricing ?? offer?.sourceMetadata?.disabledFromPricing ?? null,
+          disabledReason: offer?.disabledReason || offer?.sourceMetadata?.disabledReason || null,
           discountPercent: offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? null,
           flatDiscountAmount: offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null,
           maxDiscountAmount: offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? null,
@@ -5752,9 +5764,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "disable-mmt-hdfc-cap-only-endpoint",
-    expectedCommit: "disable-mmt-hdfc-cap-only-endpoint",
-    deployedCheck: "If you see this, Render can disable unsafe MMT HDFC cap-only rows."
+    buildMarker: "why-not-applied-respects-disabled-pricing",
+    expectedCommit: "why-not-applied-respects-disabled-pricing",
+    deployedCheck: "If you see this, /debug/why-not-applied respects disabled pricing flags."
   });
 });
 
