@@ -5400,12 +5400,58 @@ app.post("/debug/repair-cleartrip-audit-rows", async (req, res) => {
   }
 });
 
+app.get("/debug/cleartrip-aucc-shape", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  try {
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
+    const rulesCol = db.collection("offer_rules");
+
+    const docs = await rulesCol.find({
+      sourcePortal: "Cleartrip",
+      $or: [
+        { code: "AUCC" },
+        { couponCode: "AUCC" }
+      ]
+    }).toArray();
+
+    res.json({
+      ok: true,
+      count: docs.length,
+      docs: docs.map((o) => ({
+        _id: String(o._id),
+        title: o.title || null,
+        code: o.code || null,
+        couponCode: o.couponCode || null,
+        rawDiscount: o.rawDiscount || null,
+        discountPercent: o.discountPercent ?? null,
+        maxDiscountAmount: o.maxDiscountAmount ?? null,
+        minTransactionValue: o.minTransactionValue ?? null,
+        offerCategories: o.offerCategories ?? null,
+        parsedFieldsOfferCategories: o?.parsedFields?.offerCategories ?? null,
+        paymentMethods: o.paymentMethods ?? null,
+        eligiblePaymentMethods: o.eligiblePaymentMethods ?? null,
+        parsedFieldsPaymentMethods: o?.parsedFields?.paymentMethods ?? null,
+        parsedFieldsEligiblePaymentMethods: o?.parsedFields?.eligiblePaymentMethods ?? null,
+        sourcePortal: o.sourcePortal || null,
+        sourceMetadata: o.sourceMetadata || null
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "cleartrip aucc shape debug failed"
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "cleartrip-audit-repair-endpoint",
-    expectedCommit: "cleartrip-audit-repair-endpoint",
-    deployedCheck: "If you see this, Render can repair Cleartrip audit rows."
+    buildMarker: "debug-cleartrip-aucc-shape",
+    expectedCommit: "debug-cleartrip-aucc-shape",
+    deployedCheck: "If you see this, Render can inspect Cleartrip AUCC DB shape."
   });
 });
 
