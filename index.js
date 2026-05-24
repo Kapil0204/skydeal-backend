@@ -5453,12 +5453,101 @@ app.get("/debug/cleartrip-aucc-shape", async (req, res) => {
   }
 });
 
+app.post("/debug/force-repair-cleartrip-aucc-payment", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  try {
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
+    const rulesCol = db.collection("offer_rules");
+    const now = new Date().toISOString();
+
+    const auPaymentMethod = {
+      type: "credit_card",
+      methodCanonical: "CREDIT_CARD",
+      bank: "AU Small Finance Bank",
+      bankCanonical: "AU_SMALL_FINANCE_BANK",
+      raw: "AU Small Finance Bank Credit Card",
+      network: null,
+      networkCanonical: null,
+      cardVariant: null,
+      emiOnly: false,
+      tenureMonths: [],
+      conditions: "Applicable to select AU Small Finance Bank credit cards"
+    };
+
+    const query = {
+      sourcePortal: "Cleartrip",
+      $or: [
+        { code: "AUCC" },
+        { couponCode: "AUCC" }
+      ]
+    };
+
+    const before = await rulesCol.find(query, {
+      projection: {
+        _id: 0,
+        title: 1,
+        code: 1,
+        couponCode: 1,
+        rawDiscount: 1,
+        paymentMethods: 1,
+        eligiblePaymentMethods: 1,
+        parsedFields: 1,
+        offerCategories: 1
+      }
+    }).toArray();
+
+    const result = await rulesCol.updateMany(query, {
+      $set: {
+        paymentMethods: [auPaymentMethod],
+        eligiblePaymentMethods: [auPaymentMethod],
+        "parsedFields.paymentMethods": [auPaymentMethod],
+        "parsedFields.eligiblePaymentMethods": [auPaymentMethod],
+        offerCategories: ["flight"],
+        "parsedFields.offerCategories": ["flight"],
+        repairAuccPaymentAt: now,
+        "sourceMetadata.repairAuccPaymentAt": now,
+        "sourceMetadata.repairReason": "Force repair Cleartrip AUCC payment fields for AU Small Finance Bank matching"
+      }
+    });
+
+    const after = await rulesCol.find(query, {
+      projection: {
+        _id: 0,
+        title: 1,
+        code: 1,
+        couponCode: 1,
+        rawDiscount: 1,
+        paymentMethods: 1,
+        eligiblePaymentMethods: 1,
+        parsedFields: 1,
+        offerCategories: 1
+      }
+    }).toArray();
+
+    res.json({
+      ok: true,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.modifiedCount,
+      before,
+      after
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "force repair cleartrip aucc payment failed",
+      stack: e?.stack || null
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "au-bank-short-alias-normalization",
-    expectedCommit: "au-bank-short-alias-normalization",
-    deployedCheck: "If you see this, Render normalizes AU / AU Bank / AU Small Finance Bank aliases."
+    buildMarker: "force-cleartrip-aucc-payment-repair",
+    expectedCommit: "force-cleartrip-aucc-payment-repair",
+    deployedCheck: "If you see this, Render can force-repair Cleartrip AUCC payment fields."
   });
 });
 
