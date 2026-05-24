@@ -1833,6 +1833,24 @@ if (applicableTier) {
 // Payment matching (robust)
 // --------------------
 function bankCanonicalFromAny(raw) {
+  const directBankAliasInput = String(raw || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (directBankAliasInput === "DBS" || directBankAliasInput === "DBS_BANK") {
+    return "DBS_BANK";
+  }
+
+  if (
+    directBankAliasInput === "SBI" ||
+    directBankAliasInput === "SBI_BANK" ||
+    directBankAliasInput === "STATE_BANK" ||
+    directBankAliasInput === "STATE_BANK_OF_INDIA"
+  ) {
+    return "STATE_BANK_OF_INDIA";
+  }
+
   const s = String(raw || "").toUpperCase().replace(/\s+/g, " ").trim();
 
   if (!s) return null;
@@ -5769,9 +5787,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "dbs-sbi-bank-canonical-alias-fix",
-    expectedCommit: "dbs-sbi-bank-canonical-alias-fix",
-    deployedCheck: "If you see this, Render normalizes DBS_BANK and SBI_BANK aliases."
+    buildMarker: "dbs-selected-bank-canonical-fix",
+    expectedCommit: "dbs-selected-bank-canonical-fix",
+    deployedCheck: "If you see this, Render normalizes DBS Bank correctly on selected payment matching."
   });
 });
 
