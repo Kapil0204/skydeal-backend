@@ -5116,12 +5116,112 @@ app.post("/debug/disable-dealpanti-pricing-rules", async (req, res) => {
   }
 });
 
+app.get("/debug/offer-rules-audit-export", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  try {
+    await getOffersCollection();
+    const db = _mongoClient.db(MONGODB_DB);
+    const rulesCol = db.collection("offer_rules");
+
+    const portalFilter = req.query.portal ? String(req.query.portal).toLowerCase() : null;
+    const includeDisabled = req.query.includeDisabled === "true";
+    const limit = Math.min(Number(req.query.limit || 200), 500);
+
+    const docs = await rulesCol.find({}, { projection: { _id: 0 } }).limit(limit).toArray();
+
+    const getPortal = (o) =>
+      o?.sourcePortal ||
+      o?.sourceMetadata?.sourcePortal ||
+      o?.portal ||
+      o?.parsedFields?.sourcePortal ||
+      "UNKNOWN";
+
+    const arr = (v) => Array.isArray(v) ? v : [];
+
+    const paymentSummary = (o) => {
+      const methods = arr(
+        o?.paymentMethods ||
+        o?.eligiblePaymentMethods ||
+        o?.parsedFields?.paymentMethods ||
+        o?.parsedFields?.eligiblePaymentMethods
+      );
+
+      return methods.map((m) => ({
+        type: m?.type || m?.method || m?.methodCanonical || null,
+        bank: m?.bank || m?.name || m?.bankCanonical || null,
+        network: m?.network || m?.networkCanonical || null,
+        tenureMonths: m?.tenureMonths || m?.tenure || null
+      }));
+    };
+
+    const rows = docs
+      .filter((o) => includeDisabled || o.pricingEligible !== false)
+      .filter((o) => !portalFilter || getPortal(o).toLowerCase() === portalFilter)
+      .map((o, idx) => {
+        const portal = getPortal(o);
+        const code = o?.couponCode || o?.code || o?.parsedFields?.couponCode || o?.parsedFields?.code || null;
+        const sourceUrl = o?.sourceUrl || o?.sourceMetadata?.sourceUrl || null;
+        const sourceFileName = o?.sourceFileName || o?.sourceMetadata?.sourceFileName || null;
+
+        return {
+          auditIndex: idx + 1,
+          portal,
+          title: o?.title || null,
+          code,
+          rawDiscount: o?.rawDiscount || o?.parsedFields?.rawDiscount || null,
+          discountPercent: o?.discountPercent ?? o?.parsedFields?.discountPercent ?? null,
+          flatDiscountAmount: o?.flatDiscountAmount ?? o?.parsedFields?.flatDiscountAmount ?? null,
+          maxDiscountAmount: o?.maxDiscountAmount ?? o?.parsedFields?.maxDiscountAmount ?? null,
+          minTransactionValue: o?.minTransactionValue ?? o?.parsedFields?.minTransactionValue ?? null,
+          discountTiers: o?.discountTiers || o?.parsedFields?.discountTiers || null,
+          offerKind: o?.offerKind || o?.parsedFields?.offerKind || null,
+          pricingEligible: o?.pricingEligible ?? null,
+          disabledFromPricing: o?.disabledFromPricing ?? false,
+          disabledReason: o?.disabledReason || null,
+          validityPeriod: o?.validityPeriod || o?.parsedFields?.validityPeriod || null,
+          travelPeriod: o?.travelPeriod || o?.parsedFields?.travelPeriod || null,
+          offerCategories: o?.offerCategories || o?.parsedFields?.offerCategories || [],
+          parsedApplicablePlatforms: o?.parsedApplicablePlatforms || o?.parsedFields?.parsedApplicablePlatforms || [],
+          paymentMethods: paymentSummary(o),
+          reviewQueueReasons: o?.reviewQueueReasons || o?.reviewReasons || [],
+          sourceUrl,
+          sourceFileName,
+          sourceMetadata: o?.sourceMetadata || null,
+          termsPreview: String(o?.terms || o?.parsedFields?.terms || "").slice(0, 500),
+          rawTextPreview: String(o?.rawText || o?.sourceRawText || "").slice(0, 700),
+          manualAuditVerdict: null,
+          manualAuditNotes: null
+        };
+      });
+
+    const byPortal = {};
+    for (const r of rows) byPortal[r.portal] = (byPortal[r.portal] || 0) + 1;
+
+    res.json({
+      ok: true,
+      dbName: MONGODB_DB,
+      collection: "offer_rules",
+      includeDisabled,
+      portalFilter,
+      totalReturned: rows.length,
+      byPortal,
+      rows
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e?.message || "offer rules audit export failed"
+    });
+  }
+});
+
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "disable-dealpanti-pricing-endpoint",
-    expectedCommit: "disable-dealpanti-pricing-endpoint",
-    deployedCheck: "If you see this, Render can disable DealPanti quiz reward rows from pricing."
+    buildMarker: "offer-rules-audit-export",
+    expectedCommit: "offer-rules-audit-export",
+    deployedCheck: "If you see this, Render has offer rules audit export enabled."
   });
 });
 
