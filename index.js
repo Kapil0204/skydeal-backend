@@ -684,6 +684,7 @@ function normalizeBankName(raw) {
   const map = new Map([
     ["hdfc", "hdfc bank"],
     ["hdfc bank", "hdfc bank"],
+    ["au", "au small finance bank"],
     ["axis", "axis bank"],
     ["axis bank", "axis bank"],
     ["federal", "federal bank"],
@@ -2123,7 +2124,13 @@ function normalizeBankCanonicalAlias(value) {
 
   if (!s) return null;
 
-  if (s === "AU_BANK" || s === "AU_SMALL_BANK" || s === "AU_SMALL_FINANCE") {
+  if (
+    s === "AU" ||
+    s === "AU_BANK" ||
+    s === "AU_SMALL_BANK" ||
+    s === "AU_SMALL_FINANCE" ||
+    s === "AU_SMALL_FINANCE_BANK"
+  ) {
     return "AU_SMALL_FINANCE_BANK";
   }
 
@@ -5449,9 +5456,9 @@ app.get("/debug/cleartrip-aucc-shape", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "debug-cleartrip-aucc-shape",
-    expectedCommit: "debug-cleartrip-aucc-shape",
-    deployedCheck: "If you see this, Render can inspect Cleartrip AUCC DB shape."
+    buildMarker: "au-bank-short-alias-normalization",
+    expectedCommit: "au-bank-short-alias-normalization",
+    deployedCheck: "If you see this, Render normalizes AU / AU Bank / AU Small Finance Bank aliases."
   });
 });
 
