@@ -693,6 +693,9 @@ function normalizeBankName(raw) {
     ["icici bank", "icici bank"],
     ["sbi", "state bank of india"],
     ["state bank of india", "state bank of india"],
+    ["sbi bank", "state bank of india"],
+    ["dbs", "dbs bank"],
+    ["dbs bank", "dbs bank"],
     ["pnb", "punjab national bank"],
     ["punjab national", "punjab national bank"],
     ["punjab national bank", "punjab national bank"],
@@ -2149,7 +2152,8 @@ function normalizeBankCanonicalAlias(value) {
   }
 
   if (s === "AMEX") return "AMERICAN_EXPRESS";
-  if (s === "SBI" || s === "STATE_BANK") return "STATE_BANK_OF_INDIA";
+  if (s === "SBI" || s === "SBI_BANK" || s === "STATE_BANK") return "STATE_BANK_OF_INDIA";
+  if (s === "DBS" || s === "DBS_BANK") return "DBS_BANK";
   if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
   if (
     s === "PNB" ||
@@ -5765,9 +5769,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "pnb-bank-canonical-alias-fix",
-    expectedCommit: "pnb-bank-canonical-alias-fix",
-    deployedCheck: "If you see this, Render normalizes PNB_BANK to PUNJAB_NATIONAL_BANK."
+    buildMarker: "dbs-sbi-bank-canonical-alias-fix",
+    expectedCommit: "dbs-sbi-bank-canonical-alias-fix",
+    deployedCheck: "If you see this, Render normalizes DBS_BANK and SBI_BANK aliases."
   });
 });
 
