@@ -1241,8 +1241,6 @@ function getPassengerRestrictionResult(offer, passengers = 1) {
 }
 
 function isOfferExpired(offer) {
-  if (typeof offer?.isExpired === "boolean") return offer.isExpired;
-
   const toDate =
     offer?.validityPeriod?.to ||
     offer?.parsedFields?.validityPeriod?.to ||
@@ -1283,6 +1281,10 @@ function isOfferExpired(offer) {
       return end.getTime() < today.getTime();
     }
   }
+
+  // If structured validity exists but cannot be parsed, do not allow stale isExpired:false to override it.
+  // Otherwise, after structured validity check, fall back to explicit boolean only when no structured end date exists.
+  if (typeof offer?.isExpired === "boolean") return offer.isExpired;
 
   // 2) If no structured validity exists, only trust text fallback
   const blobs = [];
@@ -5650,9 +5652,9 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "remove-select-card-family-false-positive",
-    expectedCommit: "remove-select-card-family-false-positive",
-    deployedCheck: "If you see this, Render ignores generic select-card wording as a hard card-family restriction."
+    buildMarker: "expiry-validity-period-priority",
+    expectedCommit: "expiry-validity-period-priority",
+    deployedCheck: "If you see this, Render prioritizes validityPeriod.to over stale isExpired flags."
   });
 });
 
