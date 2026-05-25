@@ -696,6 +696,8 @@ function normalizeBankName(raw) {
     ["sbi bank", "state bank of india"],
     ["dbs", "dbs bank"],
     ["dbs bank", "dbs bank"],
+    ["hsbc", "hsbc bank"],
+    ["hsbc bank", "hsbc bank"],
     ["pnb", "punjab national bank"],
     ["punjab national", "punjab national bank"],
     ["punjab national bank", "punjab national bank"],
@@ -1842,6 +1844,10 @@ function bankCanonicalFromAny(raw) {
     return "DBS_BANK";
   }
 
+  if (directBankAliasInput === "HSBC" || directBankAliasInput === "HSBC_BANK") {
+    return "HSBC_BANK";
+  }
+
   if (
     directBankAliasInput === "SBI" ||
     directBankAliasInput === "SBI_BANK" ||
@@ -2172,6 +2178,7 @@ function normalizeBankCanonicalAlias(value) {
   if (s === "AMEX") return "AMERICAN_EXPRESS";
   if (s === "SBI" || s === "SBI_BANK" || s === "STATE_BANK") return "STATE_BANK_OF_INDIA";
   if (s === "DBS" || s === "DBS_BANK") return "DBS_BANK";
+  if (s === "HSBC" || s === "HSBC_BANK") return "HSBC_BANK";
   if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
   if (
     s === "PNB" ||
@@ -5823,9 +5830,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "raw-discount-route-scope-priority",
-    expectedCommit: "raw-discount-route-scope-priority",
-    deployedCheck: "If you see this, Render prioritizes row-level rawDiscount for domestic/international scope."
+    buildMarker: "hsbc-bank-canonical-alias-fix",
+    expectedCommit: "hsbc-bank-canonical-alias-fix",
+    deployedCheck: "If you see this, Render normalizes HSBC / HSBC_BANK aliases."
   });
 });
 
