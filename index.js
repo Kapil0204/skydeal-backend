@@ -119,10 +119,14 @@ function normalizeCabin(travelClass) {
 }
 
 function normalizeCabinShort(cabin) {
-  const c = String(cabin || "Economy");
-  if (c === "Premium_Economy") return "premium";
-  if (c === "Business") return "business";
-  if (c === "First") return "first";
+  const c = String(cabin || "Economy")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (c === "premium_economy" || c === "premium") return "premium";
+  if (c === "business") return "business";
+  if (c === "first" || c === "first_class") return "first";
   return "economy";
 }
 
@@ -5830,9 +5834,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "hsbc-bank-canonical-alias-fix",
-    expectedCommit: "hsbc-bank-canonical-alias-fix",
-    deployedCheck: "If you see this, Render normalizes HSBC / HSBC_BANK aliases."
+    buildMarker: "case-insensitive-cabin-normalization",
+    expectedCommit: "case-insensitive-cabin-normalization",
+    deployedCheck: "If you see this, Render handles lowercase business/premium/first cabin values."
   });
 });
 
