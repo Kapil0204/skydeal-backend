@@ -4324,7 +4324,12 @@ app.get("/debug/why-not-applied", async (req, res) => {
     const debugIsDomestic =
       from && to
         ? isDomesticRoute(from, to)
-        : true;
+        : String(req.query.isDomestic || "").toLowerCase() === "false"
+          ? false
+          : true;
+
+    const debugCabin = normalizeCabin(req.query.travelClass || req.query.cabin || "Economy");
+
 const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
     if (!portal) {
@@ -4422,7 +4427,7 @@ const selectedPaymentMethods =
       if (pMatch) stats.portalMatch++;
       else failReasons.push("PORTAL_MISMATCH");
 
-      const scope = offerScopeMatchesTrip(offer, debugIsDomestic, "Economy");
+      const scope = offerScopeMatchesTrip(offer, debugIsDomestic, debugCabin);
       const roundTripBlocked = offerRequiresRoundTrip(offer);
 if (roundTripBlocked) failReasons.push("ROUND_TRIP_ONLY");
       
@@ -4482,6 +4487,8 @@ else failReasons.push("PAYMENT_MISMATCH");
           code: offer?.couponCode || offer?.code || null,
           couponCode: offer?.couponCode || offer?.code || null,
           rawDiscount: offer?.rawDiscount || null,
+          debugCabin,
+          debugIsDomestic,
           pricingEligible: offer?.pricingEligible ?? null,
           disabledFromPricing: offer?.disabledFromPricing ?? offer?.sourceMetadata?.disabledFromPricing ?? null,
           disabledReason: offer?.disabledReason || offer?.sourceMetadata?.disabledReason || null,
@@ -5834,9 +5841,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "case-insensitive-cabin-normalization",
-    expectedCommit: "case-insensitive-cabin-normalization",
-    deployedCheck: "If you see this, Render handles lowercase business/premium/first cabin values."
+    buildMarker: "debug-why-not-applied-travel-class",
+    expectedCommit: "debug-why-not-applied-travel-class",
+    deployedCheck: "If you see this, /debug/why-not-applied accepts travelClass/cabin."
   });
 });
 
