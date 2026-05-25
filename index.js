@@ -3793,8 +3793,17 @@ function isJunkInfoOffer(offer) {
 
   const blob = `${title} ${rawDiscount}`;
 
-  // Remove card-tier noise
-  if (/(rupay|platinum|select|corporate|business)/i.test(blob)) return true;
+  // Remove card-tier noise, but do NOT treat "Business Class Flights" as junk.
+  // Business-class flight offers are valid pricing rows.
+  const isBusinessClassFlightOffer =
+    /\bbusiness\s+class\b/i.test(blob) &&
+    /\bflight(s)?\b/i.test(blob);
+
+  if (/(rupay|platinum|select|corporate)/i.test(blob)) return true;
+
+  if (/\bbusiness\b/i.test(blob) && !isBusinessClassFlightOffer) {
+    return true;
+  }
 
   // Remove generic "all cards" noise
   if (/(all cards|all users|all customers)/i.test(blob)) return true;
@@ -5841,9 +5850,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "debug-why-not-applied-travel-class",
-    expectedCommit: "debug-why-not-applied-travel-class",
-    deployedCheck: "If you see this, /debug/why-not-applied accepts travelClass/cabin."
+    buildMarker: "allow-business-class-flight-offers",
+    expectedCommit: "allow-business-class-flight-offers",
+    deployedCheck: "If you see this, Render allows valid Business Class flight offers through pricing filters."
   });
 });
 
