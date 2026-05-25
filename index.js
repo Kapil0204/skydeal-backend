@@ -2723,7 +2723,32 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 
   const combined = `${core} ${catBlob}`.trim();
 
-  // Prefer title/rawDiscount for route scope before noisier summaries/terms.
+  // Prefer row-level rawDiscount route scope before generic title text.
+  // Some pages have generic titles like "domestic & international flights",
+  // while each row/slab has the actual scope in rawDiscount.
+  // Example: OneCard has the same title for domestic + international rows,
+  // but rawDiscount says "on Domestic Flights" or "on International Flights".
+  const rawDiscountCore = normalizeText(rawDiscount);
+
+  const rawDiscountMentionsDomesticFlights =
+    /\bdomestic\s+flight(s)?\b/.test(rawDiscountCore) ||
+    (/\bdomestic\b/.test(rawDiscountCore) && /\bflight(s)?\b/.test(rawDiscountCore));
+
+  const rawDiscountMentionsInternationalFlights =
+    /\binternational\s+flight(s)?\b/.test(rawDiscountCore) ||
+    (/\binternational\b/.test(rawDiscountCore) && /\bflight(s)?\b/.test(rawDiscountCore));
+
+  if (isDomestic) {
+    if (rawDiscountMentionsInternationalFlights && !rawDiscountMentionsDomesticFlights) {
+      return false;
+    }
+  } else {
+    if (rawDiscountMentionsDomesticFlights && !rawDiscountMentionsInternationalFlights) {
+      return false;
+    }
+  }
+
+  // Fall back to title + rawDiscount only when rawDiscount itself did not give a clear one-way route scope.
   const titleDiscountCore = normalizeText(`${title} ${rawDiscount}`);
   const strictMentionsDomesticFlights =
     /\bdomestic\s+flight(s)?\b/.test(titleDiscountCore) ||
@@ -2733,13 +2758,15 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
     /\binternational\s+flight(s)?\b/.test(titleDiscountCore) ||
     (/\binternational\b/.test(titleDiscountCore) && /\bflight(s)?\b/.test(titleDiscountCore));
 
-  if (isDomestic) {
-    if (strictMentionsInternationalFlights && !strictMentionsDomesticFlights) {
-      return false;
-    }
-  } else {
-    if (strictMentionsDomesticFlights && !strictMentionsInternationalFlights) {
-      return false;
+  if (!rawDiscountMentionsDomesticFlights && !rawDiscountMentionsInternationalFlights) {
+    if (isDomestic) {
+      if (strictMentionsInternationalFlights && !strictMentionsDomesticFlights) {
+        return false;
+      }
+    } else {
+      if (strictMentionsDomesticFlights && !strictMentionsInternationalFlights) {
+        return false;
+      }
     }
   }
 
@@ -5796,9 +5823,9 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "amex-emi-network-match-fix",
-    expectedCommit: "amex-emi-network-match-fix",
-    deployedCheck: "If you see this, Render allows American Express EMI to satisfy AMEX network restrictions."
+    buildMarker: "raw-discount-route-scope-priority",
+    expectedCommit: "raw-discount-route-scope-priority",
+    deployedCheck: "If you see this, Render prioritizes row-level rawDiscount for domestic/international scope."
   });
 });
 
