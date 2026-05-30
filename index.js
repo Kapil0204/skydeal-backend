@@ -2826,6 +2826,7 @@ const MANUAL_MMT_CABIN_SCOPE_OVERRIDES = {
   MMTBOI: ["economy"],
   MMTBOIINT: ["economy"],
   MMTDBSINTEMI: ["economy"],
+  MMTONECARDIFEMI: ["economy"],
   MMTONECARDINTEMI: ["economy"],
 
   // Verified by manual MMT test: domestic OneCard EMI worked for both economy and business.
