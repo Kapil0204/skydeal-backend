@@ -3962,7 +3962,11 @@ async function applyOffersToFlight(
 
     const portalPrices = OTAS.map((portal) => {
     const portalBase = Math.round(base);
-    const eligibilityAmount = Math.round(portalBase * Math.max(1, Number(passengers) || 1));
+
+    // FlightAPI/search result price is already the booking-level price for the requested passenger count.
+    // Do not multiply by passengers again for min-transaction eligibility, or high-minimum offers
+    // such as MMTONECARDINTEMI can incorrectly apply to multi-passenger bookings.
+    const eligibilityAmount = portalBase;
 
   const matchingCandidates = [];
 
