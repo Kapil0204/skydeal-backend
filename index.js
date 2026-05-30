@@ -2819,6 +2819,57 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 
   return true;
 }
+
+const MANUAL_MMT_CABIN_SCOPE_OVERRIDES = {
+  // Manually verified on MakeMyTrip checkout, May 2026.
+  // Important: MMT sometimes restricts flight coupons to Economy even when source offer text does not mention cabin/class.
+  MMTBOI: ["economy"],
+  MMTBOIINT: ["economy"],
+  MMTDBSINTEMI: ["economy"],
+  MMTONECARDINTEMI: ["economy"],
+
+  // Verified by manual MMT test: domestic OneCard EMI worked for both economy and business.
+  MMTONECARDEMI: ["economy", "business"],
+};
+
+function getOfferCodeForCabinScope(offer = {}) {
+  return String(
+    offer?.couponCode ||
+    offer?.code ||
+    offer?.rawFields?.couponCode ||
+    offer?.parsedFields?.couponCode ||
+    ""
+  ).trim().toUpperCase();
+}
+
+function offerMatchesManualCabinScope(offer, cabin) {
+  const code = getOfferCodeForCabinScope(offer);
+  const allowedCabins = MANUAL_MMT_CABIN_SCOPE_OVERRIDES[code];
+
+  if (!allowedCabins) {
+    return { ok: true };
+  }
+
+  const selectedCabin = normalizeCabinShort(cabin || "Economy");
+
+  if (allowedCabins.includes(selectedCabin)) {
+    return {
+      ok: true,
+      code,
+      selectedCabin,
+      allowedCabins,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "CABIN_CLASS_MISMATCH",
+    code,
+    selectedCabin,
+    allowedCabins,
+  };
+}
+
 function getBestVariantPerCoupon(offers) {
   const byCoupon = {};
 
@@ -3202,6 +3253,15 @@ if (
   const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
   if (!kindInfo.kind) {
     return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
+  }
+
+  const manualCabinScope = offerMatchesManualCabinScope(offer, cabin);
+  if (!manualCabinScope.ok) {
+    return {
+      ok: false,
+      reasons: [manualCabinScope.reason || "CABIN_CLASS_MISMATCH"],
+      manualCabinScope,
+    };
   }
 
   const minTxn = getMinTxnValue(offer);
