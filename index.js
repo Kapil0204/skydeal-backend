@@ -2823,14 +2823,30 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
 const MANUAL_MMT_CABIN_SCOPE_OVERRIDES = {
   // Manually verified on MakeMyTrip checkout, May 2026.
   // Important: MMT sometimes restricts flight coupons to Economy even when source offer text does not mention cabin/class.
-  MMTBOI: ["economy"],
-  MMTBOIINT: ["economy"],
-  MMTDBSINTEMI: ["economy"],
-  MMTONECARDIFEMI: ["economy"],
-  MMTONECARDINTEMI: ["economy"],
+  MMTBOI: {
+    default: ["economy"],
+  },
+  MMTBOIINT: {
+    default: ["economy"],
+  },
+  MMTDBSINTEMI: {
+    default: ["economy"],
+  },
+  MMTONECARDIFEMI: {
+    default: ["economy"],
+  },
+  MMTONECARDINTEMI: {
+    default: ["economy"],
+  },
 
-  // Verified by manual MMT test: domestic OneCard EMI worked for both economy and business.
-  MMTONECARDEMI: ["economy", "business"],
+  // Verified:
+  // - Domestic OneCard EMI worked for economy and business.
+  // - International OneCard business did not work in manual MMT checkout testing.
+  // Therefore this coupon is route-aware, not globally business-eligible.
+  MMTONECARDEMI: {
+    domestic: ["economy", "business"],
+    international: ["economy"],
+  },
 };
 
 function getOfferCodeForCabinScope(offer = {}) {
@@ -2843,15 +2859,25 @@ function getOfferCodeForCabinScope(offer = {}) {
   ).trim().toUpperCase();
 }
 
-function offerMatchesManualCabinScope(offer, cabin) {
+function offerMatchesManualCabinScope(offer, cabin, isDomestic = true) {
   const code = getOfferCodeForCabinScope(offer);
-  const allowedCabins = MANUAL_MMT_CABIN_SCOPE_OVERRIDES[code];
+  const override = MANUAL_MMT_CABIN_SCOPE_OVERRIDES[code];
 
-  if (!allowedCabins) {
+  if (!override) {
     return { ok: true };
   }
 
   const selectedCabin = normalizeCabinShort(cabin || "Economy");
+  const routeKey = isDomestic ? "domestic" : "international";
+
+  const allowedCabins =
+    override[routeKey] ||
+    override.default ||
+    null;
+
+  if (!Array.isArray(allowedCabins) || allowedCabins.length === 0) {
+    return { ok: true };
+  }
 
   if (allowedCabins.includes(selectedCabin)) {
     return {
@@ -2859,6 +2885,7 @@ function offerMatchesManualCabinScope(offer, cabin) {
       code,
       selectedCabin,
       allowedCabins,
+      routeKey,
     };
   }
 
@@ -2868,6 +2895,7 @@ function offerMatchesManualCabinScope(offer, cabin) {
     code,
     selectedCabin,
     allowedCabins,
+    routeKey,
   };
 }
 
@@ -3256,7 +3284,7 @@ if (
     return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
   }
 
-  const manualCabinScope = offerMatchesManualCabinScope(offer, cabin);
+  const manualCabinScope = offerMatchesManualCabinScope(offer, cabin, isDomestic);
   if (!manualCabinScope.ok) {
     return {
       ok: false,
