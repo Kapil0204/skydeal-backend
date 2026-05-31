@@ -4191,8 +4191,10 @@ return {
   explain: best
     ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
     : null,
-       infoOffers: cleanInfoOffers([
-  ...buildInfoOffersForPortal(
+       infoOffers: (() => {
+  const buildInfoStart = Date.now();
+
+  const builtInfoOffers = buildInfoOffersForPortal(
     offers,
     portal,
     selectedPaymentMethods,
@@ -4204,37 +4206,63 @@ return {
       best?.offer?.parsedFields?.code ||
       null,
     5
-  ),
+  );
 
-  ...otherMatchedOffersClean.map((row) => ({
-    title: row.offer?.title || null,
-    couponCode:
-      row.offer?.couponCode ||
-      row.offer?.code ||
-      row.offer?.parsedFields?.couponCode ||
-      row.offer?.parsedFields?.code ||
-      null,
-    rawDiscount: row.offer?.rawDiscount || null,
-    infoLabel: "Applicable offer",
-  })),
+  if (pricingTiming) {
+    pricingTiming.buildInfoOffersMs = (pricingTiming.buildInfoOffersMs || 0) + (Date.now() - buildInfoStart);
+  }
 
-  ...nonAppliedButRelevantOffers.map((offer) => ({
-    title: offer?.title || null,
-    couponCode:
-      offer?.couponCode ||
-      offer?.code ||
-      offer?.parsedFields?.couponCode ||
-      offer?.parsedFields?.code ||
-      null,
-    rawDiscount: offer?.rawDiscount || null,
-    infoLabel: hasExplicitOfferPaymentMethods(offer)
-      ? "Requires different card/payment"
-      : "Available on this portal",
-  }))
-], 5),
-  debugCounts: {
-  offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
-},
+  const cleanInfoStart = Date.now();
+
+  const cleanedInfoOffers = cleanInfoOffers([
+    ...builtInfoOffers,
+
+    ...otherMatchedOffersClean.map((row) => ({
+      title: row.offer?.title || null,
+      couponCode:
+        row.offer?.couponCode ||
+        row.offer?.code ||
+        row.offer?.parsedFields?.couponCode ||
+        row.offer?.parsedFields?.code ||
+        null,
+      rawDiscount: row.offer?.rawDiscount || null,
+      infoLabel: "Applicable offer",
+    })),
+
+    ...nonAppliedButRelevantOffers.map((offer) => ({
+      title: offer?.title || null,
+      couponCode:
+        offer?.couponCode ||
+        offer?.code ||
+        offer?.parsedFields?.couponCode ||
+        offer?.parsedFields?.code ||
+        null,
+      rawDiscount: offer?.rawDiscount || null,
+      infoLabel: hasExplicitOfferPaymentMethods(offer)
+        ? "Requires different card/payment"
+        : "Available on this portal",
+    }))
+  ], 5);
+
+  if (pricingTiming) {
+    pricingTiming.cleanInfoOffersMs = (pricingTiming.cleanInfoOffersMs || 0) + (Date.now() - cleanInfoStart);
+  }
+
+  return cleanedInfoOffers;
+})(),
+  debugCounts: (() => {
+  const debugCountsStart = Date.now();
+
+  const out = {
+    offersForPortal: offers.filter((o) => offerAppliesToPortal(o, portal)).length,
+  };
+
+  if (pricingTiming) {
+    pricingTiming.debugCountsMs = (pricingTiming.debugCountsMs || 0) + (Date.now() - debugCountsStart);
+  }
+
+  return out;
+})(),
 };
 
   });
