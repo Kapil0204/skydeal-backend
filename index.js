@@ -3955,12 +3955,21 @@ async function applyOffersToFlight(
   passengers = 1,
   cabin = "Economy",
   tripType = "one-way",
-  isDomestic = true
+  isDomestic = true,
+  pricingTiming = null
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
+
+  if (pricingTiming) {
+    pricingTiming.flightsPriced = (pricingTiming.flightsPriced || 0) + 1;
+  }
     
 
     const portalPrices = OTAS.map((portal) => {
+    if (pricingTiming) {
+      pricingTiming.portalRowsPriced = (pricingTiming.portalRowsPriced || 0) + 1;
+    }
+
     const portalBase = Math.round(base);
 
     // FlightAPI/search result price is already the booking-level price for the requested passenger count.
@@ -3969,7 +3978,7 @@ async function applyOffersToFlight(
     const eligibilityAmount = portalBase;
 
   const matchingCandidates = [];
-
+  const candidateScanStart = Date.now();
 
 for (const offer of offers) {
   if (!isDeterministicPortalPricingOffer(offer) && isJunkInfoOffer(offer)) continue;
@@ -4054,6 +4063,10 @@ for (const offer of offers) {
         maxDiscountAmount: ev.maxDiscountAmount ?? null,
       });
     }
+    if (pricingTiming) {
+      pricingTiming.candidateScanMs = (pricingTiming.candidateScanMs || 0) + (Date.now() - candidateScanStart);
+      pricingTiming.candidateEvaluations = (pricingTiming.candidateEvaluations || 0) + offers.length;
+    }
 
        matchingCandidates.sort((a, b) => {
       if (a.finalPrice !== b.finalPrice) return a.finalPrice - b.finalPrice;
@@ -4073,6 +4086,7 @@ for (const offer of offers) {
     const otherMatchedOffers = matchingCandidates.slice(1);
       // ADD THIS BLOCK
 
+const nonAppliedStart = Date.now();
 const nonAppliedButRelevantOffers = offers
   .filter((offer) => {
     if (!isFlightOffer(offer)) return false;
@@ -4104,6 +4118,12 @@ const nonAppliedButRelevantOffers = offers
     });
   })
   .slice(0, 5); // limit
+
+if (pricingTiming) {
+  pricingTiming.nonAppliedRelevantMs = (pricingTiming.nonAppliedRelevantMs || 0) + (Date.now() - nonAppliedStart);
+  pricingTiming.nonAppliedRelevantScans = (pricingTiming.nonAppliedRelevantScans || 0) + offers.length;
+}
+
 const matchedPaymentLabel =
   best && best.offerKind === "payment"
     ? (getMatchedSelectedPaymentLabel(best.offer, selectedPaymentMethods) || null)
@@ -6358,7 +6378,8 @@ meta.mongoDb = MONGODB_DB;
           adults,
           cabin,
           tripType,
-          routeIsDomestic
+          routeIsDomestic,
+          timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {})
         )
       );
     }
@@ -6406,7 +6427,8 @@ meta.mongoDb = MONGODB_DB;
             adults,
             cabin,
             tripType,
-            returnRouteIsDomestic
+            returnRouteIsDomestic,
+            timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {})
           )
         );
       }
