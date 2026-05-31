@@ -39,6 +39,10 @@ const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 // Feature flags
 const ENABLE_ESTIMATED_DISCOUNTS =
   String(process.env.ENABLE_ESTIMATED_DISCOUNTS || "false").toLowerCase() === "true";
+
+const OFFERS_CACHE_TTL_MS = Number(process.env.OFFERS_CACHE_TTL_MS || 60000);
+let offersCacheData = null;
+let offersCacheLoadedAt = 0;
 // --------------------
 // Route geography helpers
 // --------------------
@@ -6400,6 +6404,35 @@ function slimPortalPriceForSearchResponse(row) {
   };
 }
 
+
+async function getOffersForSearch(meta = {}) {
+  const now = Date.now();
+  const cacheAgeMs = offersCacheData ? now - offersCacheLoadedAt : null;
+  const cacheValid =
+    Array.isArray(offersCacheData) &&
+    cacheAgeMs !== null &&
+    cacheAgeMs >= 0 &&
+    cacheAgeMs < OFFERS_CACHE_TTL_MS;
+
+  if (cacheValid) {
+    meta.offersCache = "hit";
+    meta.offersCacheAgeMs = cacheAgeMs;
+    return offersCacheData;
+  }
+
+  const col = await getOffersCollection();
+  const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+
+  offersCacheData = offers;
+  offersCacheLoadedAt = now;
+
+  meta.offersCache = "miss";
+  meta.offersCacheAgeMs = 0;
+  meta.offersCacheTtlMs = OFFERS_CACHE_TTL_MS;
+
+  return offers;
+}
+
 function slimFlightForSearchResponse(flight) {
   if (!flight || typeof flight !== "object") return flight || null;
 
@@ -6463,10 +6496,9 @@ meta.mongoDb = MONGODB_DB;
       });
     }
 
-    // Load offers ONCE per request
+    // Load offers ONCE per request, using a short in-memory cache
     const mongoStart = Date.now();
-        const col = await getOffersCollection();
-    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    const offers = await getOffersForSearch(meta);
     timings.mongoOffersMs = Date.now() - mongoStart;
     meta.offersLoaded = offers.length;
 
