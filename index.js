@@ -3956,7 +3956,8 @@ async function applyOffersToFlight(
   cabin = "Economy",
   tripType = "one-way",
   isDomestic = true,
-  pricingTiming = null
+  pricingTiming = null,
+  requestCache = null
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -4194,19 +4195,48 @@ return {
        infoOffers: (() => {
   const buildInfoStart = Date.now();
 
-  const builtInfoOffers = buildInfoOffersForPortal(
-    offers,
+  const excludedInfoCode =
+    best?.offer?.couponCode ||
+    best?.offer?.code ||
+    best?.offer?.parsedFields?.couponCode ||
+    best?.offer?.parsedFields?.code ||
+    null;
+
+  const infoCacheKey = JSON.stringify({
     portal,
-    selectedPaymentMethods,
+    payment: selectedPaymentMethods,
     cabin,
     isDomestic,
-    best?.offer?.couponCode ||
-      best?.offer?.code ||
-      best?.offer?.parsedFields?.couponCode ||
-      best?.offer?.parsedFields?.code ||
-      null,
-    5
-  );
+    excludedInfoCode
+  });
+
+  const infoCache = requestCache?.infoOffersByKey;
+
+  let builtInfoOffers;
+  if (infoCache && infoCache.has(infoCacheKey)) {
+    builtInfoOffers = infoCache.get(infoCacheKey);
+    if (pricingTiming) {
+      pricingTiming.buildInfoOffersCacheHits = (pricingTiming.buildInfoOffersCacheHits || 0) + 1;
+    }
+  } else {
+    builtInfoOffers = buildInfoOffersForPortal(
+      offers,
+      portal,
+      selectedPaymentMethods,
+      cabin,
+      isDomestic,
+      excludedInfoCode,
+      5
+    );
+
+    if (infoCache) {
+      infoCache.set(infoCacheKey, builtInfoOffers);
+    }
+
+    if (pricingTiming) {
+      pricingTiming.buildInfoOffersCacheMisses = (pricingTiming.buildInfoOffersCacheMisses || 0) + 1;
+    }
+  }
 
   if (pricingTiming) {
     pricingTiming.buildInfoOffersMs = (pricingTiming.buildInfoOffersMs || 0) + (Date.now() - buildInfoStart);
@@ -6309,6 +6339,9 @@ app.post("/search", async (req, res) => {
   const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {} };
   const searchStartedAt = Date.now();
   const timings = {};
+  const offerPricingRequestCache = {
+    infoOffersByKey: new Map()
+  };
 
   try {
     const from = String(body.from || "").trim().toUpperCase();
@@ -6407,7 +6440,8 @@ meta.mongoDb = MONGODB_DB;
           cabin,
           tripType,
           routeIsDomestic,
-          timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {})
+          timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
+          offerPricingRequestCache
         )
       );
     }
@@ -6456,7 +6490,8 @@ meta.mongoDb = MONGODB_DB;
             cabin,
             tripType,
             returnRouteIsDomestic,
-            timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {})
+            timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
+            offerPricingRequestCache
           )
         );
       }
