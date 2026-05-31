@@ -6332,7 +6332,9 @@ meta.mongoDb = MONGODB_DB;
       keptWithCarrierPrice: outFlightsRaw.length,
       skippedWithoutCarrierPrice:
         (Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0) - outFlightsRaw.length,
-      debug: getFlightApiCarrierDebug(outRes.data)
+      ...(String(process.env.INCLUDE_FLIGHTAPI_DEBUG_META || "false").toLowerCase() === "true"
+        ? { debug: getFlightApiCarrierDebug(outRes.data) }
+        : {})
     };
 
     const routeIsDomestic = isDomesticRoute(from, to);
