@@ -4039,6 +4039,7 @@ for (const offer of offers) {
     continue;
   }
 
+  const evaluateStart = Date.now();
   const ev = evaluateOfferForFlight({
     offer,
     portal,
@@ -4052,6 +4053,11 @@ for (const offer of offers) {
     passengers,
     allOffers: offers,
   });
+
+  if (pricingTiming) {
+    pricingTiming.evaluateOfferMs = (pricingTiming.evaluateOfferMs || 0) + (Date.now() - evaluateStart);
+    pricingTiming.evaluateOfferCalls = (pricingTiming.evaluateOfferCalls || 0) + 1;
+  }
 
   if (!ev.ok) continue;
 
