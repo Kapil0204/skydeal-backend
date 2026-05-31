@@ -6259,6 +6259,8 @@ function slimFlightForSearchResponse(flight) {
 app.post("/search", async (req, res) => {
   const body = req.body || {};
   const meta = { source: "flightapi", outStatus: 0, retStatus: 0, request: {} };
+  const searchStartedAt = Date.now();
+  const timings = {};
 
   try {
     const from = String(body.from || "").trim().toUpperCase();
@@ -6302,12 +6304,16 @@ meta.mongoDb = MONGODB_DB;
     }
 
     // Load offers ONCE per request
+    const mongoStart = Date.now();
         const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    timings.mongoOffersMs = Date.now() - mongoStart;
     meta.offersLoaded = offers.length;
 
     // Outbound
+    const outFlightApiStart = Date.now();
     const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
+    timings.flightApiOutboundMs = Date.now() - outFlightApiStart;
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
 
@@ -6322,8 +6328,10 @@ meta.mongoDb = MONGODB_DB;
       results: Array.isArray(outRes.data?.results) ? outRes.data.results.length : 0,
       data: Array.isArray(outRes.data?.data) ? outRes.data.data.length : 0
     };
+    const outMapStart = Date.now();
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
     const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 10);
+    timings.mapOutboundMs = Date.now() - outMapStart;
 
         meta.outRawFlights = outFlightsRaw.length;
     meta.outReturnedFlights = outFlightsLimited.length;
@@ -6339,6 +6347,7 @@ meta.mongoDb = MONGODB_DB;
 
     const routeIsDomestic = isDomesticRoute(from, to);
 
+    const outPricingStart = Date.now();
     const outboundFlights = [];
     for (const f of outFlightsLimited) {
       outboundFlights.push(
@@ -6353,10 +6362,12 @@ meta.mongoDb = MONGODB_DB;
         )
       );
     }
+    timings.offerPricingOutboundMs = Date.now() - outPricingStart;
 
     // Return
        let returnFlights = [];
     if (tripType === "round-trip" && retDate) {
+      const retFlightApiStart = Date.now();
       const retRes = await fetchOneWayTrip({
         from: to,
         to: from,
@@ -6365,10 +6376,13 @@ meta.mongoDb = MONGODB_DB;
         cabin,
         currency
       });
+      timings.flightApiReturnMs = Date.now() - retFlightApiStart;
       meta.retStatus = retRes.status;
       meta.request.retTried = retRes.tried;
+      const retMapStart = Date.now();
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
       const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 10);
+      timings.mapReturnMs = Date.now() - retMapStart;
 
            meta.retRawFlights = retFlightsRaw.length;
       meta.retReturnedFlights = retFlightsLimited.length;
@@ -6381,6 +6395,7 @@ meta.mongoDb = MONGODB_DB;
 
       const returnRouteIsDomestic = isDomesticRoute(to, from);
 
+      const retPricingStart = Date.now();
       const enriched = [];
       for (const f of retFlightsLimited) {
         enriched.push(
@@ -6395,8 +6410,12 @@ meta.mongoDb = MONGODB_DB;
           )
         );
       }
+      timings.offerPricingReturnMs = Date.now() - retPricingStart;
       returnFlights = enriched;
     }
+
+    timings.totalMs = Date.now() - searchStartedAt;
+    meta.timings = timings;
 
     res.json({
       meta,
@@ -6408,6 +6427,8 @@ meta.mongoDb = MONGODB_DB;
     meta.outStatus = meta.outStatus || status;
     meta.error = e?.message || "Search failed";
     meta.request.tried = e?.tried || [];
+    timings.totalMs = Date.now() - searchStartedAt;
+    meta.timings = timings;
 
     res.status(500).json({ meta, outboundFlights: [], returnFlights: [] });
   }
