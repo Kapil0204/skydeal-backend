@@ -3978,10 +3978,82 @@ async function applyOffersToFlight(
     // such as MMTONECARDINTEMI can incorrectly apply to multi-passenger bookings.
     const eligibilityAmount = portalBase;
 
+  const pricingCandidateCache = requestCache?.pricingCandidatesByKey || null;
+  const pricingCandidateKey = JSON.stringify({
+    portal,
+    isDomestic,
+    cabin,
+    tripType,
+    passengers
+  });
+
+  let offersToEvaluate = offers;
+
+  if (pricingCandidateCache && pricingCandidateCache.has(pricingCandidateKey)) {
+    offersToEvaluate = pricingCandidateCache.get(pricingCandidateKey);
+    if (pricingTiming) {
+      pricingTiming.staticCandidateCacheHits = (pricingTiming.staticCandidateCacheHits || 0) + 1;
+    }
+  } else {
+    const staticFilterStart = Date.now();
+
+    offersToEvaluate = offers.filter((offer) => {
+      try {
+        if (!offer) return false;
+        if (!isTrustedPricingRule(offer)) return false;
+        if (!isFlightOffer(offer)) return false;
+        if (isHotelOnlyOffer(offer)) return false;
+
+        const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
+        const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
+        const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
+
+        if (mentionsNonFlight && !mentionsFlight) return false;
+        if (isFirstTimeOrNewUserOffer(offer)) return false;
+        if (isOfferExpired(offer)) return false;
+
+        const bookingDayCheck = offerMatchesBookingDay(offer);
+        if (!bookingDayCheck.ok) return false;
+
+        if (!offerAppliesToPortal(offer, portal)) return false;
+        if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return false;
+
+        if (isSuspiciousGenericOffer(offer, offers || [])) return false;
+
+        if (!isDeterministicPortalPricingOffer(offer) && !isValidBestOffer(offer)) return false;
+
+        if (tripType === "one-way" && offerRequiresRoundTrip(offer)) return false;
+
+        const passengerRestriction = getPassengerRestrictionResult(offer, passengers);
+        if (!passengerRestriction.ok) return false;
+
+        const manualCabinScope = offerMatchesManualCabinScope(offer, cabin, isDomestic);
+        if (!manualCabinScope.ok) return false;
+
+        return true;
+      } catch {
+        // Safety: if a prefilter check ever fails unexpectedly, keep the offer
+        // so evaluateOfferForFlight remains the source of truth.
+        return true;
+      }
+    });
+
+    if (pricingCandidateCache) {
+      pricingCandidateCache.set(pricingCandidateKey, offersToEvaluate);
+    }
+
+    if (pricingTiming) {
+      pricingTiming.staticCandidateFilterMs = (pricingTiming.staticCandidateFilterMs || 0) + (Date.now() - staticFilterStart);
+      pricingTiming.staticCandidateFilterInput = (pricingTiming.staticCandidateFilterInput || 0) + offers.length;
+      pricingTiming.staticCandidateFilterOutput = (pricingTiming.staticCandidateFilterOutput || 0) + offersToEvaluate.length;
+      pricingTiming.staticCandidateCacheMisses = (pricingTiming.staticCandidateCacheMisses || 0) + 1;
+    }
+  }
+
   const matchingCandidates = [];
   const candidateScanStart = Date.now();
 
-for (const offer of offers) {
+for (const offer of offersToEvaluate) {
   if (!isDeterministicPortalPricingOffer(offer) && isJunkInfoOffer(offer)) continue;
   if (isKnownUnsafePricingOffer(offer)) continue;
 
@@ -4072,7 +4144,7 @@ for (const offer of offers) {
     }
     if (pricingTiming) {
       pricingTiming.candidateScanMs = (pricingTiming.candidateScanMs || 0) + (Date.now() - candidateScanStart);
-      pricingTiming.candidateEvaluations = (pricingTiming.candidateEvaluations || 0) + offers.length;
+      pricingTiming.candidateEvaluations = (pricingTiming.candidateEvaluations || 0) + offersToEvaluate.length;
     }
 
        matchingCandidates.sort((a, b) => {
@@ -6346,7 +6418,8 @@ app.post("/search", async (req, res) => {
   const searchStartedAt = Date.now();
   const timings = {};
   const offerPricingRequestCache = {
-    infoOffersByKey: new Map()
+    infoOffersByKey: new Map(),
+    pricingCandidatesByKey: new Map()
   };
 
   try {
