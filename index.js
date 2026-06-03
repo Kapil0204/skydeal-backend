@@ -6062,6 +6062,12 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
   if (!requireDebugEnabled(req, res)) return;
 
+  return res.status(410).json({
+    ok: false,
+    deprecated: true,
+    message: "This debug route is disabled. HDFC EMI rules are now allowed when deterministic tiers exist."
+  });
+
   try {
     await getOffersCollection();
     const db = _mongoClient.db(MONGODB_DB);
