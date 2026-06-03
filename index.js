@@ -4592,6 +4592,13 @@ app.get("/debug/why-not-applied", async (req, res) => {
 
     const debugCabin = normalizeCabin(req.query.travelClass || req.query.cabin || "Economy");
 
+    // Debug-only: lets us test Monday-only or Tuesday-only offers without changing production /search behavior.
+    const debugBookingDayOverrideRaw = String(req.query.bookingDayOverride || "").trim();
+    const debugBookingDayOverride =
+      /^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(debugBookingDayOverrideRaw)
+        ? debugBookingDayOverrideRaw.toLowerCase()
+        : null;
+
 const limit = Math.min(parseInt(req.query.limit || "10", 10), 200);
 
     if (!portal) {
@@ -4681,7 +4688,23 @@ const selectedPaymentMethods =
       if (!expired) stats.notExpired++;
       else failReasons.push("EXPIRED");
 
-      const bookingDayCheck = offerMatchesBookingDay(offer);
+      const rawBookingDayCheck = offerMatchesBookingDay(offer);
+      const overrideAllowed =
+        debugBookingDayOverride &&
+        Array.isArray(rawBookingDayCheck?.rule?.days) &&
+        rawBookingDayCheck.rule.days
+          .map((d) => String(d || "").trim().toLowerCase())
+          .includes(debugBookingDayOverride);
+
+      const bookingDayCheck = overrideAllowed
+        ? {
+            ...rawBookingDayCheck,
+            ok: true,
+            bookingDay: debugBookingDayOverride,
+            debugBookingDayOverrideApplied: true
+          }
+        : rawBookingDayCheck;
+
       if (bookingDayCheck.ok) stats.bookingDayOK++;
       else failReasons.push("BOOKING_DAY_MISMATCH");
 
@@ -4764,6 +4787,8 @@ else failReasons.push("PAYMENT_MISMATCH");
           bookingDay: bookingDayCheck.bookingDay,
           allowedBookingDays: bookingDayCheck.rule?.days || null,
           bookingDayRuleMode: bookingDayCheck.rule?.mode || null,
+          debugBookingDayOverride,
+          debugBookingDayOverrideApplied: !!bookingDayCheck.debugBookingDayOverrideApplied,
           isFlight: !!flight,
           hotelOnly: !!hotelOnly,
           inferredOnly: inferredOnly,
