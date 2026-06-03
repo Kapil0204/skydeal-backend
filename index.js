@@ -3826,11 +3826,45 @@ function isKnownUnsafePricingOffer(offer) {
     ""
   ).trim().toUpperCase();
 
-  // Temporary safety block:
-  // These MMT HDFC EMI rows currently have only maxDiscountAmount/cap data
-  // and no deterministic discount tier/flat/percent source.
-  // Re-enable only after MakeMyTrip is re-scraped/re-parsed with proper tiers.
-  return code === "HDFCEMI" || code === "HDFCINTEMI";
+  // Historical safety block:
+  // HDFCEMI / HDFCINTEMI were previously blocked when MMT rows were cap-only / up-to-only.
+  // After the June MMT refresh, allow them if deterministic discount tiers/flat/percent values exist.
+  if (code === "HDFCEMI" || code === "HDFCINTEMI") {
+    const tiers =
+      offer?.discountTiers ||
+      offer?.parsedFields?.discountTiers ||
+      [];
+
+    const hasTierDiscount =
+      Array.isArray(tiers) &&
+      tiers.some((t) => {
+        const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+        const tierPct = Number(t?.discountPercent || 0);
+        return tierFlat > 0 || tierPct > 0;
+      });
+
+    const flat = Number(
+      offer?.flatDiscountAmount ??
+      offer?.parsedFields?.flatDiscountAmount ??
+      offer?.discountAmount ??
+      offer?.parsedFields?.discountAmount ??
+      0
+    );
+
+    const pct = Number(
+      offer?.discountPercent ??
+      offer?.parsedFields?.discountPercent ??
+      0
+    );
+
+    return !(
+      hasTierDiscount ||
+      (Number.isFinite(flat) && flat > 0) ||
+      (Number.isFinite(pct) && pct > 0)
+    );
+  }
+
+  return false;
 }
 
 function isDeterministicPortalPricingOffer(offer) {
