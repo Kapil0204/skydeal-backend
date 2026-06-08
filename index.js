@@ -6695,6 +6695,157 @@ meta.mongoDb = MONGODB_DB;
   }
 });
 
+
+/* =========================================================
+   Debug only: generic checkout coupon candidates
+   ---------------------------------------------------------
+   Reads review-only candidates from:
+   generic_checkout_coupon_rule_candidates
+
+   This route does NOT modify offer_rules.
+   This route does NOT affect /search pricing.
+   This route is only for simulating review candidates.
+   ========================================================= */
+
+let genericCouponMongoClient = null;
+
+async function getGenericCouponDb() {
+  const { MongoClient } = await import("mongodb");
+
+  const uri =
+    process.env.MONGODB_URI ||
+    process.env.MONGO_URI ||
+    process.env.ATLAS_URI;
+
+  const dbName =
+    process.env.MONGODB_DB ||
+    process.env.MONGO_DB ||
+    "skydeal";
+
+  if (!uri) {
+    throw new Error("Missing Mongo URI. Expected MONGODB_URI, MONGO_URI, or ATLAS_URI.");
+  }
+
+  if (!genericCouponMongoClient) {
+    genericCouponMongoClient = new MongoClient(uri);
+    await genericCouponMongoClient.connect();
+  }
+
+  return genericCouponMongoClient.db(dbName);
+}
+
+function normalizeDebugText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function calculateGenericCouponCandidate(candidate, adults, basePrice) {
+  const rule = candidate.proposedRule || {};
+  const flatPerAdult = Number(rule.flatDiscountPerAdult || 0);
+
+  const calculatedDiscount = Math.max(0, flatPerAdult * adults);
+  const safeDiscount = Math.min(calculatedDiscount, Math.max(0, basePrice));
+
+  return {
+    ruleCandidateId: candidate.ruleCandidateId,
+    sourcePortal: candidate.sourcePortal,
+    couponCode: candidate.couponCode,
+    status: candidate.status,
+    shouldUploadToActiveOfferRules: candidate.shouldUploadToActiveOfferRules,
+    confidence: candidate.confidence,
+    pricingReadiness: candidate.pricingReadiness,
+    applicability: candidate.applicability,
+    proposedRule: candidate.proposedRule,
+    input: {
+      adults,
+      basePrice
+    },
+    calculated: {
+      discountAmount: safeDiscount,
+      finalPrice: Math.max(0, basePrice - safeDiscount),
+      formulaUsed: rule.formula || null
+    }
+  };
+}
+
+app.get("/debug/generic-coupon-candidates", async (req, res) => {
+  try {
+    const portal = normalizeDebugText(req.query.portal);
+    const routeType = normalizeDebugText(req.query.routeType || "international");
+    const tripType = normalizeDebugText(req.query.tripType || "one-way");
+
+    const adults = Math.max(1, Number(req.query.adults || 1));
+    const basePrice = Math.max(0, Number(req.query.basePrice || 0));
+
+    const db = await getGenericCouponDb();
+
+    const query = {
+      status: "DRY_RUN_REVIEW_ONLY",
+      shouldUploadToActiveOfferRules: false,
+      pricingReadiness: "READY_FOR_MONGO_DRY_RUN_REVIEW"
+    };
+
+    if (portal) {
+      query.sourcePortal = new RegExp(`^${portal}$`, "i");
+    }
+
+    const docs = await db
+      .collection("generic_checkout_coupon_rule_candidates")
+      .find(query)
+      .project({
+        _id: 0,
+        ruleCandidateId: 1,
+        sourcePortal: 1,
+        couponCode: 1,
+        status: 1,
+        shouldUploadToActiveOfferRules: 1,
+        applicability: 1,
+        proposedRule: 1,
+        confidence: 1,
+        pricingReadiness: 1,
+        evidenceSummary: 1
+      })
+      .sort({ sourcePortal: 1, couponCode: 1, ruleCandidateId: 1 })
+      .toArray();
+
+    const matchingCandidates = docs.filter((doc) => {
+      const appData = doc.applicability || {};
+
+      return (
+        normalizeDebugText(appData.routeType) === routeType &&
+        normalizeDebugText(appData.tripType) === tripType
+      );
+    });
+
+    const simulated = matchingCandidates.map((candidate) =>
+      calculateGenericCouponCandidate(candidate, adults, basePrice)
+    );
+
+    res.json({
+      debugOnly: true,
+      message:
+        "This route simulates generic checkout coupon candidates only. It does not affect active offer_rules or /search pricing.",
+      input: {
+        portal: portal || null,
+        routeType,
+        tripType,
+        adults,
+        basePrice
+      },
+      collection: "generic_checkout_coupon_rule_candidates",
+      totalCandidatesInReviewCollection: docs.length,
+      matchingCandidateCount: matchingCandidates.length,
+      simulated
+    });
+  } catch (error) {
+    console.error("Error in /debug/generic-coupon-candidates:", error);
+    res.status(500).json({
+      error: "Failed to simulate generic coupon candidates",
+      details: error.message
+    });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
