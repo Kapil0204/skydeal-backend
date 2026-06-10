@@ -3995,7 +3995,8 @@ async function applyOffersToFlight(
   tripType = "one-way",
   isDomestic = true,
   pricingTiming = null,
-  requestCache = null
+  requestCache = null,
+  genericDisplayContext = null
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -4265,8 +4266,22 @@ const bestDeal = best
       constraints: extractOfferConstraints(best.offer),
       offerTypeLabel: best.offerTypeLabel || null,
       channelLabel: best.channelLabel || null,
+      offerDisplayType: best.offerKind === "payment" ? "applied_payment_offer" : "applied_offer_rule",
+      displayLabel: best.offerTypeLabel || "Applied offer",
+      displaySubtext: null,
+      displayAmount: getActualDiscountAmount(portalBase, best.finalPrice),
+      displayCurrency: "INR",
+      isExactPricing: true,
+      isDisplayOnly: false,
     }
-  : null;
+  : findGenericDisplayForPortal({
+      genericDisplayContext,
+      portal,
+      isDomestic,
+      tripType,
+      portalBase,
+      passengers
+    });
 
 const bestOfferId =
   best?.offer?._id?.toString?.() ||
@@ -4287,8 +4302,8 @@ const otherMatchedOffersClean = otherMatchedOffers.filter((row) => {
 return {
   portal,
   basePrice: portalBase,
-  finalPrice: best ? best.finalPrice : portalBase,
-  applied: !!best,
+  finalPrice: bestDeal ? bestDeal.finalPrice : portalBase,
+  applied: !!bestDeal,
   code: bestDeal?.code || null,
   title: bestDeal?.title || null,
   rawDiscount: bestDeal?.rawDiscount || null,
@@ -4302,12 +4317,20 @@ return {
           ? (matchedPaymentLabel || paymentLabelFromSelection(selectedPaymentMethods) || "Payment required")
           : "No payment restriction"
       )
-    : null,
+    : (bestDeal?.paymentLabel || null),
   offerTypeLabel: bestDeal?.offerTypeLabel || null,
   channelLabel: bestDeal?.channelLabel || null,
-  explain: best
-    ? `Applied ${bestDeal?.code || "an offer"} on ${portal} to reduce price from ₹${portalBase} to ₹${best.finalPrice}`
-    : null,
+  offerDisplayType: bestDeal?.offerDisplayType || null,
+  displayLabel: bestDeal?.displayLabel || null,
+  displaySubtext: bestDeal?.displaySubtext || null,
+  displayAmount: bestDeal?.displayAmount ?? bestDeal?.actualDiscount ?? null,
+  displayCurrency: bestDeal?.displayCurrency || "INR",
+  isExactPricing: bestDeal?.isExactPricing ?? null,
+  isDisplayOnly: bestDeal?.isDisplayOnly ?? false,
+  genericCandidateId: bestDeal?.genericCandidateId || null,
+  genericCandidateStatus: bestDeal?.genericCandidateStatus || null,
+  genericPricingReadiness: bestDeal?.genericPricingReadiness || null,
+  explain: bestDeal?.explain || null,
        infoOffers: (() => {
   const buildInfoStart = Date.now();
 
@@ -6454,6 +6477,16 @@ function slimPortalPriceForSearchResponse(row) {
     paymentLabel: row.paymentLabel || null,
     offerTypeLabel: row.offerTypeLabel || null,
     channelLabel: row.channelLabel || null,
+    offerDisplayType: row.offerDisplayType || null,
+    displayLabel: row.displayLabel || null,
+    displaySubtext: row.displaySubtext || null,
+    displayAmount: row.displayAmount ?? null,
+    displayCurrency: row.displayCurrency || null,
+    isExactPricing: row.isExactPricing ?? null,
+    isDisplayOnly: row.isDisplayOnly ?? false,
+    genericCandidateId: row.genericCandidateId || null,
+    genericCandidateStatus: row.genericCandidateStatus || null,
+    genericPricingReadiness: row.genericPricingReadiness || null,
     explain: row.explain || null,
 
     // Keep hints for "more offers", but remove huge terms/raw text from normal search response.
@@ -6497,6 +6530,178 @@ async function getOffersForSearch(meta = {}) {
 
   return offers;
 }
+
+
+async function getGenericDisplayContextForSearch(meta = {}) {
+  // Only loaded when includeGenericDisplayOffers=true is sent in /search.
+  // Reads review/display-only collections and never modifies Mongo.
+  await getOffersCollection();
+
+  const db = _mongoClient.db(MONGODB_DB);
+
+  const [verifiedGenericCoupons, conservativeDisplayOffers] = await Promise.all([
+    db.collection("generic_checkout_coupon_rule_candidates")
+      .find({
+        status: "DRY_RUN_REVIEW_ONLY",
+        shouldUploadToActiveOfferRules: false,
+        pricingReadiness: "READY_FOR_MONGO_DRY_RUN_REVIEW"
+      }, { projection: { _id: 0 } })
+      .toArray(),
+
+    db.collection("generic_checkout_display_offer_candidates")
+      .find({
+        status: "DISPLAY_REVIEW_ONLY",
+        shouldApplyToLivePricing: false,
+        shouldUploadToActiveOfferRules: false,
+        pricingReadiness: "DISPLAY_ONLY_NOT_EXACT_PRICING"
+      }, { projection: { _id: 0 } })
+      .toArray()
+  ]);
+
+  meta.genericDisplayOffers = {
+    enabled: true,
+    verifiedGenericCouponCandidates: verifiedGenericCoupons.length,
+    conservativeDisplayOfferCandidates: conservativeDisplayOffers.length,
+    mode: "flag_controlled_search_display"
+  };
+
+  return {
+    enabled: true,
+    verifiedGenericCoupons,
+    conservativeDisplayOffers
+  };
+}
+
+function normalizeSearchDisplayText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function genericCandidateMatchesSearch(candidate, portal, isDomestic, tripType) {
+  const app = candidate?.applicability || {};
+  const wantedRouteType = isDomestic ? "domestic" : "international";
+
+  return (
+    normalizeSearchDisplayText(candidate?.sourcePortal) === normalizeSearchDisplayText(portal) &&
+    normalizeSearchDisplayText(app.routeType) === wantedRouteType &&
+    normalizeSearchDisplayText(app.tripType) === normalizeSearchDisplayText(tripType)
+  );
+}
+
+function buildVerifiedGenericCouponPortalDisplay({ candidate, portalBase, passengers }) {
+  const rule = candidate?.proposedRule || {};
+  const flatPerAdult = Number(rule.flatDiscountPerAdult || 0);
+  const rawDiscount = Math.max(0, Math.round(flatPerAdult * passengers));
+  const discountAmount = Math.min(rawDiscount, Math.max(0, portalBase));
+  const finalPrice = Math.max(0, portalBase - discountAmount);
+
+  if (!discountAmount) return null;
+
+  return {
+    finalPrice,
+    actualDiscount: discountAmount,
+    code: candidate?.couponCode || null,
+    title: `${candidate?.couponCode || "Checkout coupon"} checkout coupon`,
+    rawDiscount: rule.formula || null,
+    appliedDiscountText: `Checkout coupon saving: ₹${discountAmount}`,
+    paymentLabel: "No payment restriction",
+    offerTypeLabel: "Checkout coupon",
+    channelLabel: "Portal checkout",
+    explain: `Checkout coupon ${candidate?.couponCode || ""} reduced ₹${portalBase} → ₹${finalPrice}`,
+    offerDisplayType: "verified_generic_checkout_coupon",
+    displayLabel: "Checkout coupon",
+    displaySubtext: `${candidate?.couponCode || "Coupon"} checkout coupon observed`,
+    displayAmount: discountAmount,
+    displayCurrency: rule.currency || "INR",
+    isExactPricing: true,
+    isDisplayOnly: false,
+    genericCandidateId: candidate?.ruleCandidateId || null,
+    genericCandidateStatus: candidate?.status || null,
+    genericPricingReadiness: candidate?.pricingReadiness || null
+  };
+}
+
+function buildConservativeDisplayOfferPortalDisplay({ candidate, portalBase, passengers }) {
+  const offer = candidate?.proposedDisplayOffer || {};
+  let rawDiscount = 0;
+
+  if (offer.discountType === "flat_per_adult") {
+    rawDiscount = Number(offer.flatDiscountPerAdult || 0) * passengers;
+  } else if (offer.discountType === "flat_total") {
+    rawDiscount = Number(offer.flatDiscountAmount || 0);
+  }
+
+  const discountAmount = Math.min(
+    Math.max(0, Math.round(rawDiscount)),
+    Math.max(0, portalBase)
+  );
+
+  if (!discountAmount) return null;
+
+  const finalPrice = Math.max(0, portalBase - discountAmount);
+
+  return {
+    finalPrice,
+    actualDiscount: discountAmount,
+    code: candidate?.couponCode || null,
+    title: `${candidate?.couponCode || "Possible coupon"} possible checkout saving`,
+    rawDiscount: offer.formula || null,
+    appliedDiscountText: `Possible checkout saving: ₹${discountAmount}`,
+    paymentLabel: "No payment restriction",
+    offerTypeLabel: "Possible checkout saving",
+    channelLabel: "Portal checkout",
+    explain: `Possible checkout saving ${candidate?.couponCode || ""} display estimate reduced ₹${portalBase} → ₹${finalPrice}`,
+    offerDisplayType: "conservative_generic_display_offer",
+    displayLabel: offer.displayLabel || "Possible checkout saving",
+    displaySubtext: offer.displaySubtext || `${candidate?.couponCode || "Coupon"} checkout coupon observed; conservative estimate shown`,
+    displayAmount: discountAmount,
+    displayCurrency: offer.currency || "INR",
+    isExactPricing: false,
+    isDisplayOnly: true,
+    genericCandidateId: candidate?.displayCandidateId || null,
+    genericCandidateStatus: candidate?.status || null,
+    genericPricingReadiness: candidate?.pricingReadiness || null
+  };
+}
+
+function findGenericDisplayForPortal({
+  genericDisplayContext,
+  portal,
+  isDomestic,
+  tripType,
+  portalBase,
+  passengers
+}) {
+  if (!genericDisplayContext?.enabled) return null;
+
+  const verified = (genericDisplayContext.verifiedGenericCoupons || [])
+    .find((candidate) => genericCandidateMatchesSearch(candidate, portal, isDomestic, tripType));
+
+  if (verified) {
+    const built = buildVerifiedGenericCouponPortalDisplay({
+      candidate: verified,
+      portalBase,
+      passengers
+    });
+
+    if (built) return built;
+  }
+
+  const conservative = (genericDisplayContext.conservativeDisplayOffers || [])
+    .find((candidate) => genericCandidateMatchesSearch(candidate, portal, isDomestic, tripType));
+
+  if (conservative) {
+    const built = buildConservativeDisplayOfferPortalDisplay({
+      candidate: conservative,
+      portalBase,
+      passengers
+    });
+
+    if (built) return built;
+  }
+
+  return null;
+}
+
 
 function slimFlightForSearchResponse(flight) {
   if (!flight || typeof flight !== "object") return flight || null;
@@ -6549,6 +6754,11 @@ const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
 
 meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
+    const includeGenericDisplayOffers =
+      body.includeGenericDisplayOffers === true ||
+      String(body.includeGenericDisplayOffers || "").toLowerCase() === "true";
+
+    meta.includeGenericDisplayOffers = includeGenericDisplayOffers;
     meta.usedFallback = false;
     meta.mongoCollection = MONGO_COL;
 meta.mongoDb = MONGODB_DB;
@@ -6566,6 +6776,18 @@ meta.mongoDb = MONGODB_DB;
     const offers = await getOffersForSearch(meta);
     timings.mongoOffersMs = Date.now() - mongoStart;
     meta.offersLoaded = offers.length;
+
+    let genericDisplayContext = null;
+    if (includeGenericDisplayOffers) {
+      const genericDisplayStart = Date.now();
+      genericDisplayContext = await getGenericDisplayContextForSearch(meta);
+      timings.genericDisplayOffersMs = Date.now() - genericDisplayStart;
+    } else {
+      meta.genericDisplayOffers = {
+        enabled: false,
+        mode: "disabled_by_request_flag"
+      };
+    }
 
     // Outbound
     const outFlightApiStart = Date.now();
@@ -6617,7 +6839,8 @@ meta.mongoDb = MONGODB_DB;
           tripType,
           routeIsDomestic,
           timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
-          offerPricingRequestCache
+          offerPricingRequestCache,
+          genericDisplayContext
         )
       );
     }
@@ -6667,7 +6890,8 @@ meta.mongoDb = MONGODB_DB;
             tripType,
             returnRouteIsDomestic,
             timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
-            offerPricingRequestCache
+            offerPricingRequestCache,
+            genericDisplayContext
           )
         );
       }
