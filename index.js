@@ -6846,6 +6846,185 @@ app.get("/debug/generic-coupon-candidates", async (req, res) => {
 });
 
 
+
+
+// Debug-only route for conservative generic checkout display-offer candidates.
+// This reads from generic_checkout_display_offer_candidates only.
+// It does not affect /search, offer_rules, or live pricing.
+app.get("/debug/generic-display-offer-candidates", async (req, res) => {
+  let client;
+
+  try {
+    const { MongoClient } = await import("mongodb");
+
+    const mongoUri =
+      process.env.MONGODB_URI ||
+      process.env.MONGO_URI ||
+      process.env.ATLAS_URI;
+
+    const dbName =
+      process.env.MONGODB_DB ||
+      process.env.MONGO_DB ||
+      "skydeal";
+
+    if (!mongoUri) {
+      return res.status(500).json({
+        error: "Missing Mongo URI",
+        expectedEnvVars: ["MONGODB_URI", "MONGO_URI", "ATLAS_URI"]
+      });
+    }
+
+    const normalize = (value) =>
+      String(value || "").trim().toLowerCase();
+
+    const escapeRegExp = (value) =>
+      String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    const portal = normalize(req.query.portal);
+    const routeType = normalize(req.query.routeType || "domestic");
+    const tripType = normalize(req.query.tripType || "one-way");
+
+    const adultsRaw = Number(req.query.adults || 1);
+    const basePriceRaw = Number(req.query.basePrice || 0);
+
+    const adults = Number.isFinite(adultsRaw) && adultsRaw > 0
+      ? Math.floor(adultsRaw)
+      : 1;
+
+    const basePrice = Number.isFinite(basePriceRaw) && basePriceRaw > 0
+      ? Math.round(basePriceRaw)
+      : 0;
+
+    client = new MongoClient(mongoUri);
+    await client.connect();
+
+    const db = client.db(dbName);
+    const col = db.collection("generic_checkout_display_offer_candidates");
+
+    const query = {
+      status: "DISPLAY_REVIEW_ONLY",
+      shouldApplyToLivePricing: false,
+      shouldUploadToActiveOfferRules: false,
+      pricingReadiness: "DISPLAY_ONLY_NOT_EXACT_PRICING"
+    };
+
+    if (portal) {
+      query.sourcePortal = new RegExp(`^${escapeRegExp(portal)}$`, "i");
+    }
+
+    const candidates = await col
+      .find(query)
+      .project({
+        _id: 0,
+        displayCandidateId: 1,
+        sourcePortal: 1,
+        couponCode: 1,
+        status: 1,
+        shouldApplyToLivePricing: 1,
+        shouldUploadToActiveOfferRules: 1,
+        confidence: 1,
+        pricingReadiness: 1,
+        applicability: 1,
+        proposedDisplayOffer: 1,
+        reviewNotes: 1
+      })
+      .sort({ sourcePortal: 1 })
+      .toArray();
+
+    const matching = candidates.filter((candidate) => {
+      const app = candidate.applicability || {};
+      return (
+        normalize(app.routeType) === routeType &&
+        normalize(app.tripType) === tripType
+      );
+    });
+
+    const simulated = matching.map((candidate) => {
+      const offer = candidate.proposedDisplayOffer || {};
+      let discountAmount = 0;
+
+      if (offer.discountType === "flat_per_adult") {
+        discountAmount = Number(offer.flatDiscountPerAdult || 0) * adults;
+      } else if (offer.discountType === "flat_total") {
+        discountAmount = Number(offer.flatDiscountAmount || 0);
+      }
+
+      discountAmount = Math.max(0, Math.round(discountAmount));
+
+      if (basePrice > 0) {
+        discountAmount = Math.min(discountAmount, basePrice);
+      }
+
+      const finalPrice = basePrice > 0
+        ? Math.max(0, basePrice - discountAmount)
+        : null;
+
+      return {
+        displayCandidateId: candidate.displayCandidateId,
+        sourcePortal: candidate.sourcePortal,
+        couponCode: candidate.couponCode,
+
+        status: candidate.status,
+        shouldApplyToLivePricing: candidate.shouldApplyToLivePricing,
+        shouldUploadToActiveOfferRules: candidate.shouldUploadToActiveOfferRules,
+        confidence: candidate.confidence,
+        pricingReadiness: candidate.pricingReadiness,
+
+        applicability: candidate.applicability,
+        proposedDisplayOffer: candidate.proposedDisplayOffer,
+
+        display: {
+          displayLabel: offer.displayLabel || "Possible checkout saving",
+          displaySubtext: offer.displaySubtext || null,
+          displayAmount: discountAmount,
+          displayCurrency: offer.currency || "INR",
+          displayType: "conservative_generic_display_offer",
+          isExactPricing: false,
+          isDisplayOnly: true
+        },
+
+        input: {
+          adults,
+          basePrice
+        },
+
+        calculated: {
+          discountAmount,
+          finalPrice,
+          formulaUsed: offer.formula || null
+        }
+      };
+    });
+
+    return res.json({
+      debugOnly: true,
+      message:
+        "This route simulates conservative generic display-offer candidates only. It does not affect active offer_rules, /search pricing, or frontend pricing.",
+      input: {
+        portal,
+        routeType,
+        tripType,
+        adults,
+        basePrice
+      },
+      collection: "generic_checkout_display_offer_candidates",
+      totalCandidatesInDisplayReviewCollection: candidates.length,
+      matchingCandidateCount: simulated.length,
+      simulated
+    });
+  } catch (err) {
+    console.error("generic display offer debug route failed", err);
+    return res.status(500).json({
+      error: "generic display offer debug route failed",
+      message: err.message
+    });
+  } finally {
+    if (client) {
+      await client.close();
+    }
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
