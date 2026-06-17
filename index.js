@@ -6336,7 +6336,10 @@ app.post("/compare-selected-trip", async (req, res) => {
       ""
     ).trim().toUpperCase();
 
-    const adults = Number(body.passengers || 1) || 1;
+    const adults = Math.max(
+      1,
+      Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
+    );
     const cabin = normalizeCabin(body.travelClass);
     const routeIsDomestic = isDomesticRoute(from, to);
 
@@ -6742,7 +6745,10 @@ app.post("/search", async (req, res) => {
     const retDate = toISO(body.returnDate);
 
     const tripType = body.tripType === "round-trip" ? "round-trip" : "one-way";
-    const adults = Number(body.passengers || 1) || 1;
+    const adults = Math.max(
+      1,
+      Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
+    );
     const cabin = normalizeCabin(body.travelClass);
     const currency = "INR";
 
