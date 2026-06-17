@@ -6359,10 +6359,15 @@ app.post("/compare-selected-trip", async (req, res) => {
       return pm;
     });
 
+    const includeGenericDisplayOffers =
+      body.includeGenericDisplayOffers === true ||
+      String(body.includeGenericDisplayOffers || "").toLowerCase() === "true";
+
     meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.mongoCollection = MONGO_COL;
     meta.mongoDb = MONGODB_DB;
     meta.isDomestic = routeIsDomestic;
+    meta.includeGenericDisplayOffers = includeGenericDisplayOffers;
 
     if (!outboundFlight || !returnFlight) {
       return res.status(400).json({
@@ -6393,6 +6398,16 @@ app.post("/compare-selected-trip", async (req, res) => {
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
     meta.offersLoaded = offers.length;
 
+    let genericDisplayContext = null;
+    if (includeGenericDisplayOffers) {
+      genericDisplayContext = await getGenericDisplayContextForSearch(meta);
+    } else {
+      meta.genericDisplayOffers = {
+        enabled: false,
+        mode: "disabled_by_request_flag"
+      };
+    }
+
     const bundleFlight = {
       airlineName: `${outboundFlight.airlineName || "Outbound"} + ${returnFlight.airlineName || "Return"}`,
       flightNumber: `${outboundFlight.flightNumber || ""}${outboundFlight.flightNumber && returnFlight.flightNumber ? " / " : ""}${returnFlight.flightNumber || ""}`.trim() || "Round Trip",
@@ -6418,7 +6433,8 @@ app.post("/compare-selected-trip", async (req, res) => {
       adults,
       cabin,
       "round-trip",
-      routeIsDomestic
+      routeIsDomestic,
+      genericDisplayContext
     );
 
     const tripComparison = {
