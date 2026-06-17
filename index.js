@@ -6434,6 +6434,8 @@ app.post("/compare-selected-trip", async (req, res) => {
       cabin,
       "round-trip",
       routeIsDomestic,
+      null,
+      null,
       genericDisplayContext
     );
 
