@@ -3399,77 +3399,7 @@ if (
   };
 }
 
-function pickBestOfferForPortal(
-  offers,
-  portal,
-  baseAmount,
-  selectedPaymentMethods,
-  eligibilityAmount,
-  cabin,
-  flightAirlineName,
-  tripType,
-  passengers,
-  isDomestic
-) {
-  
-  const paymentCandidates = [];
-  const portalCandidates = [];
-  const airlineCandidates = [];
 
-for (const offer of offers) {
-
-const ev = evaluateOfferForFlight({
-  offer,
-  portal,
-  baseAmount,
-  eligibilityAmount,
-  selectedPaymentMethods,
-  isDomestic,
-  cabin,
-  flightAirlineName,
-  tripType,
-  passengers,
-    allOffers: offers,
-});
-
-    if (!ev.ok) continue;
-
-    const row = {
-  finalPrice: ev.discounted,
-  offer,
-  offerKind: ev.offerKind,
-  offerTypeLabel: ev.offerTypeLabel,
-  channelLabel: ev.channelLabel,
-  nonClubbable: offerCannotBeClubbed(offer),
-  maxDiscountAmount: ev.maxDiscountAmount ?? null,
-};
-
-    if (ev.offerKind === "payment") {
-      paymentCandidates.push(row);
-    } else if (ev.offerKind === "airline") {
-      airlineCandidates.push(row);
-    } else {
-      portalCandidates.push(row);
-    }
-  }
-
-  const byBestPrice = (a, b) => a.finalPrice - b.finalPrice;
-
-paymentCandidates.sort(byBestPrice);
-portalCandidates.sort(byBestPrice);
-airlineCandidates.sort(byBestPrice);
-
-const all = [
-  ...paymentCandidates,
-  ...portalCandidates,
-  ...airlineCandidates,
-].sort(byBestPrice);
-
-// Phase-1 non-clubbing rule:
-// always return only ONE best offer per portal.
-// If multiple candidates exist, cheapest valid one wins.
-return all.length > 0 ? all[0] : null;
-}
 function offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods = []) {
   const selectedTenure = getSelectedEmiTenure(selectedPaymentMethods);
 
