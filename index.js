@@ -36,6 +36,12 @@ const MONGO_COL = process.env.MONGO_COL || "offers";
 // FlightAPI env
 const FLIGHTAPI_KEY = process.env.FLIGHTAPI_KEY;
 
+function maskFlightApiKeyInUrl(url) {
+  const key = process.env.FLIGHTAPI_KEY || "";
+  if (!url || !key) return url;
+  return String(url).replace(encodeURIComponent(key), "***MASKED_FLIGHTAPI_KEY***").replace(key, "***MASKED_FLIGHTAPI_KEY***");
+}
+
 // Feature flags
 const ENABLE_ESTIMATED_DISCOUNTS =
   String(process.env.ENABLE_ESTIMATED_DISCOUNTS || "false").toLowerCase() === "true";
