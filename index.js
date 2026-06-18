@@ -5866,8 +5866,8 @@ app.post("/debug/disable-mmt-hdfc-cap-only-rules", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "disable-expired-mmt-pricing-rules",
-    expectedCommit: "disable-expired-mmt-pricing-rules",
+    buildMarker: "backend-cleanup-after-generic-display",
+    expectedCommit: "backend-cleanup-after-generic-display",
     deployedCheck: "If you see this, Render can disable expired MakeMyTrip rows from pricing."
   });
 });
