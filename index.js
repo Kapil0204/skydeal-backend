@@ -5500,7 +5500,7 @@ app.get("/debug/build-version", (req, res) => {
     service: "skydeal-backend",
     buildMarker: "backend-cleanup-after-generic-display",
     expectedCommit: "backend-cleanup-after-generic-display",
-    deployedCheck: "If you see this, Render can disable expired MakeMyTrip rows from pricing."
+    deployedCheck: "Backend cleanup after generic display offers is deployed."
   });
 });
 
