@@ -2908,60 +2908,7 @@ function offerMatchesManualCabinScope(offer, cabin, isDomestic = true) {
   };
 }
 
-function getBestVariantPerCoupon(offers) {
-  const byCoupon = {};
 
-  for (const offer of offers) {
-    const code = offer.couponCode || "__NO_CODE__";
-
-    if (!byCoupon[code]) {
-      byCoupon[code] = [];
-    }
-
-    byCoupon[code].push(offer);
-  }
-
-  const bestVariants = [];
-
-  for (const code in byCoupon) {
-    const variants = byCoupon[code];
-
-    // pick best variant
-    let best = null;
-
-    for (const v of variants) {
-      if (!best) {
-        best = v;
-        continue;
-      }
-
-      const score = (o) => {
-        const hasMTV = !!o.minTransactionValue;
-        const hasCap = !!o.maxDiscountAmount;
-        const hasFlat = !!o.flatDiscountAmount;
-        const hasPercent = !!o.discountPercent;
-        const isUpto = (o.rawDiscount || "").toLowerCase().includes("up to");
-
-        let s = 0;
-        if (hasMTV) s += 5;
-        if (hasCap) s += 4;
-        if (hasFlat) s += 4;
-        if (hasPercent) s += 3;
-        if (isUpto) s -= 5;
-
-        return s;
-      };
-
-      if (score(v) > score(best)) {
-        best = v;
-      }
-    }
-
-    bestVariants.push(best);
-  }
-
-  return bestVariants;
-}
 // --------------------
 // Booking day / weekday restrictions
 // --------------------
