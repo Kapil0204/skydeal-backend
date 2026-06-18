@@ -5402,6 +5402,72 @@ app.post("/debug/promote-safe-generic-offers", async (req, res) => {
   }
 });
 
+
+app.get("/debug/flightapi-provider-test", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
+  const from = String(req.query.from || "BOM").trim().toUpperCase();
+  const to = String(req.query.to || "DEL").trim().toUpperCase();
+  const date = String(req.query.date || "2026-07-25").trim();
+  const adults = Math.max(1, Math.floor(Number(req.query.adults || 1) || 1));
+  const children = Math.max(0, Math.floor(Number(req.query.children || 0) || 0));
+  const infants = Math.max(0, Math.floor(Number(req.query.infants || 0) || 0));
+  const currency = String(req.query.currency || "INR").trim().toUpperCase();
+
+  const cabinVariants = String(req.query.cabins || "Economy,economy,ECONOMY,E")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const key = process.env.FLIGHTAPI_KEY || "";
+
+  const results = [];
+
+  for (const cabin of cabinVariants) {
+    const url = `https://api.flightapi.io/onewaytrip/${encodeURIComponent(key)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${encodeURIComponent(cabin)}/${currency}`;
+    const maskedUrl = url.replace(encodeURIComponent(key), key ? "***MASKED_FLIGHTAPI_KEY***" : "***MISSING_KEY***");
+
+    const startedAt = Date.now();
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+
+      const r = await fetch(url, { signal: controller.signal });
+      const body = await r.text();
+
+      clearTimeout(timeout);
+
+      results.push({
+        cabin,
+        maskedUrl,
+        status: r.status,
+        ok: r.ok,
+        elapsedMs: Date.now() - startedAt,
+        bodyPreview: body.slice(0, 500)
+      });
+    } catch (e) {
+      results.push({
+        cabin,
+        maskedUrl,
+        status: "ERROR",
+        ok: false,
+        elapsedMs: Date.now() - startedAt,
+        error: e?.message || String(e)
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    keyLoaded: !!key,
+    keyLength: key.length,
+    input: { from, to, date, adults, children, infants, currency, cabinVariants },
+    results
+  });
+});
+
+
 app.get("/debug/generic-apply-path", async (req, res) => {
   if (!requireDebugEnabled(req, res)) return;
 
