@@ -1,7 +1,6 @@
 // index.js (SkyDeal backend) — ESM
 import express from "express";
 import cors from "cors";
-import axios from "axios";
 import { MongoClient } from "mongodb";
 
 function requireDebugEnabled(req, res) {
