@@ -189,7 +189,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       const text = await res.text();
 
       const triedRow = {
-        url,
+        url: maskFlightApiKeyInUrl(url),
         status: res.status,
         attempt,
         ...(attempt > 1 ? { retry: true } : {}),
@@ -222,7 +222,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       };
 
       tried.push({
-        url,
+        url: maskFlightApiKeyInUrl(url),
         attempt,
         ...(attempt > 1 ? { retry: true } : {}),
         status: isAbort ? "TIMEOUT" : "ERROR",
