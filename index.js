@@ -177,7 +177,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
   let lastError = null;
   const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 6000);
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -230,7 +230,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       });
     }
 
-    if (attempt < 2) {
+    if (attempt < 5) {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
