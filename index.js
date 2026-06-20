@@ -535,12 +535,18 @@ function limitAndSortFlights(flights) {
   const pool = Array.isArray(flights) ? [...flights] : [];
 
   return pool.sort((a, b) => {
+    const aStops = Number(a.stops || 0);
+    const bStops = Number(b.stops || 0);
+
+    // Default SkyDeal ordering: non-stop flights first.
+    if (aStops !== bStops) return aStops - bStops;
+
     const aPrice = Number(a.price || 0);
     const bPrice = Number(b.price || 0);
 
     if (aPrice !== bPrice) return aPrice - bPrice;
 
-    return Number(a.stops || 0) - Number(b.stops || 0);
+    return String(a.departureTime || "").localeCompare(String(b.departureTime || ""));
   });
 }
 
@@ -6041,7 +6047,7 @@ meta.mongoDb = MONGODB_DB;
     };
     const outMapStart = Date.now();
     const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
-    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 10);
+    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 40);
     timings.mapOutboundMs = Date.now() - outMapStart;
 
         meta.outRawFlights = outFlightsRaw.length;
@@ -6095,7 +6101,7 @@ meta.mongoDb = MONGODB_DB;
       meta.request.retTried = retRes.tried;
       const retMapStart = Date.now();
       const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
-      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 10);
+      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 40);
       timings.mapReturnMs = Date.now() - retMapStart;
 
            meta.retRawFlights = retFlightsRaw.length;
