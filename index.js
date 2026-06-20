@@ -48,6 +48,9 @@ const ENABLE_ESTIMATED_DISCOUNTS =
 const OFFERS_CACHE_TTL_MS = Number(process.env.OFFERS_CACHE_TTL_MS || 60000);
 let offersCacheData = null;
 let offersCacheLoadedAt = 0;
+
+const FLIGHTAPI_CACHE_TTL_MS = Number(process.env.FLIGHTAPI_CACHE_TTL_MS || 600000);
+const flightApiSuccessCache = new Map();
 // --------------------
 // Route geography helpers
 // --------------------
@@ -215,6 +218,19 @@ function flightApiRetryDelayMs(attempt) {
   return Math.min(delay, 4000);
 }
 
+function buildFlightApiCacheKey({ from, to, date, adults, children, infants, cabin, currency }) {
+  return [
+    String(from || "").trim().toUpperCase(),
+    String(to || "").trim().toUpperCase(),
+    String(date || "").trim(),
+    Number(adults || 1),
+    Number(children || 0),
+    Number(infants || 0),
+    String(cabin || "Economy").trim(),
+    String(currency || "INR").trim().toUpperCase()
+  ].join("|");
+}
+
 async function fetchOneWayTrip({
   from,
   to,
@@ -236,6 +252,33 @@ async function fetchOneWayTrip({
     cabin,
     currency,
   });
+
+  const cacheKey = buildFlightApiCacheKey({
+    from,
+    to,
+    date,
+    adults,
+    children,
+    infants,
+    cabin,
+    currency
+  });
+
+  const cached = flightApiSuccessCache.get(cacheKey);
+  if (cached && Date.now() - cached.loadedAt < FLIGHTAPI_CACHE_TTL_MS) {
+    return {
+      status: 200,
+      data: cached.data,
+      tried: [{
+        url: maskFlightApiKeyInUrl(url),
+        status: "CACHE_HIT",
+        attempt: 0,
+        direction,
+        cacheAgeMs: Date.now() - cached.loadedAt,
+        cacheTtlMs: FLIGHTAPI_CACHE_TTL_MS
+      }]
+    };
+  }
 
   const tried = [];
   let lastError = null;
@@ -270,9 +313,15 @@ async function fetchOneWayTrip({
 
       if (res.ok) {
         try {
+          const parsedData = JSON.parse(text);
+          flightApiSuccessCache.set(cacheKey, {
+            loadedAt: Date.now(),
+            data: parsedData
+          });
+
           return {
             status: res.status,
-            data: JSON.parse(text),
+            data: parsedData,
             tried,
           };
         } catch (jsonErr) {
@@ -574,7 +623,7 @@ function mapFlightsFromFlightAPI(raw) {
       ]).map(String)
     ));
 
-    flights.push({
+    const flight = {
       airlineName,
       flightNumber,
       departureTime,
@@ -585,8 +634,13 @@ function mapFlightsFromFlightAPI(raw) {
       carrierAgentIds,
       pricingOptionCount: pricingOptions.length,
       carrierPricingOptionCount: carrierPricingOptions.length,
-      raw: { itinerary: it, leg },
-    });
+    };
+
+    if (String(process.env.INCLUDE_FLIGHTAPI_RAW_IN_RESULTS || "false").toLowerCase() === "true") {
+      flight.raw = { itinerary: it, leg };
+    }
+
+    flights.push(flight);
   }
 
   return flights;
