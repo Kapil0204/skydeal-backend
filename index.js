@@ -156,28 +156,94 @@ async function getOffersCollection() {
 // --------------------
 // FlightAPI call: onewaytrip
 // --------------------
-function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency }) {
-  if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY env var");
-  return `https://api.flightapi.io/onewaytrip/${encodeURIComponent(FLIGHTAPI_KEY)}/${from}/${to}/${date}/${adults}/${children}/${infants}/${cabin}/${currency}`;
+function encodeFlightApiPathPart(value) {
+  return encodeURIComponent(String(value ?? "").trim());
 }
 
-async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", currency = "INR" }) {
+function buildOnewayTripUrl({ from, to, date, adults, children, infants, cabin, currency }) {
+  if (!FLIGHTAPI_KEY) throw new Error("Missing FLIGHTAPI_KEY env var");
+
+  const parts = [
+    "https://api.flightapi.io/onewaytrip",
+    FLIGHTAPI_KEY,
+    from,
+    to,
+    date,
+    adults,
+    children,
+    infants,
+    cabin,
+    currency
+  ];
+
+  const [base, ...pathParts] = parts;
+  return `${base}/${pathParts.map(encodeFlightApiPathPart).join("/")}`;
+}
+
+function shouldRetryFlightApiFailure(status, bodyText = "") {
+  const statusNum = Number(status);
+  const body = String(bodyText || "").toLowerCase();
+
+  if (statusNum === 408 || statusNum === 409 || statusNum === 425 || statusNum === 429) {
+    return true;
+  }
+
+  if (statusNum >= 500) {
+    return true;
+  }
+
+  // FlightAPI often returns 400 for temporary provider-side failure:
+  // {"message":"something went wrong, please try again"}
+  if (
+    statusNum === 400 &&
+    (
+      body.includes("something went wrong") ||
+      body.includes("please try again") ||
+      body.includes("try again") ||
+      body.includes("temporarily")
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function flightApiRetryDelayMs(attempt) {
+  const baseDelayMs = Number(process.env.FLIGHTAPI_RETRY_BASE_DELAY_MS || 800);
+  const delay = baseDelayMs * Math.pow(2, Math.max(0, attempt - 1));
+  return Math.min(delay, 4000);
+}
+
+async function fetchOneWayTrip({
+  from,
+  to,
+  date,
+  adults = 1,
+  children = 0,
+  infants = 0,
+  cabin = "Economy",
+  currency = "INR",
+  direction = "oneway"
+}) {
   const url = buildOnewayTripUrl({
     from,
     to,
     date,
     adults,
-    children: 0,
-    infants: 0,
+    children,
+    infants,
     cabin,
     currency,
   });
 
   const tried = [];
   let lastError = null;
-  const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 6000);
 
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
+  const maxAttempts = Number(process.env.FLIGHTAPI_MAX_ATTEMPTS || 5);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -191,6 +257,8 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
         url: maskFlightApiKeyInUrl(url),
         status: res.status,
         attempt,
+        direction,
+        timeoutMs,
         ...(attempt > 1 ? { retry: true } : {}),
       };
 
@@ -201,16 +269,28 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       tried.push(triedRow);
 
       if (res.ok) {
-        return {
-          status: res.status,
-          data: JSON.parse(text),
-          tried,
-        };
+        try {
+          return {
+            status: res.status,
+            data: JSON.parse(text),
+            tried,
+          };
+        } catch (jsonErr) {
+          lastError = {
+            status: "INVALID_JSON",
+            body: text.slice(0, 800),
+            error: jsonErr?.message || String(jsonErr)
+          };
+        }
       } else {
         lastError = {
           status: res.status,
           body: text,
         };
+
+        if (!shouldRetryFlightApiFailure(res.status, text)) {
+          break;
+        }
       }
     } catch (err) {
       clearTimeout(timeout);
@@ -223,6 +303,7 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       tried.push({
         url: maskFlightApiKeyInUrl(url),
         attempt,
+        direction,
         ...(attempt > 1 ? { retry: true } : {}),
         status: isAbort ? "TIMEOUT" : "ERROR",
         timeoutMs,
@@ -230,8 +311,11 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
       });
     }
 
-    if (attempt < 5) {
-      await new Promise((r) => setTimeout(r, 500));
+    if (attempt < maxAttempts) {
+      const waitMs = flightApiRetryDelayMs(attempt);
+      const lastTried = tried[tried.length - 1];
+      if (lastTried) lastTried.waitBeforeNextAttemptMs = waitMs;
+      await new Promise((r) => setTimeout(r, waitMs));
     }
   }
 
@@ -240,8 +324,10 @@ async function fetchOneWayTrip({ from, to, date, adults = 1, cabin = "Economy", 
   );
   err.status = lastError?.status || 500;
   err.tried = tried;
+  err.flightApiLastError = lastError;
   throw err;
 }
+
 
 // --------------------
 // Map FlightAPI response to consistent flights
@@ -5544,7 +5630,7 @@ app.post("/compare-selected-trip", async (req, res) => {
       1,
       Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
     );
-    const cabin = normalizeCabin(body.travelClass);
+    const cabin = normalizeCabin(body.travelClass || body.cabin);
     const routeIsDomestic = isDomesticRoute(from, to);
 
     const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
@@ -5971,7 +6057,7 @@ app.post("/search", async (req, res) => {
       1,
       Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
     );
-    const cabin = normalizeCabin(body.travelClass);
+    const cabin = normalizeCabin(body.travelClass || body.cabin);
     const currency = "INR";
 
    const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
@@ -6029,7 +6115,7 @@ meta.mongoDb = MONGODB_DB;
 
     // Outbound
     const outFlightApiStart = Date.now();
-    const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency });
+    const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency, direction: "outbound" });
     timings.flightApiOutboundMs = Date.now() - outFlightApiStart;
     meta.outStatus = outRes.status;
     meta.request.outTried = outRes.tried;
@@ -6094,7 +6180,8 @@ meta.mongoDb = MONGODB_DB;
         date: retDate,
         adults,
         cabin,
-        currency
+        currency,
+        direction: "return"
       });
       timings.flightApiReturnMs = Date.now() - retFlightApiStart;
       meta.retStatus = retRes.status;
