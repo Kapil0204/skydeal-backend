@@ -5644,9 +5644,9 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "backend-cleanup-after-generic-display",
-    expectedCommit: "backend-cleanup-after-generic-display",
-    deployedCheck: "Backend cleanup after generic display offers is deployed."
+    buildMarker: "flightapi-cache-and-retry-2026-06-20",
+    expectedCommit: "8fb7c1d",
+    deployedCheck: "FlightAPI retry, timeout, success cache, and trimmed raw response are deployed."
   });
 });
 
