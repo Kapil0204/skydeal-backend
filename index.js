@@ -284,7 +284,7 @@ async function fetchOneWayTrip({
   let lastError = null;
 
   const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
-  const maxAttempts = Number(process.env.FLIGHTAPI_MAX_ATTEMPTS || 5);
+  const maxAttempts = Number(process.env.FLIGHTAPI_MAX_ATTEMPTS || 3);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
@@ -5644,9 +5644,9 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 app.get("/debug/build-version", (req, res) => {
   res.json({
     service: "skydeal-backend",
-    buildMarker: "flightapi-cache-and-retry-2026-06-20",
+    buildMarker: "flightapi-cache-retry-attempts-3-2026-06-20",
     expectedCommit: "8fb7c1d",
-    deployedCheck: "FlightAPI retry, timeout, success cache, and trimmed raw response are deployed."
+    deployedCheck: "FlightAPI retry, timeout, success cache, trimmed raw response, and 3-attempt default are deployed."
   });
 });
 
