@@ -6111,27 +6111,28 @@ app.post("/search", async (req, res) => {
       1,
       Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
     );
-    const cabin = normalizeCabin(body.travelClass || body.cabin);
+    const cabin = normalizeCabin(body.travelClass);
     const currency = "INR";
 
-   const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
+    const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
 
-const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
-  const type = String(pm?.type || "").toLowerCase();
+    const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
+      const type = String(pm?.type || "").toLowerCase();
 
-  if (type.includes("emi") && !Number(pm?.tenureMonths)) {
-    return {
-      ...pm,
-      tenureMonths: 3,
-      defaultedTenure: true
-    };
-  }
+      if (type.includes("emi") && !Number(pm?.tenureMonths)) {
+        return {
+          ...pm,
+          tenureMonths: 3,
+          defaultedTenure: true
+        };
+      }
 
-  return pm;
-});
+      return pm;
+    });
 
-meta.selectedPaymentMethods = selectedPaymentMethods;
+    meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
+
     const includeGenericDisplayOffers =
       body.includeGenericDisplayOffers === true ||
       String(body.includeGenericDisplayOffers || "").toLowerCase() === "true";
@@ -6139,7 +6140,7 @@ meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.includeGenericDisplayOffers = includeGenericDisplayOffers;
     meta.usedFallback = false;
     meta.mongoCollection = MONGO_COL;
-meta.mongoDb = MONGODB_DB;
+    meta.mongoDb = MONGODB_DB;
 
     if (!from || !to || !outDate) {
       return res.status(400).json({
@@ -6149,7 +6150,6 @@ meta.mongoDb = MONGODB_DB;
       });
     }
 
-    // Load offers ONCE per request, using a short in-memory cache
     const mongoStart = Date.now();
     const offers = await getOffersForSearch(meta);
     timings.mongoOffersMs = Date.now() - mongoStart;
@@ -6167,121 +6167,197 @@ meta.mongoDb = MONGODB_DB;
       };
     }
 
-    // Outbound
-    const outFlightApiStart = Date.now();
-    const outRes = await fetchOneWayTrip({ from, to, date: outDate, adults, cabin, currency, direction: "outbound" });
-    timings.flightApiOutboundMs = Date.now() - outFlightApiStart;
-    meta.outStatus = outRes.status;
-    meta.request.outTried = outRes.tried;
+    async function buildLegFlights({
+      direction,
+      fromAirport,
+      toAirport,
+      date
+    }) {
+      const isReturn = direction === "return";
+      const prefix = isReturn ? "ret" : "out";
+      const directionLabel = isReturn ? "return" : "outbound";
 
-        meta.flightApiRawShape = {
-      topLevelKeys: Object.keys(outRes.data || {}),
-      itineraries: Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0,
-      legs: Array.isArray(outRes.data?.legs) ? outRes.data.legs.length : 0,
-      segments: Array.isArray(outRes.data?.segments) ? outRes.data.segments.length : 0,
-      carriers: Array.isArray(outRes.data?.carriers) ? outRes.data.carriers.length : 0,
-      agents: Array.isArray(outRes.data?.agents) ? outRes.data.agents.length : 0,
-      quotes: Array.isArray(outRes.data?.quotes) ? outRes.data.quotes.length : 0,
-      results: Array.isArray(outRes.data?.results) ? outRes.data.results.length : 0,
-      data: Array.isArray(outRes.data?.data) ? outRes.data.data.length : 0
-    };
-    const outMapStart = Date.now();
-    const outFlightsRaw = mapFlightsFromFlightAPI(outRes.data);
-    const outFlightsLimited = limitAndSortFlights(outFlightsRaw).slice(0, 40);
-    timings.mapOutboundMs = Date.now() - outMapStart;
+      const flightApiTimingKey = isReturn ? "flightApiReturnMs" : "flightApiOutboundMs";
+      const mapTimingKey = isReturn ? "mapReturnMs" : "mapOutboundMs";
+      const pricingTimingKey = isReturn ? "offerPricingReturnMs" : "offerPricingOutboundMs";
 
-        meta.outRawFlights = outFlightsRaw.length;
-    meta.outReturnedFlights = outFlightsLimited.length;
-       meta.outCarrierPriceRule = {
-      flightApiItineraries: Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0,
-      keptWithCarrierPrice: outFlightsRaw.length,
-      skippedWithoutCarrierPrice:
-        (Array.isArray(outRes.data?.itineraries) ? outRes.data.itineraries.length : 0) - outFlightsRaw.length,
-      ...(String(process.env.INCLUDE_FLIGHTAPI_DEBUG_META || "false").toLowerCase() === "true"
-        ? { debug: getFlightApiCarrierDebug(outRes.data) }
-        : {})
-    };
+      const triedKey = isReturn ? "retTried" : "outTried";
+      const rawFlightsKey = isReturn ? "retRawFlights" : "outRawFlights";
+      const returnedFlightsKey = isReturn ? "retReturnedFlights" : "outReturnedFlights";
+      const statusKey = isReturn ? "retStatus" : "outStatus";
+      const carrierRuleKey = isReturn ? "retCarrierPriceRule" : "outCarrierPriceRule";
 
-    const routeIsDomestic = isDomesticRoute(from, to);
+      const legStart = Date.now();
 
-    const outPricingStart = Date.now();
-    const outboundFlights = [];
-    for (const f of outFlightsLimited) {
-      outboundFlights.push(
-        await applyOffersToFlight(
-          f,
-          selectedPaymentMethods,
-          offers,
+      try {
+        const res = await fetchOneWayTrip({
+          from: fromAirport,
+          to: toAirport,
+          date,
           adults,
           cabin,
-          tripType,
-          routeIsDomestic,
-          timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
-          offerPricingRequestCache,
-          genericDisplayContext
-        )
-      );
-    }
-    timings.offerPricingOutboundMs = Date.now() - outPricingStart;
+          currency
+        });
 
-    // Return
-       let returnFlights = [];
-    if (tripType === "round-trip" && retDate) {
-      const retFlightApiStart = Date.now();
-      const retRes = await fetchOneWayTrip({
-        from: to,
-        to: from,
-        date: retDate,
-        adults,
-        cabin,
-        currency,
-        direction: "return"
-      });
-      timings.flightApiReturnMs = Date.now() - retFlightApiStart;
-      meta.retStatus = retRes.status;
-      meta.request.retTried = retRes.tried;
-      const retMapStart = Date.now();
-      const retFlightsRaw = mapFlightsFromFlightAPI(retRes.data);
-      const retFlightsLimited = limitAndSortFlights(retFlightsRaw).slice(0, 40);
-      timings.mapReturnMs = Date.now() - retMapStart;
+        timings[flightApiTimingKey] = Date.now() - legStart;
+        meta[statusKey] = res.status;
+        meta.request[triedKey] = res.tried;
 
-           meta.retRawFlights = retFlightsRaw.length;
-      meta.retReturnedFlights = retFlightsLimited.length;
-      meta.retCarrierPriceRule = {
-        flightApiItineraries: Array.isArray(retRes.data?.itineraries) ? retRes.data.itineraries.length : 0,
-        keptWithCarrierPrice: retFlightsRaw.length,
-        skippedWithoutCarrierPrice:
-          (Array.isArray(retRes.data?.itineraries) ? retRes.data.itineraries.length : 0) - retFlightsRaw.length
-      };
+        if (!isReturn) {
+          meta.flightApiRawShape = {
+            topLevelKeys: Object.keys(res.data || {}),
+            itineraries: Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0,
+            legs: Array.isArray(res.data?.legs) ? res.data.legs.length : 0,
+            segments: Array.isArray(res.data?.segments) ? res.data.segments.length : 0,
+            carriers: Array.isArray(res.data?.carriers) ? res.data.carriers.length : 0,
+            agents: Array.isArray(res.data?.agents) ? res.data.agents.length : 0,
+            quotes: Array.isArray(res.data?.quotes) ? res.data.quotes.length : 0,
+            results: Array.isArray(res.data?.results) ? res.data.results.length : 0,
+            data: Array.isArray(res.data?.data) ? res.data.data.length : 0
+          };
+        }
 
-      const returnRouteIsDomestic = isDomesticRoute(to, from);
+        const mapStart = Date.now();
+        const flightsRaw = mapFlightsFromFlightAPI(res.data);
+        const flightsLimited = limitAndSortFlights(flightsRaw).slice(0, 40);
+        timings[mapTimingKey] = Date.now() - mapStart;
 
-      const retPricingStart = Date.now();
-      const enriched = [];
-      for (const f of retFlightsLimited) {
-        enriched.push(
-          await applyOffersToFlight(
-            f,
-            selectedPaymentMethods,
-            offers,
-            adults,
-            cabin,
-            tripType,
-            returnRouteIsDomestic,
-            timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
-            offerPricingRequestCache,
-            genericDisplayContext
-          )
-        );
+        meta[rawFlightsKey] = flightsRaw.length;
+        meta[returnedFlightsKey] = flightsLimited.length;
+        meta[carrierRuleKey] = {
+          flightApiItineraries: Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0,
+          keptWithCarrierPrice: flightsRaw.length,
+          skippedWithoutCarrierPrice:
+            (Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0) - flightsRaw.length,
+          ...(!isReturn && String(process.env.INCLUDE_FLIGHTAPI_DEBUG_META || "false").toLowerCase() === "true"
+            ? { debug: getFlightApiCarrierDebug(res.data) }
+            : {})
+        };
+
+        const routeIsDomestic = isDomesticRoute(fromAirport, toAirport);
+
+        const pricingStart = Date.now();
+        const enriched = [];
+        for (const f of flightsLimited) {
+          enriched.push(
+            await applyOffersToFlight(
+              f,
+              selectedPaymentMethods,
+              offers,
+              adults,
+              cabin,
+              tripType,
+              routeIsDomestic,
+              timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
+              offerPricingRequestCache,
+              genericDisplayContext
+            )
+          );
+        }
+        timings[pricingTimingKey] = Date.now() - pricingStart;
+
+        return {
+          ok: true,
+          direction: directionLabel,
+          flights: enriched,
+          error: null
+        };
+      } catch (e) {
+        const status = e?.status || e?.response?.status || 500;
+
+        timings[flightApiTimingKey] = Date.now() - legStart;
+        meta[statusKey] = status;
+        meta.request[triedKey] = e?.tried || [];
+        meta[rawFlightsKey] = null;
+        meta[returnedFlightsKey] = null;
+
+        const message = e?.message || `${directionLabel} FlightAPI search failed`;
+
+        meta.legErrors = meta.legErrors || {};
+        meta.legErrors[directionLabel] = {
+          status,
+          message
+        };
+
+        return {
+          ok: false,
+          direction: directionLabel,
+          flights: [],
+          error: message,
+          status
+        };
       }
-      timings.offerPricingReturnMs = Date.now() - retPricingStart;
-      returnFlights = enriched;
     }
+
+    let outboundResult = null;
+    let returnResult = null;
+
+    if (tripType === "round-trip" && retDate) {
+      [outboundResult, returnResult] = await Promise.all([
+        buildLegFlights({
+          direction: "outbound",
+          fromAirport: from,
+          toAirport: to,
+          date: outDate
+        }),
+        buildLegFlights({
+          direction: "return",
+          fromAirport: to,
+          toAirport: from,
+          date: retDate
+        })
+      ]);
+    } else {
+      outboundResult = await buildLegFlights({
+        direction: "outbound",
+        fromAirport: from,
+        toAirport: to,
+        date: outDate
+      });
+
+      returnResult = {
+        ok: true,
+        direction: "return",
+        flights: [],
+        error: null
+      };
+    }
+
+    const outboundFlights = outboundResult?.flights || [];
+    const returnFlights = returnResult?.flights || [];
+
+    meta.partialResults = {
+      enabled: tripType === "round-trip",
+      outboundOk: Boolean(outboundResult?.ok),
+      returnOk: tripType === "round-trip" && retDate ? Boolean(returnResult?.ok) : null,
+      outboundCount: outboundFlights.length,
+      returnCount: returnFlights.length
+    };
 
     timings.totalMs = Date.now() - searchStartedAt;
     meta.timings = timings;
 
-    res.json({
+    const isRoundTripSearch = tripType === "round-trip" && retDate;
+
+    if (!outboundResult?.ok && (!isRoundTripSearch || !returnResult?.ok)) {
+      meta.error = isRoundTripSearch
+        ? "Both outbound and return FlightAPI searches failed"
+        : outboundResult?.error || "FlightAPI search failed";
+
+      return res.status(500).json({
+        meta,
+        outboundFlights: [],
+        returnFlights: []
+      });
+    }
+
+    if (isRoundTripSearch && (!outboundResult?.ok || !returnResult?.ok)) {
+      meta.warning = !outboundResult?.ok
+        ? "Outbound FlightAPI search failed, but return results are available"
+        : "Return FlightAPI search failed, but outbound results are available";
+    }
+
+    return res.json({
       meta,
       outboundFlights: outboundFlights.map(slimFlightForSearchResponse),
       returnFlights: returnFlights.map(slimFlightForSearchResponse)
@@ -6297,7 +6373,6 @@ meta.mongoDb = MONGODB_DB;
     res.status(500).json({ meta, outboundFlights: [], returnFlights: [] });
   }
 });
-
 
 /* =========================================================
    Debug only: generic checkout coupon candidates
