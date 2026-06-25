@@ -6111,7 +6111,7 @@ app.post("/search", async (req, res) => {
       1,
       Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
     );
-    const cabin = normalizeCabin(body.travelClass);
+    const cabin = normalizeCabin(body.travelClass || body.cabin);
     const currency = "INR";
 
     const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
