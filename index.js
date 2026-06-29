@@ -1791,11 +1791,140 @@ function tierScopeMatchesTrip(tier, isDomestic) {
   return tierSaysInternational && !tierSaysDomestic;
 }
 
+
+function normalizeTierTripTypeValue(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tierTripTypeMatchesRequest(tier, tripType = "one-way") {
+  const requested = normalizeTierTripTypeValue(tripType);
+  const requestedRoundTrip = /round\s*trip|return\s*trip/.test(requested);
+  const requestedOneWay = /one\s*way|1\s*way/.test(requested) || !requestedRoundTrip;
+
+  const blob = normalizeTierTripTypeValue([
+    tier?.tripType,
+    tier?.journeyType,
+    tier?.bookingType,
+    tier?.routeTripType,
+    tier?.notes,
+    tier?.description,
+    tier?.raw
+  ].filter(Boolean).join(" "));
+
+  const saysOneWay = /\bone\s*way\b|\b1\s*way\b/.test(blob);
+  const saysRoundTrip = /\bround\s*trip\b|\breturn\s*trip\b/.test(blob);
+
+  // Generic tier with no trip-type language applies to both.
+  if (!saysOneWay && !saysRoundTrip) return true;
+
+  // If a tier explicitly says both, let both through.
+  if (saysOneWay && saysRoundTrip) return true;
+
+  if (requestedRoundTrip) return saysRoundTrip;
+  if (requestedOneWay) return saysOneWay;
+
+  return true;
+}
+
+function wordsToPassengerNumber(raw = "") {
+  const s = String(raw || "").toLowerCase();
+  if (/\bone\b/.test(s)) return 1;
+  if (/\btwo\b/.test(s)) return 2;
+  if (/\bthree\b/.test(s)) return 3;
+  if (/\bfour\b/.test(s)) return 4;
+  if (/\bfive\b/.test(s)) return 5;
+
+  const n = Number(s.match(/\d+/)?.[0] || 0);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function tierPassengerCountMatchesRequest(tier, passengers = 1) {
+  const pax = Math.max(1, Number(passengers) || 1);
+
+  const directPassengerCount = Number(
+    tier?.passengerCount ??
+    tier?.passengers ??
+    tier?.pax ??
+    0
+  );
+
+  if (Number.isFinite(directPassengerCount) && directPassengerCount > 0) {
+    return pax === directPassengerCount;
+  }
+
+  const directMinPassengers = Number(
+    tier?.minPassengers ??
+    tier?.minPassengerCount ??
+    tier?.minPax ??
+    0
+  );
+
+  const directMaxPassengers = Number(
+    tier?.maxPassengers ??
+    tier?.maxPassengerCount ??
+    tier?.maxPax ??
+    0
+  );
+
+  if (Number.isFinite(directMinPassengers) && directMinPassengers > 0 && pax < directMinPassengers) {
+    return false;
+  }
+
+  if (Number.isFinite(directMaxPassengers) && directMaxPassengers > 0 && pax > directMaxPassengers) {
+    return false;
+  }
+
+  if (
+    Number.isFinite(directMinPassengers) && directMinPassengers > 0 ||
+    Number.isFinite(directMaxPassengers) && directMaxPassengers > 0
+  ) {
+    return true;
+  }
+
+  const blob = String([
+    tier?.notes,
+    tier?.description,
+    tier?.raw,
+    tier?.label
+  ].filter(Boolean).join(" ")).toLowerCase();
+
+  // Generic tier with no passenger language applies to all passenger counts.
+  if (!/\bpassenger(s)?\b|\bpax\b/.test(blob)) return true;
+
+  // "three and more passengers", "3+ passengers", "3 or more pax"
+  const plusMatch =
+    blob.match(/\b(\d+|one|two|three|four|five)\s*(?:\+|and\s+more|or\s+more)\s*(?:passenger(s)?|pax)\b/i) ||
+    blob.match(/\b(?:for\s+)?(\d+|one|two|three|four|five)\s*(?:and\s+more|or\s+more)\b/i);
+
+  if (plusMatch) {
+    const min = wordsToPassengerNumber(plusMatch[1]);
+    return min ? pax >= min : true;
+  }
+
+  // "for one passenger", "for two passengers"
+  const exactMatch =
+    blob.match(/\b(?:for\s+)?(\d+|one|two|three|four|five)\s*(?:passenger(s)?|pax)\b/i);
+
+  if (exactMatch) {
+    const exact = wordsToPassengerNumber(exactMatch[1]);
+    return exact ? pax === exact : true;
+  }
+
+  return true;
+}
+
+
 function pickApplicableDiscountTier(
   offer,
   eligibilityAmount,
   selectedPaymentMethods = [],
-  isDomestic = true
+  isDomestic = true,
+  tripType = "one-way",
+  passengers = 1
 ) {
   const tiers = offer?.discountTiers || offer?.parsedFields?.discountTiers || [];
   if (!Array.isArray(tiers) || tiers.length === 0) return null;
@@ -1808,6 +1937,8 @@ function pickApplicableDiscountTier(
   const eligible = tiers
     .filter((t) => {
       if (!tierScopeMatchesTrip(t, isDomestic)) return false;
+      if (!tierTripTypeMatchesRequest(t, tripType)) return false;
+      if (!tierPassengerCountMatchesRequest(t, passengers)) return false;
 
       const min = Number(t?.minTransactionValue || 0);
       if (min > 0 && amount < min) return false;
@@ -1862,7 +1993,7 @@ function pickApplicableDiscountTier(
   return eligible[0] || null;
 }
 
-function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, selectedPaymentMethods = [], eligibilityAmount = baseAmount) {
+function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, selectedPaymentMethods = [], eligibilityAmount = baseAmount, tripType = "one-way") {
   const base = Number(baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
 
@@ -1903,7 +2034,9 @@ function computeDiscountedPrice(offer, baseAmount, isDomestic, passengers = 1, s
   offer,
   eligibilityAmount,
   selectedPaymentMethods,
-  isDomestic
+  isDomestic,
+  tripType,
+  passengers
 );
 
 if (applicableTier) {
@@ -3527,7 +3660,8 @@ if (
   isDomestic,
   passengers,
   selectedPaymentMethods,
-  eligibilityAmount
+  eligibilityAmount,
+  tripType
 );
   const maxDiscountAmount = getOfferMaxDiscountAmount(offer);
 
