@@ -3723,6 +3723,10 @@ function shouldShowAsReferenceInfoOffer({
   if (!isFlightOffer(offer)) return false;
   if (isHotelOnlyOffer(offer)) return false;
   if (isOfferExpired(offer)) return false;
+
+  const bookingDayCheck = offerMatchesBookingDay(offer);
+  if (!bookingDayCheck.ok) return false;
+
   if (!offerAppliesToPortal(offer, portal)) return false;
 
   const coupon =
@@ -3796,6 +3800,10 @@ if (isJunkInfoOffer(offer)) continue;
        if (!isFlightOffer(offer)) continue;
 if (isHotelOnlyOffer(offer)) continue;
 if (isOfferExpired(offer)) continue;
+
+const bookingDayCheck = offerMatchesBookingDay(offer);
+if (!bookingDayCheck.ok) continue;
+
 if (!offerAppliesToPortal(offer, portal)) continue;
 if (isSuspiciousGenericOffer(offer, offers)) continue;
 if (!offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods)) continue;
@@ -3888,8 +3896,16 @@ const showReferenceInfo = shouldShowAsReferenceInfoOffer({
 
 // NEW LOGIC — allow valid offers even if not applied
 
+const infoEvalReasons = Array.isArray(infoEval?.reasons) ? infoEval.reasons : [];
+
 const isValidButNotApplied =
   !infoEval.ok &&
+  !infoEvalReasons.includes("BOOKING_DAY_MISMATCH") &&
+  !infoEvalReasons.includes("EXPIRED") &&
+  !infoEvalReasons.includes("NOT_FLIGHT_OFFER") &&
+  !infoEvalReasons.includes("HOTEL_ONLY") &&
+  !infoEvalReasons.includes("PORTAL_MISMATCH") &&
+  !infoEvalReasons.includes("SCOPE_MISMATCH") &&
   !isOfferExpired(offer) &&
   isFlightOffer(offer);
 
