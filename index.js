@@ -253,6 +253,20 @@ async function fetchOneWayTrip({
     currency,
   });
 
+  const fallbackCabin = String(cabin || "").trim() === "Economy" ? "economy" : null;
+  const fallbackUrl = fallbackCabin
+    ? buildOnewayTripUrl({
+        from,
+        to,
+        date,
+        adults,
+        children,
+        infants,
+        cabin: fallbackCabin,
+        currency,
+      })
+    : null;
+
   const cacheKey = buildFlightApiCacheKey({
     from,
     to,
@@ -291,13 +305,14 @@ async function fetchOneWayTrip({
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(url, { signal: controller.signal });
+      const activeUrl = fallbackUrl && attempt > 1 ? fallbackUrl : url;
+      const res = await fetch(activeUrl, { signal: controller.signal });
       clearTimeout(timeout);
 
       const text = await res.text();
 
       const triedRow = {
-        url: maskFlightApiKeyInUrl(url),
+        url: maskFlightApiKeyInUrl(activeUrl),
         status: res.status,
         attempt,
         direction,
@@ -350,7 +365,7 @@ async function fetchOneWayTrip({
       };
 
       tried.push({
-        url: maskFlightApiKeyInUrl(url),
+        url: maskFlightApiKeyInUrl(fallbackUrl && attempt > 1 ? fallbackUrl : url),
         attempt,
         direction,
         ...(attempt > 1 ? { retry: true } : {}),
