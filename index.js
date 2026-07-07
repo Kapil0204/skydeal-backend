@@ -2565,7 +2565,13 @@ const explicitBankCanonical = pm?.bankCanonical ? normalizeBankCanonicalAlias(pm
 // Example: UPIPAY has raw = "UPI payment method". If we pass that to
 // bankCanonicalFromAny(), it becomes UPI_PAYMENT_METHOD and blocks generic UPI matching.
 const bankFromFields = pm?.bank || pm?.name || "";
-const bankCanonical = explicitBankCanonical || bankCanonicalFromAny(bankFromFields);
+// Prefer the name-derived canonical so the OFFER side canonicalizes identically
+// to the SELECTION side (normalizeSelectedPM), which always uses bankCanonicalFromAny.
+// Fall back to the scraper-provided canonical only when there's no usable bank name
+// (e.g. generic UPI like UPIPAY, whose pm.bank is empty). Fixes cases like GOINDUSEMI:
+// stored "INDUSIND" never matched selection-side "INDUSIND_BANK".
+const nameDerived = bankFromFields ? bankCanonicalFromAny(bankFromFields) : null;
+const bankCanonical = nameDerived || explicitBankCanonical;
 
   const explicitTenure =
     Number(pm?.tenureMonths) ||
