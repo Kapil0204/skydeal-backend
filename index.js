@@ -3285,6 +3285,24 @@ function extractBookingDayRule(offer) {
     return BOOKING_DAY_RULE_CACHE.get(offer);
   }
 
+  // Prefer the structured day-of-week restriction the scrapers already produce
+  // (e.g. dayOfWeekRestrictions: ["Monday"] = valid ONLY on those days). This is
+  // authoritative and avoids depending on the day word surviving in the free-text
+  // summary — which MMT strips, silently dropping real restrictions and making
+  // offers over-show (FLYMONEMI/FLYMON/MMTBOBEMI/SBIDC/MMTAUDC were showing every day).
+  const structuredDays = (
+    Array.isArray(offer?.dayOfWeekRestrictions) ? offer.dayOfWeekRestrictions :
+    Array.isArray(offer?.parsedFields?.dayOfWeekRestrictions) ? offer.parsedFields.dayOfWeekRestrictions :
+    []
+  ).map(normalizeWeekdayToken).filter(Boolean);
+  if (structuredDays.length > 0) {
+    return rememberBookingDayRule(offer, {
+      mode: "include",
+      days: structuredDays,
+      source: "dayOfWeekRestrictions"
+    });
+  }
+
   const blobRaw = offerWeekdayBlob(offer);
   const blob = String(blobRaw || "").toLowerCase().replace(/\s+/g, " ").trim();
 
