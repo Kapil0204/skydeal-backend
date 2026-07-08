@@ -3392,52 +3392,90 @@ function evaluateOfferForFlight({
   tripType,
   passengers,
   allOffers = [],
+  requestCache = null,
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
-  if (!isTrustedPricingRule(offer)) {
-  return { ok: false, reasons: ["NOT_TRUSTED_PRICING_RULE"] };
-}
+  // --- Fare-independent eligibility gauntlet -------------------------------
+  // These checks depend only on (offer, portal, isDomestic, cabin, allOffers),
+  // all constant across the flights in a single search, so re-running them per
+  // flight (~1,320x) is pure waste. When requestCache.perfEligibilityMemo is on,
+  // memoize the exact verdict per (offer, portal) — a rejection object, or null
+  // for "passed" — preserving identical behavior (including any thrown-check
+  // path, since the first real evaluation is what gets cached). Gated by a
+  // request flag so it is a strict no-op until explicitly enabled/verified.
+  const __frontMemo =
+    requestCache && requestCache.perfEligibilityMemo
+      ? requestCache.frontEligibilityMemo
+      : null;
 
-  if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
-  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
-
-  const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
-  const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
-  const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
-
-  if (mentionsNonFlight && !mentionsFlight) {
-    return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
+  let __frontResult;
+  if (__frontMemo) {
+    const __perOffer = __frontMemo.get(offer);
+    if (__perOffer && __perOffer.has(portal)) {
+      __frontResult = __perOffer.get(portal);
+    }
   }
 
-  if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
-  if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
+  if (__frontResult === undefined) {
+    __frontResult = (() => {
+      if (!isTrustedPricingRule(offer)) {
+        return { ok: false, reasons: ["NOT_TRUSTED_PRICING_RULE"] };
+      }
+      if (!isFlightOffer(offer)) return { ok: false, reasons: ["NOT_FLIGHT_OFFER"] };
+      if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY_OFFER"] };
 
-    if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+      const nfBlob = `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.rawText || ""} ${offer?.terms || ""}`.toLowerCase();
+      const mentionsFlight = /\bflight(s)?\b|\bair\s*ticket(s)?\b|\bairfare\b/.test(nfBlob);
+      const mentionsNonFlight = /\btourism\b|\battraction(s)?\b|\bholiday(s)?\b|\bactivity\b|\bvisa\b|\bforex\b|\bbus(es)?\b|\bcab(s)?\b|\btrain(s)?\b|\bhotel(s)?\b/.test(nfBlob);
 
-const bookingDayCheck = offerMatchesBookingDay(offer);
-if (!bookingDayCheck.ok) {
-  return {
-    ok: false,
-    reasons: ["BOOKING_DAY_MISMATCH"],
-    bookingDay: bookingDayCheck.bookingDay,
-    allowedBookingDays: bookingDayCheck.rule?.days || null
-  };
-}
+      if (mentionsNonFlight && !mentionsFlight) {
+        return { ok: false, reasons: ["NON_FLIGHT_VERTICAL"] };
+      }
 
-if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
-if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+      if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
+      if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-if (isSuspiciousGenericOffer(offer, allOffers || [])) {
-  return { ok: false, reasons: ["SUSPICIOUS_GENERIC_VARIANT"] };
-}
+      if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
 
-// Best-offer trust filter:
-// allow display elsewhere, but never let non-deterministic / vague offers become applied winners
-// Generic/portal deterministic offers are allowed to become best offers.
-// Example: Goibibo "Domestic Flight Discount" FLAT ₹750 OFF with paymentMethods: [].
-if (!isDeterministicPortalPricingOffer(offer) && !isValidBestOffer(offer)) {
-  return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
-}
+      const bookingDayCheck = offerMatchesBookingDay(offer);
+      if (!bookingDayCheck.ok) {
+        return {
+          ok: false,
+          reasons: ["BOOKING_DAY_MISMATCH"],
+          bookingDay: bookingDayCheck.bookingDay,
+          allowedBookingDays: bookingDayCheck.rule?.days || null
+        };
+      }
+
+      if (!offerAppliesToPortal(offer, portal)) return { ok: false, reasons: ["PORTAL_MISMATCH"] };
+      if (!offerScopeMatchesTrip(offer, isDomestic, cabin)) return { ok: false, reasons: ["SCOPE_MISMATCH"] };
+
+      if (isSuspiciousGenericOffer(offer, allOffers || [])) {
+        return { ok: false, reasons: ["SUSPICIOUS_GENERIC_VARIANT"] };
+      }
+
+      // Best-offer trust filter:
+      // allow display elsewhere, but never let non-deterministic / vague offers become applied winners
+      // Generic/portal deterministic offers are allowed to become best offers.
+      // Example: Goibibo "Domestic Flight Discount" FLAT ₹750 OFF with paymentMethods: [].
+      if (!isDeterministicPortalPricingOffer(offer) && !isValidBestOffer(offer)) {
+        return { ok: false, reasons: ["NOT_VALID_BEST_OFFER"] };
+      }
+
+      return null;
+    })();
+
+    if (__frontMemo) {
+      let __perOffer = __frontMemo.get(offer);
+      if (!__perOffer) {
+        __perOffer = new Map();
+        __frontMemo.set(offer, __perOffer);
+      }
+      __perOffer.set(portal, __frontResult);
+    }
+  }
+
+  if (__frontResult) return __frontResult;
   const rawDiscountText = String(
   offer?.rawDiscount ||
   offer?.parsedFields?.rawDiscount ||
@@ -4380,6 +4418,7 @@ for (const offer of offersToEvaluate) {
     tripType,
     passengers,
     allOffers: offers,
+    requestCache,
   });
 
   if (pricingTiming) {
@@ -6286,8 +6325,13 @@ app.post("/search", async (req, res) => {
   const timings = {};
   const offerPricingRequestCache = {
     infoOffersByKey: new Map(),
-    pricingCandidatesByKey: new Map()
+    pricingCandidatesByKey: new Map(),
+    // Per-request memo of the fare-independent eligibility gauntlet in
+    // evaluateOfferForFlight. Strict no-op unless perfEligibilityMemo is true.
+    frontEligibilityMemo: new Map(),
+    perfEligibilityMemo: body.__perfEligibilityMemo === true
   };
+  meta.perfEligibilityMemo = offerPricingRequestCache.perfEligibilityMemo;
 
   try {
     const from = String(body.from || "").trim().toUpperCase();
