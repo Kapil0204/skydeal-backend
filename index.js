@@ -6327,9 +6327,11 @@ app.post("/search", async (req, res) => {
     infoOffersByKey: new Map(),
     pricingCandidatesByKey: new Map(),
     // Per-request memo of the fare-independent eligibility gauntlet in
-    // evaluateOfferForFlight. Strict no-op unless perfEligibilityMemo is true.
+    // evaluateOfferForFlight. Verified price-identical vs. unmemoized output
+    // (2026-07-08/09) — enabled by default. Kill switch: a request can send
+    // __perfEligibilityMemo: false to instantly disable it without a redeploy.
     frontEligibilityMemo: new Map(),
-    perfEligibilityMemo: body.__perfEligibilityMemo === true
+    perfEligibilityMemo: body.__perfEligibilityMemo !== false
   };
   meta.perfEligibilityMemo = offerPricingRequestCache.perfEligibilityMemo;
 
