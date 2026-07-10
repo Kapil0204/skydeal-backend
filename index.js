@@ -4841,8 +4841,20 @@ async function computePaymentOptionsFromOffers() {
     Wallet: new Set(),
   };
 
-  for (const offer of offers) {
-    if (isOfferExpired(offer)) continue; // offers with no stated validity are treated as ongoing, not skipped
+  // bucket -> bank -> Set of offer indices (dedupes multiple pm entries
+  // for the same bank within one offer, so the count reflects distinct
+  // live offers, not raw payment-method rows).
+  const bucketBankOfferIdx = {
+    EMI: {},
+    CreditCard: {},
+    DebitCard: {},
+    NetBanking: {},
+    UPI: {},
+    Wallet: {},
+  };
+
+  offers.forEach((offer, offerIdx) => {
+    if (isOfferExpired(offer)) return; // offers with no stated validity are treated as ongoing, not skipped
 
     const pms = extractOfferPaymentMethods(offer); // includes inference if needed
     for (const pm of pms) {
@@ -4854,8 +4866,11 @@ async function computePaymentOptionsFromOffers() {
       if (!bank) continue;
 
       buckets[bucket].add(bank);
+
+      if (!bucketBankOfferIdx[bucket][bank]) bucketBankOfferIdx[bucket][bank] = new Set();
+      bucketBankOfferIdx[bucket][bank].add(offerIdx);
     }
-  }
+  });
 
     const creditCard = Array.from(buckets.CreditCard).sort();
   const debitCard = Array.from(buckets.DebitCard).sort();
@@ -4879,7 +4894,30 @@ async function computePaymentOptionsFromOffers() {
     "Net Banking": netBanking,
   };
 
-  return { usedFallback: false, options };
+  // Additive, non-breaking: how many live offers back each bank/app, so the
+  // frontend can show a "N offers" signal without changing `options`' shape
+  // (an array of plain name strings, per CONTRACT.md).
+  const buildCounts = (bucketKey) => {
+    const out = {};
+    for (const [bank, idxSet] of Object.entries(bucketBankOfferIdx[bucketKey] || {})) {
+      out[bank] = idxSet.size;
+    }
+    return out;
+  };
+
+  const offerCounts = {
+    EMI: buildCounts("EMI"),
+    CreditCard: buildCounts("CreditCard"),
+    DebitCard: buildCounts("DebitCard"),
+    NetBanking: buildCounts("NetBanking"),
+    UPI: buildCounts("UPI"),
+    Wallet: buildCounts("Wallet"),
+    "Credit Card": buildCounts("CreditCard"),
+    "Debit Card": buildCounts("DebitCard"),
+    "Net Banking": buildCounts("NetBanking"),
+  };
+
+  return { usedFallback: false, options, offerCounts };
 }
 
 // --------------------
