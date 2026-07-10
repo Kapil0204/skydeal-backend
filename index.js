@@ -4842,6 +4842,8 @@ async function computePaymentOptionsFromOffers() {
   };
 
   for (const offer of offers) {
+    if (isOfferExpired(offer)) continue; // offers with no stated validity are treated as ongoing, not skipped
+
     const pms = extractOfferPaymentMethods(offer); // includes inference if needed
     for (const pm of pms) {
       const canon = offerPmToCanonical(pm);
