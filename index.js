@@ -4794,7 +4794,7 @@ function normalizeBankDisplayName(raw) {
   if (u === "CANARA BANK") return "Canara Bank";
   if (u === "J&K BANK" || u === "J AND K BANK") return "J&K Bank";
   if (u === "BANK OF INDIA") return "Bank of India";
-  if (u === "DBS") return "DBS";
+  if (u === "DBS" || u === "DBS BANK") return "DBS Bank";
     if (u === "CRED UPI") return "CRED";
   if (u === "UPI PAYMENTS" || u === "UPI") return "UPI";
     if (u === "RUPAY" || u === "RUPAY SELECT" || u === "RUPAY PLATINUM") return "RuPay";
