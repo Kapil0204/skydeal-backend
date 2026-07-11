@@ -468,7 +468,7 @@ function getAgentText(agentId, agentById) {
   ].filter(Boolean).join(" "));
 }
 
-function pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentById) {
+function pricingOptionLooksLikeCarrierSource(opt, aliases, agentById) {
   const agentIds = new Set();
 
   if (Array.isArray(opt?.agent_ids)) {
@@ -483,7 +483,6 @@ function pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentByI
 
   if (agentIds.size === 0) return false;
 
-  const aliases = getCarrierAliases(airlineName, carrier);
   const allAgentText = Array.from(agentIds)
     .map((id) => getAgentText(id, agentById))
     .join(" ");
@@ -492,6 +491,48 @@ function pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentByI
     if (!alias) return false;
     return allAgentText.includes(alias);
   });
+}
+
+// A connecting itinerary's leg can be made of segments operated/marketed by
+// DIFFERENT carriers (a genuine interline connection, e.g. Air India ->
+// Cathay Pacific on one ticket) - not just repeats of one carrier. Returns
+// every distinct carrier across the leg's segments, in flight order.
+function getLegCarriers(leg, segmentById, carrierById) {
+  const segIds = Array.isArray(leg?.segment_ids) ? leg.segment_ids : [];
+  const seen = new Set();
+  const result = [];
+
+  for (const segId of segIds) {
+    const seg = segmentById[segId];
+    const carrierId = seg?.marketing_carrier_id;
+    if (carrierId == null) continue;
+
+    const key = String(carrierId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    result.push({ carrierId: key, carrier: carrierById[key] || null });
+  }
+
+  return result;
+}
+
+// Aliases (name + code + known-shorthand variants) across EVERY carrier
+// involved in a leg, not just the first segment's. This is what lets a
+// pricing option sold directly by a LATER segment's carrier (e.g. Cathay
+// Pacific selling an Air India + Cathay Pacific itinerary) still count as a
+// trusted carrier-direct price - the same trust tier SkyDeal already
+// applies to single-carrier itineraries, just checked against the right
+// carrier.
+function getMultiCarrierAliases(legCarriers) {
+  const aliases = new Set();
+
+  for (const { carrier } of legCarriers) {
+    const name = carrier?.name || carrier?.display_name || carrier?.code || "";
+    getCarrierAliases(name, carrier).forEach((a) => aliases.add(a));
+  }
+
+  return Array.from(aliases);
 }
 
 function getPricingOptionAmount(opt) {
@@ -592,20 +633,41 @@ function mapFlightsFromFlightAPI(raw) {
     const legId = Array.isArray(it.leg_ids) ? it.leg_ids[0] : null;
     const leg = legId ? legById[legId] : null;
 
-    const marketingCarrierId = Array.isArray(leg?.marketing_carrier_ids)
-      ? leg.marketing_carrier_ids[0]
-      : null;
+    // A leg can be a genuine interline connection - segments operated/
+    // marketed by DIFFERENT carriers on one itinerary. legCarriers holds
+    // every distinct carrier across the leg's segments, in flight order.
+    const legCarriers = getLegCarriers(leg, segmentById, carrierById);
+    const primaryCarrier = legCarriers[0]?.carrier || null;
 
-    const carrier = marketingCarrierId != null
-      ? carrierById[String(marketingCarrierId)]
-      : null;
+    // airlineName stays the PRIMARY (first-segment) carrier only, unchanged
+    // from before - this is what offer-matching (getOfferKindForFlight /
+    // offerTargetsThisAirline) already relies on, and is not being touched
+    // here. displayAirlineName/allAirlineNames below are additive fields
+    // purely for showing the true multi-carrier itinerary to users.
+    const airlineName = primaryCarrier?.name || primaryCarrier?.display_name || primaryCarrier?.code || "-";
 
-    const airlineName = carrier?.name || carrier?.display_name || carrier?.code || "-";
+    const allAirlineNames = Array.from(new Set(
+      legCarriers
+        .map(({ carrier: c }) => c?.name || c?.display_name || c?.code)
+        .filter(Boolean)
+    ));
+    const isMixedCarrierItinerary = allAirlineNames.length > 1;
+    const displayAirlineName = isMixedCarrierItinerary ? allAirlineNames.join(" + ") : airlineName;
 
     const pricingOptions = Array.isArray(it.pricing_options) ? it.pricing_options : [];
 
+    // Check a pricing option's agent against EVERY carrier involved in the
+    // itinerary, not just the first segment's. This recovers genuine
+    // interline fares sold directly by a LATER segment's carrier (e.g.
+    // Cathay Pacific selling an Air India + Cathay Pacific itinerary) -
+    // still a carrier-direct price, just previously missed because only
+    // the first carrier's aliases were ever checked. Itineraries with NO
+    // carrier-direct price at all (only global OTA/meta-agents like
+    // eDreams/BYOjet) are still correctly dropped below - this does not
+    // relax that rule.
+    const carrierAliases = getMultiCarrierAliases(legCarriers);
     const carrierPricingOptions = pricingOptions.filter((opt) =>
-      pricingOptionLooksLikeCarrierSource(opt, airlineName, carrier, agentById)
+      pricingOptionLooksLikeCarrierSource(opt, carrierAliases, agentById)
     );
 
     const carrierAmounts = carrierPricingOptions
@@ -620,11 +682,27 @@ function mapFlightsFromFlightAPI(raw) {
 
     const carrierAmount = Math.min(...carrierAmounts);
 
+    // allFlightNumbers and segmentAirlineNames are built together, one
+    // entry PER SEGMENT (not deduped) so the two stay index-aligned -
+    // allAirlineNames above is deduped for the "A + B" display join, which
+    // would misalign against a per-segment array whenever a carrier
+    // repeats across segments (e.g. a 2-stop leg operated by the same
+    // carrier on 2 of its 3 segments).
     let flightNumber = "-";
+    const allFlightNumbers = [];
+    const segmentAirlineNames = [];
     if (Array.isArray(leg?.segment_ids) && leg.segment_ids.length > 0) {
-      const seg = segmentById[leg.segment_ids[0]];
-      const num = seg?.flight_number || seg?.marketing_flight_number;
-      if (num) flightNumber = String(num);
+      for (const segId of leg.segment_ids) {
+        const seg = segmentById[segId];
+        const num = seg?.flight_number || seg?.marketing_flight_number;
+        if (num) allFlightNumbers.push(String(num));
+
+        const segCarrier = seg?.marketing_carrier_id != null
+          ? carrierById[String(seg.marketing_carrier_id)]
+          : null;
+        segmentAirlineNames.push(segCarrier?.name || segCarrier?.display_name || segCarrier?.code || null);
+      }
+      if (allFlightNumbers.length > 0) flightNumber = allFlightNumbers[0];
     }
 
     const departureTime = leg?.departure || null;
@@ -640,7 +718,12 @@ function mapFlightsFromFlightAPI(raw) {
 
     const flight = {
       airlineName,
+      displayAirlineName,
+      isMixedCarrierItinerary,
+      allAirlineNames,
       flightNumber,
+      allFlightNumbers,
+      segmentAirlineNames,
       departureTime,
       arrivalTime,
       stops,
