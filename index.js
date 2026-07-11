@@ -632,6 +632,15 @@ function getLegLayovers(leg, segmentById, placeById) {
     const placeId = Array.isArray(stopPlaceIds) ? stopPlaceIds[0] : stopPlaceIds;
     const place = placeId != null ? placeById[placeId] : null;
 
+    // FlightAPI's places array links an airport to its parent CITY entity
+    // (place.parent_id). Most airports' own name already reads as a city
+    // name (e.g. "Mumbai"), but some don't (e.g. "Noida International" ->
+    // parent city is actually named "Jewar" in this data) - resolving the
+    // real parent city is more correct than guessing/trimming the airport
+    // name string.
+    const parentPlace = place?.parent_id != null ? placeById[place.parent_id] : null;
+    const cityName = (parentPlace?.type === "City" ? parentPlace?.name : null) || place?.name || null;
+
     let durationMinutes = null;
     if (segA?.arrival && segB?.departure) {
       const ms = new Date(segB.departure).getTime() - new Date(segA.arrival).getTime();
@@ -641,6 +650,7 @@ function getLegLayovers(leg, segmentById, placeById) {
     layovers.push({
       airportCode: place?.display_code || place?.alt_id || null,
       airportName: place?.name || null,
+      cityName,
       durationMinutes,
     });
   }
