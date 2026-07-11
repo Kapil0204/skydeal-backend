@@ -615,17 +615,52 @@ function getFlightApiCarrierDebug(raw) {
 // SkyDeal base fare must come from the flight carrier/airline source only.
 // We do NOT use OTA/cheapest marketplace pricing as base fare.
 // --------------------
+// A leg's stop_ids/segment_ids let us tell the user WHERE a connection is
+// and how long the layover is (FlightAPI has no terminal-change data
+// anywhere in its schema, so we only surface what we can actually verify -
+// airport/city and duration, not a terminal claim).
+function getLegLayovers(leg, segmentById, placeById) {
+  const segIds = Array.isArray(leg?.segment_ids) ? leg.segment_ids : [];
+  const stopIdGroups = Array.isArray(leg?.stop_ids) ? leg.stop_ids : [];
+  const layovers = [];
+
+  for (let i = 0; i < segIds.length - 1; i++) {
+    const segA = segmentById[segIds[i]];
+    const segB = segmentById[segIds[i + 1]];
+
+    const stopPlaceIds = stopIdGroups[i];
+    const placeId = Array.isArray(stopPlaceIds) ? stopPlaceIds[0] : stopPlaceIds;
+    const place = placeId != null ? placeById[placeId] : null;
+
+    let durationMinutes = null;
+    if (segA?.arrival && segB?.departure) {
+      const ms = new Date(segB.departure).getTime() - new Date(segA.arrival).getTime();
+      if (Number.isFinite(ms) && ms >= 0) durationMinutes = Math.round(ms / 60000);
+    }
+
+    layovers.push({
+      airportCode: place?.display_code || place?.alt_id || null,
+      airportName: place?.name || null,
+      durationMinutes,
+    });
+  }
+
+  return layovers;
+}
+
 function mapFlightsFromFlightAPI(raw) {
   const itineraries = Array.isArray(raw?.itineraries) ? raw.itineraries : [];
   const legs = Array.isArray(raw?.legs) ? raw.legs : [];
   const carriers = Array.isArray(raw?.carriers) ? raw.carriers : [];
   const segments = Array.isArray(raw?.segments) ? raw.segments : [];
   const agents = Array.isArray(raw?.agents) ? raw.agents : [];
+  const places = Array.isArray(raw?.places) ? raw.places : [];
 
   const legById = Object.fromEntries(legs.map((l) => [l.id, l]));
   const carrierById = Object.fromEntries(carriers.map((c) => [String(c.id), c]));
   const segmentById = Object.fromEntries(segments.map((s) => [s.id, s]));
   const agentById = Object.fromEntries(agents.map((a) => [String(a.id), a]));
+  const placeById = Object.fromEntries(places.map((p) => [p.id, p]));
 
   const flights = [];
 
@@ -709,6 +744,8 @@ function mapFlightsFromFlightAPI(raw) {
     const arrivalTime = leg?.arrival || null;
     const stops = typeof leg?.stop_count === "number" ? leg.stop_count : 0;
 
+    const layovers = getLegLayovers(leg, segmentById, placeById);
+
     const carrierAgentIds = Array.from(new Set(
       carrierPricingOptions.flatMap((opt) => [
         ...(Array.isArray(opt?.agent_ids) ? opt.agent_ids : []),
@@ -727,6 +764,7 @@ function mapFlightsFromFlightAPI(raw) {
       departureTime,
       arrivalTime,
       stops,
+      layovers,
       price: carrierAmount,
       priceSource: "carrier_airline",
       carrierAgentIds,
