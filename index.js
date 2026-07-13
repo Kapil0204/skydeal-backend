@@ -35,7 +35,36 @@ const PAYMENT_RECOMMENDATION_CONFIG = {
   maxFlightsPerLeg: 40,           // validation cap only — matches /search's existing per-leg cap
   maxCandidatesPerRequest: 50,    // computation guard
   maxEmiTenureVariantsPerBank: 6,
-  softTimeBudgetMs: 20000         // stop testing further candidates past this
+  softTimeBudgetMs: 20000,        // stop testing further candidates past this
+  suggestionsCacheTtlMs: 15000    // Phase 2: dedupe repeat identical /payment-suggestions calls
+};
+
+// Phase 2 — recommendation scoring. Ranking precedence is: relevance tier
+// > additional saving > ease of adoption > flights improved > breadth.
+// Rather than a multi-key comparator, each level gets a multiplier large
+// enough that a single unit of difference at that level always outweighs
+// the ENTIRE realistic range of every level after it combined — so a
+// plain descending sort on the resulting number reproduces the exact
+// precedence order safely (no risk of a lower-precedence factor ever
+// flipping a higher-precedence comparison), while still yielding one
+// transparent, comparable score per suggestion. Never sent to the client.
+const RECOMMENDATION_SCORE_WEIGHTS = {
+  // Relevance tier (1 = same bank ... higher = less relevant). One tier
+  // step is worth far more than the maximum plausible combined value of
+  // saving+ease+flights+breadth below, so relevance always wins first.
+  tierUnit: 1_000_000_000_000,
+  // ₹1 of additional saving. One tier step (1e12) dwarfs even an
+  // unrealistically large saving (₹1,000,000 → 1e12 contribution), so
+  // saving can only ever matter as a tiebreaker within the same tier.
+  savingUnit: 1_000_000,
+  // One ease-of-adoption level (0-3, see easeOfAdoptionScore). Sized to
+  // dominate the maximum realistic flights+breadth contribution below.
+  easeUnit: 10_000,
+  // One flight improved (outbound+return combined, capped ~80 by the
+  // existing per-leg flight limit) - dominates breadth's max (100).
+  flightUnit: 100,
+  // 1 percentage point of flights-tested that improved (0-100).
+  breadthUnit: 1
 };
 
 // Mongo envs
@@ -6941,8 +6970,8 @@ function candidateKey(c) {
   ].join("|");
 }
 
-// Relevance hierarchy for Phase 1 suggestions - determines both whether a
-// candidate is shown at all (tier 4 is excluded) and how results are
+// Relevance hierarchy for Phase 1/2 suggestions - determines both whether
+// a candidate is shown at all (tier 5 is excluded) and how results are
 // ranked. Never alters eligibility/pricing, which always comes from the
 // real offer engine - this only decides which engine-verified results are
 // plausible enough to surface.
@@ -6951,14 +6980,18 @@ function candidateKey(c) {
 //          bankCanonicalFromAny() so display-name spelling differences
 //          ("HDFC" vs "HDFC Bank") don't cause a false "unrelated" result -
 //          the same normalisation the real offer-matching engine uses.
-// Tier 2 - generic, bank-agnostic methods (UPI / Wallet).
-// Tier 3 - reserved for a future "other method already in the user's
-//          profile" rule; nothing in Phase 1's candidate set populates
+// Tier 2 - UPI (generic, bank-agnostic).
+// Tier 3 - Wallet (generic, bank-agnostic) - kept as its own rung below
+//          UPI per Phase 2's explicit ranking order (UPI ranked above
+//          "relevant wallet"), even though both were merged in Phase 1.
+// Tier 4 - reserved for a future "other method already known in the
+//          user's session" rule; nothing in the candidate set populates
 //          this yet, kept as an explicit extension point rather than
-//          guessed at.
-// Tier 4 - an unrelated bank - excluded from automatic Phase 1
-//          suggestions entirely (filtered out before the reprice loop
-//          runs, not just ranked last).
+//          guessed at (documented the same way in Phase 1 and still not
+//          part of the required test list).
+// Tier 5 - an unrelated bank - excluded from automatic suggestions
+//          entirely (filtered out before the reprice loop runs, not just
+//          ranked last).
 function candidateRelevanceTier(candidate, selectedPaymentMethods) {
   const candidateBankCanon = bankCanonicalFromAny(candidate?.name);
   const sameBank = !!candidateBankCanon && (selectedPaymentMethods || []).some(
@@ -6966,16 +6999,45 @@ function candidateRelevanceTier(candidate, selectedPaymentMethods) {
   );
   if (sameBank) return 1;
 
-  if (candidate?.type === "UPI" || candidate?.type === "Wallet") return 2;
+  if (candidate?.type === "UPI") return 2;
+  if (candidate?.type === "Wallet") return 3;
 
-  return 4;
+  return 5;
 }
 
 function candidateCategoryLabel(tier) {
   if (tier === 1) return "same_bank_mode";
   if (tier === 2) return "upi_or_wallet";
-  if (tier === 3) return "other_profile_method";
+  if (tier === 3) return "upi_or_wallet";
+  if (tier === 4) return "other_profile_method";
   return "other_bank";
+}
+
+// Ease of adoption (Phase 2) - a same-bank credit-card holder is far more
+// likely to actually have/activate an EMI plan or their own debit card
+// than to go acquire net banking access, and UPI needs no card at all.
+// Only meaningfully differentiates within tier 1 today (UPI/Wallet are
+// single, uniform candidate types), but is defined generally per type.
+function easeOfAdoptionScore(candidate) {
+  const type = String(candidate?.type || "");
+  if (type === "EMI") return 3;
+  if (type === "UPI") return 3;
+  if (type === "Debit Card") return 2;
+  if (type === "Net Banking") return 1;
+  return 0;
+}
+
+// (10 - tier) so tier 1 gets the largest multiple; tier is capped to a
+// small known range so this never goes negative for any real tier value.
+function computeRecommendationScore({ tier, additionalSaving, easeScore, totalAffectedFlights, breadthPercent }) {
+  const w = RECOMMENDATION_SCORE_WEIGHTS;
+  return (
+    (10 - tier) * w.tierUnit +
+    Math.max(0, additionalSaving) * w.savingUnit +
+    Math.max(0, easeScore) * w.easeUnit +
+    Math.max(0, totalAffectedFlights) * w.flightUnit +
+    Math.max(0, breadthPercent) * w.breadthUnit
+  );
 }
 
 // Builds the list of not-yet-selected payment methods worth testing,
@@ -7089,32 +7151,106 @@ function paymentMethodShortLabel(pm) {
   return pm.name;
 }
 
-// Generic, category-level message templates — never keyed by a specific
-// bank name. The bank/amount values are interpolated at call time.
-// "other_bank" (tier 4) is kept only as a defensive fallback — tier-4
-// candidates are filtered out before this point and should never reach it.
-const SUGGESTION_MESSAGE_TEMPLATES = {
-  same_bank_mode: (candidate, saving) => ({
-    heading: `You could save ₹${saving} more`,
-    message: `${paymentMethodShortLabel(candidate)} gives a better offer than your selected ${candidate.name}.`,
-    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
-  }),
-  upi_or_wallet: (candidate, saving) => ({
-    heading: `Pay by ${paymentMethodShortLabel(candidate)} and save ₹${saving} more`,
-    message: `A ${paymentMethodShortLabel(candidate)} offer currently gives a lower final price than your selected payment methods.`,
-    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
-  }),
-  other_profile_method: (candidate, saving) => ({
-    heading: `You could save ₹${saving} more`,
-    message: `${paymentMethodShortLabel(candidate)} currently gives a lower final price than your selected payment methods.`,
-    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
-  }),
-  other_bank: (candidate, saving) => ({
+// Stable, machine-readable reason per suggestion (Phase 2) - a display
+// concern only, never used for eligibility/pricing.
+function reasonCodeFor(candidate, tier) {
+  if (tier === 1) {
+    if (candidate.type === "EMI") return "SAME_BANK_EMI_BETTER";
+    if (candidate.type === "Debit Card") return "SAME_BANK_DEBIT_BETTER";
+    if (candidate.type === "Net Banking") return "SAME_BANK_NETBANKING_BETTER";
+    return "SAME_BANK_MODE_BETTER";
+  }
+  if (tier === 2) return "UPI_BETTER_OFFER";
+  if (tier === 3) return "WALLET_BETTER_OFFER";
+  return "OTHER_METHOD_BETTER_OFFER";
+}
+
+// One compact badge per suggestion (Phase 2) - only ever one, chosen by
+// precedence: a concrete relevance signal (same bank / UPI) first, since
+// that's the clearest "why", then comparative signals that only make
+// sense once the final (<=2) list is known, then a generic ease signal.
+// Returns null when nothing genuinely supports a label.
+function pickSuggestionLabel(suggestion, finalSuggestions) {
+  if (suggestion.relevanceTier === 1) return "Same bank";
+  if (suggestion.relevanceTier === 2) return "UPI option";
+
+  if (finalSuggestions.length > 1) {
+    const maxSaving = Math.max(...finalSuggestions.map((s) => s.additionalSaving));
+    if (suggestion.additionalSaving === maxSaving) return "Best saving";
+
+    const maxFlights = Math.max(...finalSuggestions.map((s) => s.affectedFlights));
+    if (suggestion.affectedFlights === maxFlights && suggestion.affectedFlights > 0) {
+      return "Works on more flights";
+    }
+  }
+
+  if (suggestion._easeScore >= 3) return "Easy to add";
+
+  return null;
+}
+
+// Builds display copy for a suggestion. Only two real inputs vary the
+// framing: relevance tier (same-bank vs UPI/wallet vs other) and whether
+// this suggestion's label is "Works on more flights" - in which case the
+// heading leads with flight coverage instead of the rupee saving, per the
+// "UPI lowers more flight options" example.
+function buildSuggestionCopy({ candidate, tier, additionalSaving, totalAffectedFlights, label }) {
+  const shortLabel = paymentMethodShortLabel(candidate);
+  const flightsPhrase = totalAffectedFlights > 1 ? ` and lowers ${totalAffectedFlights} flight options` : "";
+
+  if (label === "Works on more flights") {
+    return {
+      heading: `${shortLabel} lowers more flight options`,
+      message: `Paying by ${shortLabel} improves ${totalAffectedFlights} flights and reduces your best final price by ₹${additionalSaving}.`,
+      primaryActionLabel: `Add ${shortLabel}`
+    };
+  }
+
+  if (tier === 1) {
+    return {
+      heading: `You could save ₹${additionalSaving} more`,
+      message: `${shortLabel} gives a better offer than your selected ${candidate.name}${flightsPhrase}.`,
+      primaryActionLabel: `Add ${shortLabel}`
+    };
+  }
+
+  if (tier === 2 || tier === 3) {
+    return {
+      heading: `Pay by ${shortLabel} and save ₹${additionalSaving} more`,
+      message: `A ${shortLabel} offer currently gives a lower final price than your selected payment methods${flightsPhrase}.`,
+      primaryActionLabel: `Add ${shortLabel}`
+    };
+  }
+
+  // Defensive fallback - tier 5 ("other_bank") is filtered out before
+  // this point and should never actually reach here.
+  return {
     heading: `Do you also have a ${candidate.name} ${String(candidate.type || "").toLowerCase()}?`,
-    message: `A ${paymentMethodShortLabel(candidate)} offer could reduce your best final price by ₹${saving}.`,
-    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
-  })
-};
+    message: `A ${shortLabel} offer could reduce your best final price by ₹${additionalSaving}.`,
+    primaryActionLabel: `Add ${shortLabel}`
+  };
+}
+
+// Phase 2 lightweight cache - avoids redundant candidate evaluation for
+// an identical (search + selected-payment) state, e.g. an accidental
+// double "Check for more options" click. Invalidated by: a different key
+// (different route/selection/flights - the common case), TTL expiry, or
+// the underlying offers data having refreshed since the entry was cached
+// (reuses the existing offersCacheLoadedAt signal - no new infrastructure).
+const paymentSuggestionsCache = new Map();
+
+function buildSuggestionsCacheKey(v) {
+  return JSON.stringify({
+    from: v.from,
+    to: v.to,
+    travelClass: v.travelClass,
+    tripType: v.tripType,
+    passengers: v.passengers,
+    selectedPaymentMethods: v.selectedPaymentMethods,
+    outboundFlights: v.outboundFlights.map((f) => [f.price, f.airlineName, f.bestDeal?.applied, f.bestDeal?.finalPrice]),
+    returnFlights: v.returnFlights.map((f) => [f.price, f.airlineName, f.bestDeal?.applied, f.bestDeal?.finalPrice])
+  });
+}
 
 app.post("/payment-suggestions", async (req, res) => {
   const cfg = PAYMENT_RECOMMENDATION_CONFIG;
@@ -7127,8 +7263,15 @@ app.post("/payment-suggestions", async (req, res) => {
   const startedAt = Date.now();
 
   try {
+    const selectedPaymentMethodCount = v.selectedPaymentMethods.length;
+
     if (v.outboundFlights.length === 0) {
-      return res.json({ currentBestPrice: 0, suggestions: [], meta: { truncated: false } });
+      return res.json({
+        currentBestPrice: 0,
+        suggestions: [],
+        summary: { selectedPaymentMethodCount, matchedOfferCount: 0, isOptimised: true },
+        meta: { truncated: false }
+      });
     }
 
     const bestOf = (flights) => Math.min(...flights.map(bestFinalPriceOf));
@@ -7136,7 +7279,28 @@ app.post("/payment-suggestions", async (req, res) => {
     const baselineReturnBest = (v.tripType === "round-trip" && v.returnFlights.length > 0) ? bestOf(v.returnFlights) : 0;
     const currentBestPrice = baselineOutboundBest + baselineReturnBest;
 
+    // How many of the currently-loaded flights already have an offer
+    // applied under the current selection - a concrete, honest reading of
+    // "offers matched", not a claim about the full live offer catalog.
+    const baselineFlights = [...v.outboundFlights, ...v.returnFlights];
+    const matchedOfferCount = baselineFlights.filter((f) => f?.bestDeal?.applied === true).length;
+
     const offers = await getOffersForSearch({});
+
+    // Phase 2 cache: identical (route/selection/flights) state within the
+    // TTL, and no live offer refresh since, skips candidate generation
+    // and the entire reprice loop entirely.
+    const cacheKey = buildSuggestionsCacheKey(v);
+    const cached = paymentSuggestionsCache.get(cacheKey);
+    const nowTs = Date.now();
+    if (
+      cached &&
+      (nowTs - cached.cachedAt) < cfg.suggestionsCacheTtlMs &&
+      cached.offersCacheLoadedAtSnapshot === offersCacheLoadedAt
+    ) {
+      return res.json(cached.result);
+    }
+
     const genericDisplayContext = await getGenericDisplayContextForSearch({});
     const isDomestic = isDomesticRoute(v.from, v.to);
     const requestCache = {
@@ -7157,14 +7321,15 @@ app.post("/payment-suggestions", async (req, res) => {
 
     const candidates = await buildCandidatePaymentMethods(v.selectedPaymentMethods, offers, cfg);
 
-    // Relevance filter runs before the (expensive) reprice loop: tier-4
+    // Relevance filter runs before the (expensive) reprice loop: tier-5
     // "unrelated bank" candidates are dropped entirely here, not merely
     // ranked last - so a larger saving from an unrelated bank can never
-    // outrank, or even appear alongside, a same-bank/UPI suggestion.
+    // outrank, or even appear alongside, a same-bank/UPI/wallet suggestion.
     const relevantCandidates = candidates.filter(
-      (c) => candidateRelevanceTier(c, v.selectedPaymentMethods) <= 3
+      (c) => candidateRelevanceTier(c, v.selectedPaymentMethods) <= 4
     );
 
+    const flightsTested = v.outboundFlights.length + (v.tripType === "round-trip" ? v.returnFlights.length : 0);
     const results = [];
     let truncated = false;
 
@@ -7207,57 +7372,101 @@ app.post("/payment-suggestions", async (req, res) => {
       if (!isValid) continue;
 
       const tier = candidateRelevanceTier(candidate, v.selectedPaymentMethods);
-      const category = candidateCategoryLabel(tier);
-      const template = SUGGESTION_MESSAGE_TEMPLATES[category](candidate, additionalSaving);
+      const totalAffectedFlights = affectedOutboundFlights + affectedReturnFlights;
+      const breadthPercent = flightsTested > 0 ? (totalAffectedFlights / flightsTested) * 100 : 0;
+      const easeScore = easeOfAdoptionScore(candidate);
+      const score = computeRecommendationScore({ tier, additionalSaving, easeScore, totalAffectedFlights, breadthPercent });
 
       results.push({
-        type: "ADD_PAYMENT_METHOD",
-        paymentMethod: {
-          type: candidate.type,
-          name: candidate.name,
-          provider: candidate.provider,
-          network: candidate.network,
-          cardFamily: candidate.cardFamily,
-          cardVariant: candidate.cardVariant,
-          isCorporate: candidate.isCorporate,
-          tenureMonths: candidate.tenureMonths
-        },
-        category,
-        tier,
+        candidate,
+        relevanceTier: tier,
+        category: candidateCategoryLabel(tier),
         additionalSaving,
         newBestPrice,
         affectedOutboundFlights,
         affectedReturnFlights,
-        appliesNow: true,
-        heading: template.heading,
-        message: template.message,
-        primaryActionLabel: template.primaryActionLabel
+        affectedFlights: totalAffectedFlights,
+        _easeScore: easeScore,
+        _score: score
       });
     }
 
     // When the same bank surfaces more than once (e.g. multiple valid EMI
-    // tenures), keep only the single best-performing suggestion for it.
+    // tenures), keep only the single highest-scoring suggestion for it.
     const bestByKey = new Map();
     for (const r of results) {
-      const key = `${r.paymentMethod.type}|${r.paymentMethod.name}`.toLowerCase();
+      const key = `${r.candidate.type}|${r.candidate.name}`.toLowerCase();
       const existing = bestByKey.get(key);
-      if (!existing || r.additionalSaving > existing.additionalSaving) bestByKey.set(key, r);
+      if (!existing || r._score > existing._score) bestByKey.set(key, r);
     }
 
-    // Relevance tier first, additional saving second, affected-flight
-    // count third - a larger saving from a less-relevant tier must never
-    // outrank a smaller but more plausible same-bank/UPI suggestion.
-    const ranked = Array.from(bestByKey.values()).sort((a, b) => {
-      if (a.tier !== b.tier) return a.tier - b.tier;
-      if (b.additionalSaving !== a.additionalSaving) return b.additionalSaving - a.additionalSaving;
-      return (b.affectedOutboundFlights + b.affectedReturnFlights) - (a.affectedOutboundFlights + a.affectedReturnFlights);
+    // A single descending sort on _score reproduces the full precedence
+    // order (relevance tier > saving > ease of adoption > flights
+    // improved > breadth) - see RECOMMENDATION_SCORE_WEIGHTS for why this
+    // is safe rather than approximate.
+    const ranked = Array.from(bestByKey.values()).sort((a, b) => b._score - a._score);
+    const isOptimised = ranked.length === 0;
+
+    const finalList = ranked.slice(0, cfg.maxSuggestions);
+
+    // Label/copy are computed only after the final (<=2) list is fixed,
+    // since "Best saving" / "Works on more flights" are comparative
+    // within that shown pair, not across the whole candidate pool.
+    const suggestions = finalList.map((r) => {
+      const label = pickSuggestionLabel(r, finalList);
+      const reasonCode = reasonCodeFor(r.candidate, r.relevanceTier);
+      const copy = buildSuggestionCopy({
+        candidate: r.candidate,
+        tier: r.relevanceTier,
+        additionalSaving: r.additionalSaving,
+        totalAffectedFlights: r.affectedFlights,
+        label
+      });
+
+      return {
+        type: "ADD_PAYMENT_METHOD",
+        paymentMethod: {
+          type: r.candidate.type,
+          name: r.candidate.name,
+          provider: r.candidate.provider,
+          network: r.candidate.network,
+          cardFamily: r.candidate.cardFamily,
+          cardVariant: r.candidate.cardVariant,
+          isCorporate: r.candidate.isCorporate,
+          tenureMonths: r.candidate.tenureMonths
+        },
+        category: r.category,
+        label,
+        additionalSaving: r.additionalSaving,
+        newBestPrice: r.newBestPrice,
+        affectedFlights: r.affectedFlights,
+        affectedOutboundFlights: r.affectedOutboundFlights,
+        affectedReturnFlights: r.affectedReturnFlights,
+        relevanceTier: r.relevanceTier,
+        reasonCode,
+        appliesNow: true,
+        heading: copy.heading,
+        message: copy.message,
+        primaryActionLabel: copy.primaryActionLabel
+      };
     });
 
-    return res.json({
+    const responseBody = {
       currentBestPrice,
-      suggestions: ranked.slice(0, cfg.maxSuggestions),
+      suggestions,
+      summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
       meta: { truncated }
+    };
+
+    paymentSuggestionsCache.set(cacheKey, {
+      result: responseBody,
+      cachedAt: Date.now(),
+      offersCacheLoadedAtSnapshot: offersCacheLoadedAt
     });
+    // Simple unbounded-growth guard - not a real LRU, just a safety net.
+    if (paymentSuggestionsCache.size > 200) paymentSuggestionsCache.clear();
+
+    return res.json(responseBody);
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Payment suggestions failed" });
   }
