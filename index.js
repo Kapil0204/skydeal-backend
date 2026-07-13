@@ -27,6 +27,17 @@ app.use(express.json());
 // --------------------
 const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
 
+// Phase 1 intelligent payment guide — tunables kept in one place.
+const PAYMENT_RECOMMENDATION_CONFIG = {
+  minAbsoluteSavingInr: 150,
+  minPercentSaving: 0.02,        // 2%
+  maxSuggestions: 2,
+  maxFlightsPerLeg: 40,           // validation cap only — matches /search's existing per-leg cap
+  maxCandidatesPerRequest: 50,    // computation guard
+  maxEmiTenureVariantsPerBank: 6,
+  softTimeBudgetMs: 20000         // stop testing further candidates past this
+};
+
 // Mongo envs
 const MONGO_URI = process.env.MONGO_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
@@ -6777,6 +6788,436 @@ app.post("/search", async (req, res) => {
     meta.timings = timings;
 
     res.status(500).json({ meta, outboundFlights: [], returnFlights: [] });
+  }
+});
+
+// =========================================================
+// Phase 1: Intelligent payment guide
+// Reuses the exact same offer engine as /search (applyOffersToFlight,
+// evaluateOfferForFlight, computeDiscountedPrice) against client-held
+// flight data. No FlightAPI calls happen in this section.
+// =========================================================
+
+async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, ctx) {
+  const results = [];
+  for (const f of flights) {
+    const enriched = await applyOffersToFlight(
+      f,
+      selectedPaymentMethods,
+      ctx.offers,
+      ctx.passengers,
+      ctx.cabin,
+      ctx.tripType,
+      ctx.isDomestic,
+      null,
+      ctx.requestCache,
+      ctx.genericDisplayContext
+    );
+    results.push({
+      portalPrices: (enriched.portalPrices || []).map(slimPortalPriceForSearchResponse),
+      bestDeal: slimPortalPriceForSearchResponse(enriched.bestDeal)
+    });
+  }
+  return results;
+}
+
+// Reads the current best final price off a flight object that already
+// carries a computed bestDeal (i.e. a flight as returned by /search).
+function bestFinalPriceOf(flightLike) {
+  const bd = flightLike?.bestDeal;
+  if (bd && bd.applied && Number.isFinite(bd.finalPrice)) return bd.finalPrice;
+  return Number(flightLike?.price) || 0;
+}
+
+// Reads the final price off a row produced by repriceFlightsForPaymentMethods
+// (which only carries portalPrices/bestDeal, not the original flight's price),
+// falling back to the original flight's base price when no offer applied.
+function finalPriceFromRepriced(row, originalFlight) {
+  if (row?.bestDeal?.applied && Number.isFinite(row.bestDeal.finalPrice)) return row.bestDeal.finalPrice;
+  return Number(originalFlight?.price) || 0;
+}
+
+function validatePaymentRepriceRequest(body, cfg) {
+  const errors = [];
+  const from = String(body?.from || "").trim().toUpperCase();
+  const to = String(body?.to || "").trim().toUpperCase();
+  const tripType = body?.tripType === "round-trip" ? "round-trip" : "one-way";
+  const passengers = Math.floor(Number(body?.passengers ?? 1));
+  const selectedPaymentMethods = Array.isArray(body?.selectedPaymentMethods) ? body.selectedPaymentMethods : null;
+  const outboundFlights = Array.isArray(body?.outboundFlights) ? body.outboundFlights : null;
+  const returnFlightsRaw = body?.returnFlights;
+  const returnFlights = Array.isArray(returnFlightsRaw) ? returnFlightsRaw : [];
+
+  if (!from) errors.push("Missing from");
+  if (!to) errors.push("Missing to");
+  if (!Number.isFinite(passengers) || passengers < 1) errors.push("Invalid passengers");
+  if (!selectedPaymentMethods) errors.push("selectedPaymentMethods must be an array");
+  if (!outboundFlights) errors.push("outboundFlights must be an array");
+  if (tripType === "round-trip" && !Array.isArray(returnFlightsRaw)) {
+    errors.push("returnFlights must be an array for round-trip");
+  }
+
+  if (outboundFlights && outboundFlights.length > cfg.maxFlightsPerLeg) {
+    errors.push(`outboundFlights exceeds max of ${cfg.maxFlightsPerLeg}`);
+  }
+  if (returnFlights.length > cfg.maxFlightsPerLeg) {
+    errors.push(`returnFlights exceeds max of ${cfg.maxFlightsPerLeg}`);
+  }
+
+  const allFlights = [...(outboundFlights || []), ...returnFlights];
+  for (const f of allFlights) {
+    if (!Number.isFinite(Number(f?.price)) || Number(f.price) <= 0) {
+      errors.push("Every flight entry requires a positive numeric price");
+      break;
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    from,
+    to,
+    travelClass: normalizeCabin(body?.travelClass || body?.cabin),
+    tripType,
+    passengers,
+    selectedPaymentMethods: selectedPaymentMethods || [],
+    outboundFlights: outboundFlights || [],
+    returnFlights
+  };
+}
+
+app.post("/reprice-flights", async (req, res) => {
+  const cfg = PAYMENT_RECOMMENDATION_CONFIG;
+  const v = validatePaymentRepriceRequest(req.body, cfg);
+
+  if (!v.ok) {
+    return res.status(400).json({ error: v.errors.join("; ") });
+  }
+
+  try {
+    const offers = await getOffersForSearch({});
+    const genericDisplayContext = await getGenericDisplayContextForSearch({});
+    const isDomestic = isDomesticRoute(v.from, v.to);
+    const requestCache = {
+      infoOffersByKey: new Map(),
+      pricingCandidatesByKey: new Map(),
+      frontEligibilityMemo: new Map(),
+      perfEligibilityMemo: true
+    };
+
+    const ctx = {
+      offers,
+      genericDisplayContext,
+      passengers: v.passengers,
+      cabin: v.travelClass,
+      tripType: v.tripType,
+      isDomestic,
+      requestCache
+    };
+
+    const outboundFlights = await repriceFlightsForPaymentMethods(v.outboundFlights, v.selectedPaymentMethods, ctx);
+    const returnFlights = v.tripType === "round-trip"
+      ? await repriceFlightsForPaymentMethods(v.returnFlights, v.selectedPaymentMethods, ctx)
+      : [];
+
+    return res.json({ outboundFlights, returnFlights });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Reprice failed" });
+  }
+});
+
+function selectedPmKey(pm) {
+  return `${String(pm?.type || "").trim().toLowerCase()}|${String(pm?.name || "").trim().toLowerCase()}`;
+}
+
+function candidateKey(c) {
+  return [
+    String(c.type || "").toLowerCase(),
+    String(c.name || "").toLowerCase(),
+    c.tenureMonths ?? "",
+    String(c.network || "").toLowerCase(),
+    String(c.cardFamily || "").toLowerCase(),
+    c.isCorporate ?? ""
+  ].join("|");
+}
+
+// Category is only used to pick a message template — never to alter
+// eligibility/pricing, which always comes from the real offer engine.
+function categorizeCandidate(candidate, selectedPaymentMethods) {
+  const nameLower = String(candidate.name || "").toLowerCase();
+  const sameBank = (selectedPaymentMethods || []).some(
+    (pm) => String(pm?.name || "").toLowerCase() === nameLower
+  );
+  if (sameBank) return "same_bank_mode";
+  if (candidate.type === "UPI" || candidate.type === "Wallet") return "upi_or_wallet";
+  return "other_bank";
+}
+
+// Builds the list of not-yet-selected payment methods worth testing,
+// entirely from live data (computePaymentOptionsFromOffers' catalog plus
+// real EMI tenures read off the offers collection) — no hard-coded banks.
+async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg) {
+  const catalog = await computePaymentOptionsFromOffers();
+  const selectedSet = new Set((selectedPaymentMethods || []).map(selectedPmKey));
+  const candidates = [];
+
+  const CANONICAL_TYPES = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet"];
+
+  for (const uiType of CANONICAL_TYPES) {
+    const banks = catalog.options?.[uiType] || [];
+    const counts = catalog.offerCounts?.[uiType] || {};
+
+    for (const bank of banks) {
+      const count = Number(counts[bank] ?? counts[String(bank).toLowerCase()] ?? 0);
+      if (count <= 0) continue;
+
+      const key = `${uiType.toLowerCase()}|${String(bank).toLowerCase()}`;
+      if (selectedSet.has(key)) continue;
+
+      candidates.push({
+        type: uiType,
+        name: bank,
+        provider: uiType === "UPI" ? bank : null,
+        network: null,
+        cardFamily: null,
+        cardVariant: null,
+        isCorporate: null,
+        tenureMonths: null,
+        _priority: count
+      });
+    }
+  }
+
+  // Same-bank EMI variants for already-selected credit cards, using real
+  // tenure data read off live offers via the same helpers the main offer
+  // engine already uses — no hard-coded default tenure.
+  const selectedCreditCards = (selectedPaymentMethods || []).filter(
+    (pm) => String(pm?.type || "").toLowerCase() === "credit card"
+  );
+
+  for (const cc of selectedCreditCards) {
+    const alreadyHasEmi = (selectedPaymentMethods || []).some(
+      (pm) =>
+        String(pm?.type || "").toLowerCase() === "emi" &&
+        String(pm?.name || "").toLowerCase().trim() === String(cc?.name || "").toLowerCase().trim()
+    );
+    if (alreadyHasEmi) continue;
+
+    const bankCanon = bankCanonicalFromAny(cc.name);
+    if (!bankCanon) continue;
+
+    const tenureSet = new Set();
+    let sawGenericEmiOffer = false;
+
+    for (const offer of offers) {
+      if (isOfferExpired(offer)) continue;
+      const pms = extractOfferPaymentMethodsNoInference(offer);
+
+      for (const pm of pms) {
+        const norm = normalizeOfferPM(pm, offer);
+        const isEmiLike = norm.typeNorm === "EMI" || (norm.typeNorm === "CREDIT_CARD" && norm.emiOnly === true);
+        if (!isEmiLike) continue;
+        if (!norm.bankCanonical || norm.bankCanonical !== bankCanon) continue;
+
+        if (Array.isArray(norm.allowedTenures) && norm.allowedTenures.length > 0) {
+          norm.allowedTenures.forEach((t) => tenureSet.add(t));
+        } else {
+          sawGenericEmiOffer = true;
+        }
+      }
+    }
+
+    let tenures = Array.from(tenureSet).slice(0, cfg.maxEmiTenureVariantsPerBank);
+    if (tenures.length === 0 && sawGenericEmiOffer) tenures = [null];
+
+    for (const tenure of tenures) {
+      candidates.push({
+        type: "EMI",
+        name: cc.name,
+        provider: null,
+        network: cc.network || null,
+        cardFamily: cc.cardFamily || null,
+        cardVariant: cc.cardVariant || null,
+        isCorporate: cc.isCorporate ?? null,
+        tenureMonths: tenure,
+        _priority: Number.MAX_SAFE_INTEGER
+      });
+    }
+  }
+
+  // Dedupe (keep the highest-priority version of any duplicate), then cap.
+  const seen = new Map();
+  for (const c of candidates) {
+    const key = candidateKey(c);
+    const existing = seen.get(key);
+    if (!existing || c._priority > existing._priority) seen.set(key, c);
+  }
+
+  return Array.from(seen.values())
+    .sort((a, b) => b._priority - a._priority)
+    .slice(0, cfg.maxCandidatesPerRequest);
+}
+
+function paymentMethodShortLabel(pm) {
+  if (pm.type === "UPI") return pm.provider || pm.name || "UPI";
+  if (pm.type === "EMI") return `${pm.name} EMI`;
+  return pm.name;
+}
+
+// Generic, category-level message templates — never keyed by a specific
+// bank name. The bank/amount values are interpolated at call time.
+const SUGGESTION_MESSAGE_TEMPLATES = {
+  same_bank_mode: (candidate, saving) => ({
+    heading: `You could save ₹${saving} more`,
+    message: `${paymentMethodShortLabel(candidate)} gives a better offer than your selected ${candidate.name}.`,
+    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
+  }),
+  upi_or_wallet: (candidate, saving) => ({
+    heading: `Pay by ${paymentMethodShortLabel(candidate)} and save ₹${saving} more`,
+    message: `A ${paymentMethodShortLabel(candidate)} offer currently gives a lower final price than your selected payment methods.`,
+    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
+  }),
+  other_bank: (candidate, saving) => ({
+    heading: `Do you also have a ${candidate.name} ${String(candidate.type || "").toLowerCase()}?`,
+    message: `A ${paymentMethodShortLabel(candidate)} offer could reduce your best final price by ₹${saving}.`,
+    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
+  })
+};
+
+app.post("/payment-suggestions", async (req, res) => {
+  const cfg = PAYMENT_RECOMMENDATION_CONFIG;
+  const v = validatePaymentRepriceRequest(req.body, cfg);
+
+  if (!v.ok) {
+    return res.status(400).json({ error: v.errors.join("; ") });
+  }
+
+  const startedAt = Date.now();
+
+  try {
+    if (v.outboundFlights.length === 0) {
+      return res.json({ currentBestPrice: 0, suggestions: [], meta: { truncated: false } });
+    }
+
+    const bestOf = (flights) => Math.min(...flights.map(bestFinalPriceOf));
+    const baselineOutboundBest = bestOf(v.outboundFlights);
+    const baselineReturnBest = (v.tripType === "round-trip" && v.returnFlights.length > 0) ? bestOf(v.returnFlights) : 0;
+    const currentBestPrice = baselineOutboundBest + baselineReturnBest;
+
+    const offers = await getOffersForSearch({});
+    const genericDisplayContext = await getGenericDisplayContextForSearch({});
+    const isDomestic = isDomesticRoute(v.from, v.to);
+    const requestCache = {
+      infoOffersByKey: new Map(),
+      pricingCandidatesByKey: new Map(),
+      frontEligibilityMemo: new Map(),
+      perfEligibilityMemo: true
+    };
+    const ctx = {
+      offers,
+      genericDisplayContext,
+      passengers: v.passengers,
+      cabin: v.travelClass,
+      tripType: v.tripType,
+      isDomestic,
+      requestCache
+    };
+
+    const candidates = await buildCandidatePaymentMethods(v.selectedPaymentMethods, offers, cfg);
+
+    const results = [];
+    let truncated = false;
+
+    for (const candidate of candidates) {
+      if (Date.now() - startedAt > cfg.softTimeBudgetMs) {
+        truncated = true;
+        break;
+      }
+
+      const hypothetical = [...v.selectedPaymentMethods, candidate];
+
+      const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
+      const newOutboundBest = Math.min(
+        ...outboundRepriced.map((r, i) => finalPriceFromRepriced(r, v.outboundFlights[i]))
+      );
+      const affectedOutboundFlights = outboundRepriced.filter(
+        (r, i) => finalPriceFromRepriced(r, v.outboundFlights[i]) < bestFinalPriceOf(v.outboundFlights[i])
+      ).length;
+
+      let newReturnBest = 0;
+      let affectedReturnFlights = 0;
+
+      if (v.tripType === "round-trip" && v.returnFlights.length > 0) {
+        const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx);
+        newReturnBest = Math.min(
+          ...returnRepriced.map((r, i) => finalPriceFromRepriced(r, v.returnFlights[i]))
+        );
+        affectedReturnFlights = returnRepriced.filter(
+          (r, i) => finalPriceFromRepriced(r, v.returnFlights[i]) < bestFinalPriceOf(v.returnFlights[i])
+        ).length;
+      }
+
+      const newBestPrice = newOutboundBest + newReturnBest;
+      const additionalSaving = Math.round(currentBestPrice - newBestPrice);
+
+      const isValid =
+        additionalSaving >= cfg.minAbsoluteSavingInr ||
+        (currentBestPrice > 0 && additionalSaving / currentBestPrice >= cfg.minPercentSaving);
+
+      if (!isValid) continue;
+
+      const category = categorizeCandidate(candidate, v.selectedPaymentMethods);
+      const template = SUGGESTION_MESSAGE_TEMPLATES[category](candidate, additionalSaving);
+
+      results.push({
+        type: "ADD_PAYMENT_METHOD",
+        paymentMethod: {
+          type: candidate.type,
+          name: candidate.name,
+          provider: candidate.provider,
+          network: candidate.network,
+          cardFamily: candidate.cardFamily,
+          cardVariant: candidate.cardVariant,
+          isCorporate: candidate.isCorporate,
+          tenureMonths: candidate.tenureMonths
+        },
+        category,
+        additionalSaving,
+        newBestPrice,
+        affectedOutboundFlights,
+        affectedReturnFlights,
+        appliesNow: true,
+        heading: template.heading,
+        message: template.message,
+        primaryActionLabel: template.primaryActionLabel
+      });
+    }
+
+    // When the same bank surfaces more than once (e.g. multiple valid EMI
+    // tenures), keep only the single best-performing suggestion for it.
+    const bestByKey = new Map();
+    for (const r of results) {
+      const key = `${r.paymentMethod.type}|${r.paymentMethod.name}`.toLowerCase();
+      const existing = bestByKey.get(key);
+      if (!existing || r.additionalSaving > existing.additionalSaving) bestByKey.set(key, r);
+    }
+
+    const CATEGORY_RANK = { same_bank_mode: 0, upi_or_wallet: 1, other_bank: 2 };
+
+    const ranked = Array.from(bestByKey.values()).sort((a, b) => {
+      if (b.additionalSaving !== a.additionalSaving) return b.additionalSaving - a.additionalSaving;
+      const catDiff = (CATEGORY_RANK[a.category] ?? 3) - (CATEGORY_RANK[b.category] ?? 3);
+      if (catDiff !== 0) return catDiff;
+      return (b.affectedOutboundFlights + b.affectedReturnFlights) - (a.affectedOutboundFlights + a.affectedReturnFlights);
+    });
+
+    return res.json({
+      currentBestPrice,
+      suggestions: ranked.slice(0, cfg.maxSuggestions),
+      meta: { truncated }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Payment suggestions failed" });
   }
 });
 
