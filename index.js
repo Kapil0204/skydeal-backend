@@ -6941,15 +6941,40 @@ function candidateKey(c) {
   ].join("|");
 }
 
-// Category is only used to pick a message template — never to alter
-// eligibility/pricing, which always comes from the real offer engine.
-function categorizeCandidate(candidate, selectedPaymentMethods) {
-  const nameLower = String(candidate.name || "").toLowerCase();
-  const sameBank = (selectedPaymentMethods || []).some(
-    (pm) => String(pm?.name || "").toLowerCase() === nameLower
+// Relevance hierarchy for Phase 1 suggestions - determines both whether a
+// candidate is shown at all (tier 4 is excluded) and how results are
+// ranked. Never alters eligibility/pricing, which always comes from the
+// real offer engine - this only decides which engine-verified results are
+// plausible enough to surface.
+//
+// Tier 1 - same bank as an already-selected method (different mode), using
+//          bankCanonicalFromAny() so display-name spelling differences
+//          ("HDFC" vs "HDFC Bank") don't cause a false "unrelated" result -
+//          the same normalisation the real offer-matching engine uses.
+// Tier 2 - generic, bank-agnostic methods (UPI / Wallet).
+// Tier 3 - reserved for a future "other method already in the user's
+//          profile" rule; nothing in Phase 1's candidate set populates
+//          this yet, kept as an explicit extension point rather than
+//          guessed at.
+// Tier 4 - an unrelated bank - excluded from automatic Phase 1
+//          suggestions entirely (filtered out before the reprice loop
+//          runs, not just ranked last).
+function candidateRelevanceTier(candidate, selectedPaymentMethods) {
+  const candidateBankCanon = bankCanonicalFromAny(candidate?.name);
+  const sameBank = !!candidateBankCanon && (selectedPaymentMethods || []).some(
+    (pm) => bankCanonicalFromAny(pm?.name) === candidateBankCanon
   );
-  if (sameBank) return "same_bank_mode";
-  if (candidate.type === "UPI" || candidate.type === "Wallet") return "upi_or_wallet";
+  if (sameBank) return 1;
+
+  if (candidate?.type === "UPI" || candidate?.type === "Wallet") return 2;
+
+  return 4;
+}
+
+function candidateCategoryLabel(tier) {
+  if (tier === 1) return "same_bank_mode";
+  if (tier === 2) return "upi_or_wallet";
+  if (tier === 3) return "other_profile_method";
   return "other_bank";
 }
 
@@ -7066,6 +7091,8 @@ function paymentMethodShortLabel(pm) {
 
 // Generic, category-level message templates — never keyed by a specific
 // bank name. The bank/amount values are interpolated at call time.
+// "other_bank" (tier 4) is kept only as a defensive fallback — tier-4
+// candidates are filtered out before this point and should never reach it.
 const SUGGESTION_MESSAGE_TEMPLATES = {
   same_bank_mode: (candidate, saving) => ({
     heading: `You could save ₹${saving} more`,
@@ -7075,6 +7102,11 @@ const SUGGESTION_MESSAGE_TEMPLATES = {
   upi_or_wallet: (candidate, saving) => ({
     heading: `Pay by ${paymentMethodShortLabel(candidate)} and save ₹${saving} more`,
     message: `A ${paymentMethodShortLabel(candidate)} offer currently gives a lower final price than your selected payment methods.`,
+    primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
+  }),
+  other_profile_method: (candidate, saving) => ({
+    heading: `You could save ₹${saving} more`,
+    message: `${paymentMethodShortLabel(candidate)} currently gives a lower final price than your selected payment methods.`,
     primaryActionLabel: `Add ${paymentMethodShortLabel(candidate)}`
   }),
   other_bank: (candidate, saving) => ({
@@ -7125,10 +7157,18 @@ app.post("/payment-suggestions", async (req, res) => {
 
     const candidates = await buildCandidatePaymentMethods(v.selectedPaymentMethods, offers, cfg);
 
+    // Relevance filter runs before the (expensive) reprice loop: tier-4
+    // "unrelated bank" candidates are dropped entirely here, not merely
+    // ranked last - so a larger saving from an unrelated bank can never
+    // outrank, or even appear alongside, a same-bank/UPI suggestion.
+    const relevantCandidates = candidates.filter(
+      (c) => candidateRelevanceTier(c, v.selectedPaymentMethods) <= 3
+    );
+
     const results = [];
     let truncated = false;
 
-    for (const candidate of candidates) {
+    for (const candidate of relevantCandidates) {
       if (Date.now() - startedAt > cfg.softTimeBudgetMs) {
         truncated = true;
         break;
@@ -7166,7 +7206,8 @@ app.post("/payment-suggestions", async (req, res) => {
 
       if (!isValid) continue;
 
-      const category = categorizeCandidate(candidate, v.selectedPaymentMethods);
+      const tier = candidateRelevanceTier(candidate, v.selectedPaymentMethods);
+      const category = candidateCategoryLabel(tier);
       const template = SUGGESTION_MESSAGE_TEMPLATES[category](candidate, additionalSaving);
 
       results.push({
@@ -7182,6 +7223,7 @@ app.post("/payment-suggestions", async (req, res) => {
           tenureMonths: candidate.tenureMonths
         },
         category,
+        tier,
         additionalSaving,
         newBestPrice,
         affectedOutboundFlights,
@@ -7202,12 +7244,12 @@ app.post("/payment-suggestions", async (req, res) => {
       if (!existing || r.additionalSaving > existing.additionalSaving) bestByKey.set(key, r);
     }
 
-    const CATEGORY_RANK = { same_bank_mode: 0, upi_or_wallet: 1, other_bank: 2 };
-
+    // Relevance tier first, additional saving second, affected-flight
+    // count third - a larger saving from a less-relevant tier must never
+    // outrank a smaller but more plausible same-bank/UPI suggestion.
     const ranked = Array.from(bestByKey.values()).sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
       if (b.additionalSaving !== a.additionalSaving) return b.additionalSaving - a.additionalSaving;
-      const catDiff = (CATEGORY_RANK[a.category] ?? 3) - (CATEGORY_RANK[b.category] ?? 3);
-      if (catDiff !== 0) return catDiff;
       return (b.affectedOutboundFlights + b.affectedReturnFlights) - (a.affectedOutboundFlights + a.affectedReturnFlights);
     });
 
