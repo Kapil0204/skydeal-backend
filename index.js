@@ -106,7 +106,16 @@ const PAYMENT_TIMING_CONFIG = {
   endingSoonDays: 3,        // "expires within N days" window for AVAILABLE_TODAY_ENDS_SOON
   maxUrgentInsights: 1,
   maxFutureInsights: 1,
-  timezone: APP_TIMEZONE
+  timezone: APP_TIMEZONE,
+  // Hard guards found necessary after measuring real traffic: with a
+  // realistic ~40-flight search, a handful of confirmatory reprice calls
+  // (one per method that clears the cheap date-scan) pushed a single
+  // /payment-suggestions call past 30s, timing out the client and taking
+  // Phase 1/2's suggestions down with it (they share one request). Never
+  // let Phase 3 risk the overall response time again.
+  timingBudgetMs: 6000,          // stop scanning further methods once this much time has been spent inside buildTimingInsights
+  maxMethodsScanned: 12,         // hard cap on how many methods-of-interest are even considered
+  maxFlightsPerMethodCheck: 10   // confirmatory reprice uses only the cheapest N loaded flights per leg, not all of them
 };
 
 // Mongo envs
@@ -7540,9 +7549,15 @@ async function buildTimingInsights({
   returnFlights,
   tripType,
   outboundTravelDateISO,
-  recCfg
+  recCfg,
+  // Phase 1/2 already computed and tier-filtered this list moments ago in
+  // the same request - reusing it avoids a second, redundant
+  // buildCandidatePaymentMethods() pass (which itself re-hits Mongo via
+  // computePaymentOptionsFromOffers).
+  precomputedCandidates
 }) {
   const timingCfg = PAYMENT_TIMING_CONFIG;
+  const startedAt = Date.now();
   if (!outboundFlights.length) return [];
 
   const todayDateOnly = getTimezoneDateOnly(new Date());
@@ -7559,20 +7574,32 @@ async function buildTimingInsights({
   // Methods of interest: every already-selected method (checked for
   // "ending soon"), plus Phase 1/2's own relevant not-yet-selected
   // candidates (tier <= 3, i.e. same-bank/UPI/Wallet - never an unrelated
-  // bank), checked for "becoming available soon". Reused directly from
-  // Phase 1/2's own candidate generation, not a separate exploration pass.
-  const candidates = await buildCandidatePaymentMethods(selectedPaymentMethods, offers, recCfg);
-  const relevantCandidates = candidates.filter((c) => candidateRelevanceTier(c, selectedPaymentMethods) <= 3);
+  // bank), checked for "becoming available soon".
+  const relevantCandidates = (precomputedCandidates || [])
+    .filter((c) => candidateRelevanceTier(c, selectedPaymentMethods) <= 3)
+    .sort((a, b) => (b._priority || 0) - (a._priority || 0));
 
   const methodsOfInterest = [
     ...selectedPaymentMethods.map((m) => ({ method: m, isSelected: true })),
     ...relevantCandidates.map((c) => ({ method: c, isSelected: false }))
-  ];
+  ].slice(0, timingCfg.maxMethodsScanned);
+
+  // The confirmatory reprice call is the expensive step (scales with
+  // flight count x portals x offers). Phase 3 is a secondary, at-most-2,
+  // purely informational signal - not the primary price shown to the
+  // user - so it checks only the cheapest N loaded flights per leg
+  // (where any improvement is most likely to matter) rather than every
+  // loaded flight, unlike Phase 1/2's main suggestion engine.
+  const byCurrentPrice = (a, b) => bestFinalPriceOf(a) - bestFinalPriceOf(b);
+  const outboundSample = [...outboundFlights].sort(byCurrentPrice).slice(0, timingCfg.maxFlightsPerMethodCheck);
+  const returnSample = [...returnFlights].sort(byCurrentPrice).slice(0, timingCfg.maxFlightsPerMethodCheck);
 
   const urgent = [];
   const future = [];
 
   for (const { method, isSelected } of methodsOfInterest) {
+    if (Date.now() - startedAt > timingCfg.timingBudgetMs) break;
+
     const relevantOffers = relevantOffersForMethod(offers, method);
     if (relevantOffers.length === 0) continue;
 
@@ -7585,16 +7612,16 @@ async function buildTimingInsights({
     const hypothetical = isSelected ? selectedPaymentMethods : [...selectedPaymentMethods, method];
     const simCtx = { ...ctx, evaluationBookingDate: evalDay };
 
-    const outboundSim = await repriceFlightsForPaymentMethods(outboundFlights, hypothetical, simCtx);
+    const outboundSim = await repriceFlightsForPaymentMethods(outboundSample, hypothetical, simCtx);
     const newOutboundBest = Math.min(
-      ...outboundSim.map((r, i) => finalPriceFromRepriced(r, outboundFlights[i]))
+      ...outboundSim.map((r, i) => finalPriceFromRepriced(r, outboundSample[i]))
     );
 
     let newReturnBest = 0;
-    if (tripType === "round-trip" && returnFlights.length > 0) {
-      const returnSim = await repriceFlightsForPaymentMethods(returnFlights, hypothetical, simCtx);
+    if (tripType === "round-trip" && returnSample.length > 0) {
+      const returnSim = await repriceFlightsForPaymentMethods(returnSample, hypothetical, simCtx);
       newReturnBest = Math.min(
-        ...returnSim.map((r, i) => finalPriceFromRepriced(r, returnFlights[i]))
+        ...returnSim.map((r, i) => finalPriceFromRepriced(r, returnSample[i]))
       );
     }
 
@@ -7869,7 +7896,8 @@ app.post("/payment-suggestions", async (req, res) => {
         returnFlights: v.returnFlights,
         tripType: v.tripType,
         outboundTravelDateISO: v.outboundTravelDate,
-        recCfg: cfg
+        recCfg: cfg,
+        precomputedCandidates: candidates
       });
     } catch (timingErr) {
       console.error("[SkyDeal] timing insights failed", timingErr);
