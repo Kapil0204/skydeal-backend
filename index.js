@@ -125,9 +125,9 @@ const PAYMENT_TIMING_CONFIG = {
   // /payment-suggestions call past 30s, timing out the client and taking
   // Phase 1/2's suggestions down with it (they share one request). Never
   // let Phase 3 risk the overall response time again.
-  timingBudgetMs: 6000,          // stop scanning further methods once this much time has been spent inside buildTimingInsights
-  maxMethodsScanned: 12,         // hard cap on how many methods-of-interest are even considered
-  maxFlightsPerMethodCheck: 10   // confirmatory reprice uses only the cheapest N loaded flights per leg, not all of them
+  timingBudgetMs: 3500,          // stop scanning further methods once this much time has been spent inside buildTimingInsights
+  maxMethodsScanned: 6,          // hard cap on how many methods-of-interest are even considered
+  maxFlightsPerMethodCheck: 5    // confirmatory reprice uses only the cheapest N loaded flights per leg, not all of them
 };
 
 // Mongo envs
