@@ -76,18 +76,30 @@ const RECOMMENDATION_SCORE_WEIGHTS = {
 // ~5.5 hours around IST midnight).
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Kolkata";
 
+// Intl.DateTimeFormat construction (not formatting - construction) is
+// genuinely expensive in Node. Phase 3's date-scan calls
+// getTimezoneDateOnly/getBookingDayName thousands of times per request
+// (methods x offers x horizon-days) - constructing a fresh formatter
+// each call measurably pushed a real ~40-flight request past 25s.
+// Reusing one cached formatter per timezone turns that into a
+// microseconds-per-call operation.
+const DATE_ONLY_FORMATTER_CACHE = new Map();
+function getDateOnlyFormatter(timeZone) {
+  let f = DATE_ONLY_FORMATTER_CACHE.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    DATE_ONLY_FORMATTER_CACHE.set(timeZone, f);
+  }
+  return f;
+}
+
 // Returns a Date anchored at UTC-midnight of `date`'s calendar day *as
 // observed in `timeZone`* - not a real instant, just a stable, comparable
 // stand-in for "which calendar day is this" that two calls with the same
 // timezone can safely compare with < / > / ===, regardless of the
 // server's own local timezone.
 function getTimezoneDateOnly(date = new Date(), timeZone = APP_TIMEZONE) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date);
+  const parts = getDateOnlyFormatter(timeZone).formatToParts(date);
   const y = parts.find((p) => p.type === "year")?.value;
   const m = parts.find((p) => p.type === "month")?.value;
   const d = parts.find((p) => p.type === "day")?.value;
@@ -3447,11 +3459,16 @@ const WEEKDAY_ALIASES = {
   sunday: "Sunday", sun: "Sunday"
 };
 
+// Cached for the same reason as getDateOnlyFormatter above - constructing
+// a fresh Intl.DateTimeFormat per call is expensive and this is now
+// called thousands of times per request by Phase 3's date scan.
+const BOOKING_DAY_NAME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "long",
+  timeZone: APP_TIMEZONE
+});
+
 function getBookingDayName(date = new Date()) {
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "long",
-    timeZone: APP_TIMEZONE
-  }).format(date);
+  return BOOKING_DAY_NAME_FORMATTER.format(date);
 }
 
 function normalizeWeekdayToken(token) {
