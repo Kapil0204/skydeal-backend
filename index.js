@@ -67,6 +67,48 @@ const RECOMMENDATION_SCORE_WEIGHTS = {
   breadthUnit: 1
 };
 
+// Phase 3 — single application timezone. getBookingDayName() already
+// hard-coded Asia/Kolkata correctly for weekday names; this constant lets
+// isOfferExpired() and the timing-insight day simulation share the exact
+// same anchor, instead of isOfferExpired's previous reliance on the
+// server process's local/UTC clock (a real inconsistency: on a
+// UTC-hosted server, "today" could disagree between the two by up to
+// ~5.5 hours around IST midnight).
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "Asia/Kolkata";
+
+// Returns a Date anchored at UTC-midnight of `date`'s calendar day *as
+// observed in `timeZone`* - not a real instant, just a stable, comparable
+// stand-in for "which calendar day is this" that two calls with the same
+// timezone can safely compare with < / > / ===, regardless of the
+// server's own local timezone.
+function getTimezoneDateOnly(date = new Date(), timeZone = APP_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return new Date(`${y}-${m}-${d}T00:00:00.000Z`);
+}
+
+function addDaysToDateOnly(dateOnly, days) {
+  return new Date(dateOnly.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+// Phase 3 timing-guidance tunables, kept in one place. Saving thresholds
+// intentionally reuse PAYMENT_RECOMMENDATION_CONFIG rather than
+// introducing a second, possibly-conflicting bar.
+const PAYMENT_TIMING_CONFIG = {
+  futureLookaheadDays: 7,   // never scan further ahead than this, and never past the travel date
+  endingSoonDays: 3,        // "expires within N days" window for AVAILABLE_TODAY_ENDS_SOON
+  maxUrgentInsights: 1,
+  maxFutureInsights: 1,
+  timezone: APP_TIMEZONE
+};
+
 // Mongo envs
 const MONGO_URI = process.env.MONGO_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "skydeal";
@@ -1590,7 +1632,11 @@ function getPassengerRestrictionResult(offer, passengers = 1) {
   return { ok: true };
 }
 
-function isOfferExpired(offer) {
+// Phase 3: evaluationDate lets timing-simulation code ask "would this
+// offer be expired if evaluated on day X" using the exact same logic as
+// real pricing - defaults to real "now" so every existing caller
+// (all of which pass only `offer`) is unaffected.
+function isOfferExpired(offer, evaluationDate = new Date()) {
   const toDate =
     offer?.validityPeriod?.to ||
     offer?.parsedFields?.validityPeriod?.to ||
@@ -1622,13 +1668,15 @@ function isOfferExpired(offer) {
   if (toDate) {
     const t = parseDateLoose(toDate);
     if (t) {
-      const end = new Date(t);
-      end.setHours(23, 59, 59, 999);
+      // IST-anchored calendar-day comparison (was previously raw
+      // server-local Date math here, while booking-day weekday checks
+      // were already IST-anchored - the two could disagree by up to
+      // ~5.5h around IST midnight on a UTC-hosted server). Inclusive of
+      // the expiry day itself, matching the original semantics.
+      const expiryDay = getTimezoneDateOnly(t);
+      const today = getTimezoneDateOnly(evaluationDate);
 
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      return end.getTime() < today.getTime();
+      return today.getTime() > expiryDay.getTime();
     }
   }
 
@@ -1697,13 +1745,10 @@ function isOfferExpired(offer) {
 
   if (!latest) return false;
 
-  const end = new Date(latest);
-  end.setHours(23, 59, 59, 999);
+  const expiryDay = getTimezoneDateOnly(latest);
+  const today = getTimezoneDateOnly(evaluationDate);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  return end.getTime() < today.getTime();
+  return today.getTime() > expiryDay.getTime();
 }
 function inferMinTxnFromText(offer) {
   const blob = String(
@@ -3396,7 +3441,7 @@ const WEEKDAY_ALIASES = {
 function getBookingDayName(date = new Date()) {
   return new Intl.DateTimeFormat("en-US", {
     weekday: "long",
-    timeZone: "Asia/Kolkata"
+    timeZone: APP_TIMEZONE
   }).format(date);
 }
 
@@ -4422,7 +4467,12 @@ async function applyOffersToFlight(
   isDomestic = true,
   pricingTiming = null,
   requestCache = null,
-  genericDisplayContext = null
+  genericDisplayContext = null,
+  // Phase 3: optional hypothetical booking date (Date object) for "what
+  // if this were booked on day X" timing simulation. Defaults to real
+  // "now" for every existing caller - behavior is unchanged unless a
+  // caller explicitly passes this.
+  evaluationBookingDate = null
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -4444,12 +4494,17 @@ async function applyOffersToFlight(
     const eligibilityAmount = portalBase;
 
   const pricingCandidateCache = requestCache?.pricingCandidatesByKey || null;
+  // evaluationBookingDate is part of the key: the static filter's
+  // expiry/booking-day checks below depend on it, so a "today" result
+  // must never be served for a simulated "tomorrow" evaluation and vice
+  // versa, even when both share one requestCache within a request.
   const pricingCandidateKey = JSON.stringify({
     portal,
     isDomestic,
     cabin,
     tripType,
-    passengers
+    passengers,
+    evaluationBookingDate: evaluationBookingDate ? evaluationBookingDate.toISOString().slice(0, 10) : null
   });
 
   let offersToEvaluate = offers;
@@ -4475,9 +4530,9 @@ async function applyOffersToFlight(
 
         if (mentionsNonFlight && !mentionsFlight) return false;
         if (isFirstTimeOrNewUserOffer(offer)) return false;
-        if (isOfferExpired(offer)) return false;
+        if (isOfferExpired(offer, evaluationBookingDate || undefined)) return false;
 
-        const bookingDayCheck = offerMatchesBookingDay(offer);
+        const bookingDayCheck = offerMatchesBookingDay(offer, evaluationBookingDate || undefined);
         if (!bookingDayCheck.ok) return false;
 
         if (!offerAppliesToPortal(offer, portal)) return false;
@@ -6840,7 +6895,11 @@ async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, 
       ctx.isDomestic,
       null,
       ctx.requestCache,
-      ctx.genericDisplayContext
+      ctx.genericDisplayContext,
+      // Phase 3: only set when ctx carries a hypothetical booking-date
+      // simulation (see buildTimingInsights) - undefined for every
+      // existing call, preserving real "now" behavior.
+      ctx.evaluationBookingDate || null
     );
     results.push({
       portalPrices: (enriched.portalPrices || []).map(slimPortalPriceForSearchResponse),
@@ -6901,6 +6960,14 @@ function validatePaymentRepriceRequest(body, cfg) {
     }
   }
 
+  // Phase 3: optional travel dates (YYYY-MM-DD) - purely additive, not
+  // required, so /reprice-flights and existing /payment-suggestions
+  // callers that omit them are entirely unaffected. Used only to bound
+  // the timing-insight lookahead horizon and check travel-period
+  // eligibility; never used for pricing/eligibility itself.
+  const outboundTravelDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body?.outboundTravelDate || "")) ? body.outboundTravelDate : null;
+  const returnTravelDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body?.returnTravelDate || "")) ? body.returnTravelDate : null;
+
   return {
     ok: errors.length === 0,
     errors,
@@ -6911,7 +6978,9 @@ function validatePaymentRepriceRequest(body, cfg) {
     passengers,
     selectedPaymentMethods: selectedPaymentMethods || [],
     outboundFlights: outboundFlights || [],
-    returnFlights
+    returnFlights,
+    outboundTravelDate,
+    returnTravelDate
   };
 }
 
@@ -7248,8 +7317,341 @@ function buildSuggestionsCacheKey(v) {
     passengers: v.passengers,
     selectedPaymentMethods: v.selectedPaymentMethods,
     outboundFlights: v.outboundFlights.map((f) => [f.price, f.airlineName, f.bestDeal?.applied, f.bestDeal?.finalPrice]),
-    returnFlights: v.returnFlights.map((f) => [f.price, f.airlineName, f.bestDeal?.applied, f.bestDeal?.finalPrice])
+    returnFlights: v.returnFlights.map((f) => [f.price, f.airlineName, f.bestDeal?.applied, f.bestDeal?.finalPrice]),
+    // Phase 3: cached timingInsights are date-sensitive - a different
+    // travel date (or the same request on a different calendar day) must
+    // never reuse a stale cached entry.
+    outboundTravelDate: v.outboundTravelDate,
+    returnTravelDate: v.returnTravelDate,
+    cacheDay: getTimezoneDateOnly(new Date()).toISOString().slice(0, 10)
   });
+}
+
+// =========================================================
+// Phase 3: payment-timing intelligence
+// Reuses isOfferExpired/offerMatchesBookingDay/offerMatchesSelectedPayment
+// (via their new optional evaluation-date parameters) and
+// repriceFlightsForPaymentMethods for the actual saving comparison - no
+// separate/simplified date-eligibility engine.
+// =========================================================
+
+// Validity START date (offer.validityPeriod.from) is never read anywhere
+// else in the codebase today (confirmed by inspection before building
+// this) - this is new, narrowly-scoped logic, not a duplicate of
+// isOfferExpired (which only ever reads .to/.endDate). Fails open (no
+// start date recorded -> treated as already open), matching the same
+// conservative fallback philosophy isOfferExpired itself uses.
+function offerValidityStartOk(offer, evaluationDate) {
+  const fromRaw =
+    offer?.validityPeriod?.from ||
+    offer?.parsedFields?.validityPeriod?.from ||
+    null;
+  if (!fromRaw) return true;
+
+  const start = getTimezoneDateOnly(new Date(String(fromRaw)));
+  if (isNaN(start.getTime())) return true;
+
+  const today = getTimezoneDateOnly(evaluationDate);
+  return today.getTime() >= start.getTime();
+}
+
+// Travel-period eligibility does not exist as logic anywhere else in the
+// codebase (confirmed by inspection - offer.travelPeriod is currently
+// only ever surfaced in two debug/admin endpoints, never read for
+// eligibility). This is genuinely new. It fails open when the field is
+// absent or unparseable - and in a live sample of 82 real production
+// offers, 0 had a usable structured travelPeriod.from/to, so in practice
+// this will rarely if ever restrict anything until the scraper/parser
+// pipeline populates it - flagged explicitly rather than assumed reliable.
+function offerMatchesTravelPeriod(offer, travelDateISO) {
+  if (!travelDateISO) return true;
+
+  const tp = offer?.travelPeriod || offer?.parsedFields?.travelPeriod || null;
+  const fromRaw = tp?.from || null;
+  const toRaw = tp?.to || null;
+  if (!fromRaw && !toRaw) return true;
+
+  const travelDay = getTimezoneDateOnly(new Date(String(travelDateISO)));
+  if (isNaN(travelDay.getTime())) return true;
+
+  if (fromRaw) {
+    const from = getTimezoneDateOnly(new Date(String(fromRaw)));
+    if (!isNaN(from.getTime()) && travelDay.getTime() < from.getTime()) return false;
+  }
+  if (toRaw) {
+    const to = getTimezoneDateOnly(new Date(String(toRaw)));
+    if (!isNaN(to.getTime()) && travelDay.getTime() > to.getTime()) return false;
+  }
+  return true;
+}
+
+// Cheap relevance pre-filter for the date scan below - reuses
+// offerMatchesSelectedPayment (the same payment-matching function the
+// real pricing engine uses), never a separate matching rule. Purely
+// decides "is this offer even worth date-scanning for this method",
+// not a source of truth for eligibility/pricing.
+function relevantOffersForMethod(offers, method) {
+  return offers.filter((o) => {
+    try {
+      return offerMatchesSelectedPayment(o, [method]);
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Pure date arithmetic, no repricing: for each day in [0..horizonDays]
+// (0 = today), is at least one of this method's relevant offers
+// date-eligible (not expired, booking-day matches, validity started,
+// travel period allows the trip)? Used only to find which single day is
+// worth testing with a real (expensive) reprice call afterward.
+function scanMethodDateEligibility(relevantOffers, todayDateOnly, horizonDays, travelDateISO) {
+  const days = [];
+  for (let i = 0; i <= horizonDays; i++) {
+    const day = addDaysToDateOnly(todayDateOnly, i);
+    const eligible = relevantOffers.some(
+      (o) =>
+        !isOfferExpired(o, day) &&
+        offerMatchesBookingDay(o, day).ok &&
+        offerValidityStartOk(o, day) &&
+        offerMatchesTravelPeriod(o, travelDateISO)
+    );
+    days.push({ dayIndex: i, date: day, eligible });
+  }
+  return days;
+}
+
+// Turns a day-eligibility scan into (at most) one Phase 3 classification
+// for this method. isSelected methods are checked for "stops being
+// eligible soon" (they're presumably contributing to today's applied
+// price already); not-yet-selected methods are checked for "becomes
+// eligible soon" (mirrors, and is ranked below, Phase 1/2's normal
+// same-day suggestions - if it were eligible today, Phase 1/2 would
+// already be showing it).
+function classifyMethodTiming(dayScan, isSelected, endingSoonDays) {
+  if (!dayScan.length) return null;
+  const todayEligible = dayScan[0].eligible;
+
+  if (isSelected) {
+    if (!todayEligible) return null;
+
+    let endDayIndex = null;
+    for (let i = 1; i < dayScan.length; i++) {
+      if (!dayScan[i].eligible) { endDayIndex = i; break; }
+    }
+    if (endDayIndex === null) return null; // stays eligible through the whole scanned window
+
+    if (endDayIndex === 1) return { type: "AVAILABLE_TODAY_ENDS_TODAY", endDayIndex };
+    if (endDayIndex <= endingSoonDays) return { type: "AVAILABLE_TODAY_ENDS_SOON", endDayIndex };
+    return { type: "EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE", endDayIndex };
+  }
+
+  if (todayEligible) return null; // already surfaced as a normal Phase 1/2 suggestion if it clears the saving bar
+
+  for (let i = 1; i < dayScan.length; i++) {
+    if (dayScan[i].eligible) {
+      return i === 1
+        ? { type: "AVAILABLE_TOMORROW", startDayIndex: i }
+        : { type: "AVAILABLE_UPCOMING_DAY", startDayIndex: i };
+    }
+  }
+  return null;
+}
+
+function formatTimingDate(dateOnly, style) {
+  // dateOnly is already a UTC-midnight stand-in for an IST calendar day
+  // (see getTimezoneDateOnly) - format it back out in UTC so we don't
+  // apply a second timezone conversion on top of the first.
+  if (style === "weekday") {
+    return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(dateOnly);
+  }
+  if (style === "short") {
+    return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }).format(dateOnly);
+  }
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", timeZone: "UTC" }).format(dateOnly);
+}
+
+const URGENT_TIMING_TYPES = new Set([
+  "AVAILABLE_TODAY_ENDS_TODAY",
+  "EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE",
+  "AVAILABLE_TODAY_ENDS_SOON"
+]);
+const URGENT_TIMING_RANK = { AVAILABLE_TODAY_ENDS_TODAY: 0, EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE: 1, AVAILABLE_TODAY_ENDS_SOON: 2 };
+const FUTURE_TIMING_RANK = { AVAILABLE_TOMORROW: 0, AVAILABLE_UPCOMING_DAY: 1 };
+
+function buildTimingInsightCopy({ method, classification, potentialSaving, currentBestPrice, hypotheticalBestPrice, todayDateOnly, evalDay }) {
+  const shortLabel = paymentMethodShortLabel(method);
+
+  if (classification.type === "AVAILABLE_TODAY_ENDS_TODAY") {
+    return {
+      heading: `Use your ${shortLabel} offer today`,
+      message: `This offer could reduce your current final price by ₹${potentialSaving}, but it will not be available tomorrow.`,
+      label: "Ends today",
+      disclaimer: null,
+      estimatedFinalPrice: currentBestPrice
+    };
+  }
+
+  if (classification.type === "EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE" || classification.type === "AVAILABLE_TODAY_ENDS_SOON") {
+    const lastUsableDay = addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1);
+    return {
+      heading: `Book by ${formatTimingDate(lastUsableDay, "long")} to use this offer`,
+      message: `Your selected ${shortLabel} payment method's offer expires before your flight, but the travel date is eligible.`,
+      label: `Book by ${formatTimingDate(lastUsableDay, "short")}`,
+      disclaimer: null,
+      estimatedFinalPrice: currentBestPrice
+    };
+  }
+
+  if (classification.type === "AVAILABLE_TOMORROW") {
+    return {
+      heading: `Your ${shortLabel} offer becomes available tomorrow`,
+      message: `It could reduce the payment-adjusted price by ₹${potentialSaving} if the flight fare remains unchanged.`,
+      label: "Available tomorrow",
+      disclaimer: "Flight fares may change before then.",
+      estimatedFinalPrice: hypotheticalBestPrice
+    };
+  }
+
+  if (classification.type === "AVAILABLE_UPCOMING_DAY") {
+    const weekday = formatTimingDate(evalDay, "weekday");
+    return {
+      heading: `Your ${shortLabel} offer is available on ${weekday}`,
+      message: `It could reduce the payment-adjusted price by ₹${potentialSaving} if the flight fare remains unchanged.`,
+      label: `Available ${weekday}`,
+      disclaimer: "Flight fares may change before then.",
+      estimatedFinalPrice: hypotheticalBestPrice
+    };
+  }
+
+  return null;
+}
+
+// Main Phase 3 entry point, called from /payment-suggestions with data it
+// already loaded (offers/ctx/currentBestPrice) - no separate endpoint, no
+// extra Mongo/FlightAPI calls. Returns an array ready to attach as
+// timingInsights, already capped to maxUrgentInsights + maxFutureInsights.
+async function buildTimingInsights({
+  selectedPaymentMethods,
+  offers,
+  ctx,
+  currentBestPrice,
+  outboundFlights,
+  returnFlights,
+  tripType,
+  outboundTravelDateISO,
+  recCfg
+}) {
+  const timingCfg = PAYMENT_TIMING_CONFIG;
+  if (!outboundFlights.length) return [];
+
+  const todayDateOnly = getTimezoneDateOnly(new Date());
+
+  let horizonDays = timingCfg.futureLookaheadDays;
+  if (outboundTravelDateISO) {
+    const travelDay = getTimezoneDateOnly(new Date(outboundTravelDateISO));
+    if (!isNaN(travelDay.getTime())) {
+      const daysUntilTravel = Math.round((travelDay.getTime() - todayDateOnly.getTime()) / 86400000);
+      horizonDays = Math.max(0, Math.min(horizonDays, daysUntilTravel));
+    }
+  }
+
+  // Methods of interest: every already-selected method (checked for
+  // "ending soon"), plus Phase 1/2's own relevant not-yet-selected
+  // candidates (tier <= 3, i.e. same-bank/UPI/Wallet - never an unrelated
+  // bank), checked for "becoming available soon". Reused directly from
+  // Phase 1/2's own candidate generation, not a separate exploration pass.
+  const candidates = await buildCandidatePaymentMethods(selectedPaymentMethods, offers, recCfg);
+  const relevantCandidates = candidates.filter((c) => candidateRelevanceTier(c, selectedPaymentMethods) <= 3);
+
+  const methodsOfInterest = [
+    ...selectedPaymentMethods.map((m) => ({ method: m, isSelected: true })),
+    ...relevantCandidates.map((c) => ({ method: c, isSelected: false }))
+  ];
+
+  const urgent = [];
+  const future = [];
+
+  for (const { method, isSelected } of methodsOfInterest) {
+    const relevantOffers = relevantOffersForMethod(offers, method);
+    if (relevantOffers.length === 0) continue;
+
+    const dayScan = scanMethodDateEligibility(relevantOffers, todayDateOnly, horizonDays, outboundTravelDateISO);
+    const classification = classifyMethodTiming(dayScan, isSelected, timingCfg.endingSoonDays);
+    if (!classification) continue;
+
+    const evalDayIndex = classification.endDayIndex ?? classification.startDayIndex;
+    const evalDay = addDaysToDateOnly(todayDateOnly, evalDayIndex);
+    const hypothetical = isSelected ? selectedPaymentMethods : [...selectedPaymentMethods, method];
+    const simCtx = { ...ctx, evaluationBookingDate: evalDay };
+
+    const outboundSim = await repriceFlightsForPaymentMethods(outboundFlights, hypothetical, simCtx);
+    const newOutboundBest = Math.min(
+      ...outboundSim.map((r, i) => finalPriceFromRepriced(r, outboundFlights[i]))
+    );
+
+    let newReturnBest = 0;
+    if (tripType === "round-trip" && returnFlights.length > 0) {
+      const returnSim = await repriceFlightsForPaymentMethods(returnFlights, hypothetical, simCtx);
+      newReturnBest = Math.min(
+        ...returnSim.map((r, i) => finalPriceFromRepriced(r, returnFlights[i]))
+      );
+    }
+
+    const hypotheticalBestPrice = newOutboundBest + newReturnBest;
+    const diff = hypotheticalBestPrice - currentBestPrice;
+    // "ends" family: tomorrow/soon is more expensive (diff > 0) - the
+    // saving being lost. "becomes available" family: the future day is
+    // cheaper (diff < 0) - the saving on offer.
+    const potentialSaving = Math.round(Math.abs(diff));
+    const isEndingFamily = URGENT_TIMING_TYPES.has(classification.type);
+    const isMeaningful = isEndingFamily ? diff > 0 : diff < 0;
+    if (!isMeaningful) continue;
+
+    const isValid =
+      potentialSaving >= recCfg.minAbsoluteSavingInr ||
+      (currentBestPrice > 0 && potentialSaving / currentBestPrice >= recCfg.minPercentSaving);
+    if (!isValid) continue;
+
+    const copy = buildTimingInsightCopy({
+      method,
+      classification,
+      potentialSaving,
+      currentBestPrice,
+      hypotheticalBestPrice,
+      todayDateOnly,
+      evalDay
+    });
+    if (!copy) continue;
+
+    const insight = {
+      type: classification.type,
+      urgency: isEndingFamily ? (classification.type === "AVAILABLE_TODAY_ENDS_TODAY" ? "high" : "medium") : "medium",
+      paymentMethod: { type: method.type, name: method.name },
+      currentDate: todayDateOnly.toISOString().slice(0, 10),
+      availableFrom: isEndingFamily ? todayDateOnly.toISOString().slice(0, 10) : evalDay.toISOString().slice(0, 10),
+      availableUntil: isEndingFamily ? addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1).toISOString().slice(0, 10) : null,
+      travelDateEligible: true,
+      potentialSaving,
+      estimatedFinalPrice: copy.estimatedFinalPrice,
+      isOfferOnlyEstimate: !isEndingFamily,
+      heading: copy.heading,
+      message: copy.message,
+      label: copy.label,
+      disclaimer: copy.disclaimer
+    };
+
+    if (isEndingFamily) urgent.push(insight);
+    else future.push(insight);
+  }
+
+  urgent.sort((a, b) => (URGENT_TIMING_RANK[a.type] - URGENT_TIMING_RANK[b.type]) || (b.potentialSaving - a.potentialSaving));
+  future.sort((a, b) => (FUTURE_TIMING_RANK[a.type] - FUTURE_TIMING_RANK[b.type]) || (b.potentialSaving - a.potentialSaving));
+
+  return [
+    ...urgent.slice(0, timingCfg.maxUrgentInsights),
+    ...future.slice(0, timingCfg.maxFutureInsights)
+  ];
 }
 
 app.post("/payment-suggestions", async (req, res) => {
@@ -7270,6 +7672,7 @@ app.post("/payment-suggestions", async (req, res) => {
         currentBestPrice: 0,
         suggestions: [],
         summary: { selectedPaymentMethodCount, matchedOfferCount: 0, isOptimised: true },
+        timingInsights: [],
         meta: { truncated: false }
       });
     }
@@ -7451,10 +7854,33 @@ app.post("/payment-suggestions", async (req, res) => {
       };
     });
 
+    // Phase 3 timing insights - reuses the same offers/ctx/currentBestPrice
+    // already computed above; wrapped defensively so a timing-specific
+    // failure degrades to an empty array rather than breaking Phase 1/2
+    // suggestions (which have already been fully computed by this point).
+    let timingInsights = [];
+    try {
+      timingInsights = await buildTimingInsights({
+        selectedPaymentMethods: v.selectedPaymentMethods,
+        offers,
+        ctx,
+        currentBestPrice,
+        outboundFlights: v.outboundFlights,
+        returnFlights: v.returnFlights,
+        tripType: v.tripType,
+        outboundTravelDateISO: v.outboundTravelDate,
+        recCfg: cfg
+      });
+    } catch (timingErr) {
+      console.error("[SkyDeal] timing insights failed", timingErr);
+      timingInsights = [];
+    }
+
     const responseBody = {
       currentBestPrice,
       suggestions,
       summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
+      timingInsights,
       meta: { truncated }
     };
 
