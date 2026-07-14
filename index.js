@@ -34,7 +34,14 @@ const PAYMENT_RECOMMENDATION_CONFIG = {
   maxSuggestions: 2,
   maxFlightsPerLeg: 40,           // validation cap only — matches /search's existing per-leg cap
   maxCandidatesPerRequest: 50,    // computation guard
-  maxEmiTenureVariantsPerBank: 6,
+  // EMI tenure candidates only exist for the (typically 1-3) already-
+  // selected credit cards, unlike the 50-cap above which spans every
+  // bank/type combo - so this can afford real headroom. Raised from 6
+  // (every real tenure found gets fully reprice-tested and compared
+  // anyway; a low cap only risked silently dropping a legitimate tenure
+  // before it was ever evaluated, on a bank with an unusually large
+  // number of distinct EMI plans).
+  maxEmiTenureVariantsPerBank: 12,
   softTimeBudgetMs: 20000,        // stop testing further candidates past this
   suggestionsCacheTtlMs: 15000    // Phase 2: dedupe repeat identical /payment-suggestions calls
 };
@@ -53,17 +60,24 @@ const RECOMMENDATION_SCORE_WEIGHTS = {
   // step is worth far more than the maximum plausible combined value of
   // saving+ease+flights+breadth below, so relevance always wins first.
   tierUnit: 1_000_000_000_000,
-  // ₹1 of additional saving. One tier step (1e12) dwarfs even an
-  // unrealistically large saving (₹1,000,000 → 1e12 contribution), so
-  // saving can only ever matter as a tiebreaker within the same tier.
+  // ₹1 of additional saving. Even an absurd, never-realistic ₹1,000,000
+  // saving would only tie (not exceed) a single tier step - real fare
+  // differences are nowhere close to that, so in every real-world case
+  // saving only ever matters as a tiebreaker within the same tier.
   savingUnit: 1_000_000,
-  // One ease-of-adoption level (0-3, see easeOfAdoptionScore). Sized to
-  // dominate the maximum realistic flights+breadth contribution below.
+  // One ease-of-adoption level (0-3, see easeOfAdoptionScore). One level
+  // of difference (10,000) exceeds the max *combined* flights+breadth
+  // contribution below (8,000 + 100 = 8,100 at the current per-leg cap),
+  // so ease only ever matters once saving is tied.
   easeUnit: 10_000,
   // One flight improved (outbound+return combined, capped ~80 by the
-  // existing per-leg flight limit) - dominates breadth's max (100).
+  // existing per-leg flight limit). breadthPercent is *derived* from
+  // this same count (breadthPercent = affected/tested*100), so the two
+  // always move together rather than being independently adversarial -
+  // one flight of difference is never actually offset by breadth.
   flightUnit: 100,
-  // 1 percentage point of flights-tested that improved (0-100).
+  // 1 percentage point of flights-tested that improved (0-100) - the
+  // final, lowest-precedence tiebreaker.
   breadthUnit: 1
 };
 
@@ -7209,7 +7223,13 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
       }
     }
 
-    let tenures = Array.from(tenureSet).slice(0, cfg.maxEmiTenureVariantsPerBank);
+    // Sorted numerically first so that if a bank genuinely has more
+    // distinct tenures than the cap, which ones get dropped is at least
+    // deterministic rather than depending on arbitrary Mongo document
+    // order - there's no "expected saving" signal available yet to sort
+    // by at this point (that's exactly what the reprice loop below
+    // computes for whichever tenures make the cut).
+    let tenures = Array.from(tenureSet).sort((a, b) => a - b).slice(0, cfg.maxEmiTenureVariantsPerBank);
     if (tenures.length === 0 && sawGenericEmiOffer) tenures = [null];
 
     for (const tenure of tenures) {
@@ -7675,7 +7695,6 @@ async function buildTimingInsights({
       currentDate: todayDateOnly.toISOString().slice(0, 10),
       availableFrom: isEndingFamily ? todayDateOnly.toISOString().slice(0, 10) : evalDay.toISOString().slice(0, 10),
       availableUntil: isEndingFamily ? addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1).toISOString().slice(0, 10) : null,
-      travelDateEligible: true,
       potentialSaving,
       estimatedFinalPrice: copy.estimatedFinalPrice,
       isOfferOnlyEstimate: !isEndingFamily,
@@ -7891,7 +7910,6 @@ app.post("/payment-suggestions", async (req, res) => {
         affectedReturnFlights: r.affectedReturnFlights,
         relevanceTier: r.relevanceTier,
         reasonCode,
-        appliesNow: true,
         heading: copy.heading,
         message: copy.message,
         primaryActionLabel: copy.primaryActionLabel
