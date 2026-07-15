@@ -7751,7 +7751,20 @@ app.post("/payment-suggestions", async (req, res) => {
     const baselineFlights = [...v.outboundFlights, ...v.returnFlights];
     const matchedOfferCount = baselineFlights.filter((f) => f?.bestDeal?.applied === true).length;
 
+    // Temporary timing instrumentation (2026-07-15) to diagnose the ~10s
+    // first-load latency reported for Price intelligence - mirrors
+    // /search's own `timings` object. Cheap (a handful of Date.now()
+    // calls), safe to leave in the response long-term like /search does.
+    const timings = {};
+    let tMark = Date.now();
+    const mark = (label) => {
+      const now = Date.now();
+      timings[label] = now - tMark;
+      tMark = now;
+    };
+
     const offers = await getOffersForSearch({});
+    mark("offersLoadMs");
 
     // Phase 2 cache: identical (route/selection/flights) state within the
     // TTL, and no live offer refresh since, skips candidate generation
@@ -7768,6 +7781,7 @@ app.post("/payment-suggestions", async (req, res) => {
     }
 
     const genericDisplayContext = await getGenericDisplayContextForSearch({});
+    mark("genericDisplayContextMs");
     const isDomestic = isDomesticRoute(v.from, v.to);
     const requestCache = {
       infoOffersByKey: new Map(),
@@ -7786,6 +7800,7 @@ app.post("/payment-suggestions", async (req, res) => {
     };
 
     const candidates = await buildCandidatePaymentMethods(v.selectedPaymentMethods, offers, cfg);
+    mark("buildCandidatesMs");
 
     // Relevance filter runs before the (expensive) reprice loop: tier-5
     // "unrelated bank" candidates are dropped entirely here, not merely
@@ -7856,6 +7871,7 @@ app.post("/payment-suggestions", async (req, res) => {
         _score: score
       });
     }
+    mark("repriceLoopMs");
 
     // When the same bank surfaces more than once (e.g. multiple valid EMI
     // tenures), keep only the single highest-scoring suggestion for it.
@@ -7938,13 +7954,17 @@ app.post("/payment-suggestions", async (req, res) => {
       console.error("[SkyDeal] timing insights failed", timingErr);
       timingInsights = [];
     }
+    mark("timingInsightsMs");
+    timings.totalMs = Date.now() - startedAt;
+    timings.candidatesConsidered = relevantCandidates.length;
+    timings.flightsTested = flightsTested;
 
     const responseBody = {
       currentBestPrice,
       suggestions,
       summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
       timingInsights,
-      meta: { truncated }
+      meta: { truncated, timings }
     };
 
     paymentSuggestionsCache.set(cacheKey, {
