@@ -7813,6 +7813,7 @@ app.post("/payment-suggestions", async (req, res) => {
     const flightsTested = v.outboundFlights.length + (v.tripType === "round-trip" ? v.returnFlights.length : 0);
     const results = [];
     let truncated = false;
+    const perCandidateMs = []; // temporary (2026-07-15) - see mark() above
 
     for (const candidate of relevantCandidates) {
       if (Date.now() - startedAt > cfg.softTimeBudgetMs) {
@@ -7820,6 +7821,7 @@ app.post("/payment-suggestions", async (req, res) => {
         break;
       }
 
+      const __candidateStart = Date.now();
       const hypothetical = [...v.selectedPaymentMethods, candidate];
 
       const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
@@ -7845,6 +7847,8 @@ app.post("/payment-suggestions", async (req, res) => {
 
       const newBestPrice = newOutboundBest + newReturnBest;
       const additionalSaving = Math.round(currentBestPrice - newBestPrice);
+
+      perCandidateMs.push({ candidate: `${candidate.type}|${candidate.name}|${candidate.tenureMonths ?? ""}`, ms: Date.now() - __candidateStart });
 
       const isValid =
         additionalSaving >= cfg.minAbsoluteSavingInr ||
@@ -7958,6 +7962,7 @@ app.post("/payment-suggestions", async (req, res) => {
     timings.totalMs = Date.now() - startedAt;
     timings.candidatesConsidered = relevantCandidates.length;
     timings.flightsTested = flightsTested;
+    timings.perCandidateMs = perCandidateMs;
 
     const responseBody = {
       currentBestPrice,
