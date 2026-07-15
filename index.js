@@ -166,6 +166,14 @@ const OFFERS_CACHE_TTL_MS = Number(process.env.OFFERS_CACHE_TTL_MS || 60000);
 let offersCacheData = null;
 let offersCacheLoadedAt = 0;
 
+// Same volatility profile as the main offers cache above (both refreshed
+// by the same scraper pipeline) - getGenericDisplayContextForSearch()
+// used to run 2 fresh Mongo queries on every single call (2026-07-15
+// finding: this was pure overhead in /payment-suggestions, called fresh
+// on every request with no caching at all, unlike the main offers read).
+let genericDisplayContextCacheData = null;
+let genericDisplayContextCacheLoadedAt = 0;
+
 const FLIGHTAPI_CACHE_TTL_MS = Number(process.env.FLIGHTAPI_CACHE_TTL_MS || 600000);
 const flightApiSuccessCache = new Map();
 // --------------------
@@ -5094,9 +5102,16 @@ function pickDisplayBankName(pm) {
   return out || null;
 }
 
-async function computePaymentOptionsFromOffers() {
-  const col = await getOffersCollection();
-  const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+// Optional preloadedOffers param (2026-07-15): callers that already have
+// the cached offers array in scope (e.g. buildCandidatePaymentMethods,
+// itself already called with `offers` in hand) can pass it directly and
+// skip a completely redundant Mongo round-trip - this function used to
+// always re-query the exact same collection getOffersForSearch() already
+// caches with a 10-min TTL, on every single call. Callers with no offers
+// in scope (e.g. GET /payment-options) still get the cached path via
+// getOffersForSearch() instead of a fresh uncached query.
+async function computePaymentOptionsFromOffers(preloadedOffers = null) {
+  const offers = Array.isArray(preloadedOffers) ? preloadedOffers : await getOffersForSearch({});
 
   const buckets = {
     EMI: new Set(),
@@ -6444,6 +6459,20 @@ async function getOffersForSearch(meta = {}) {
 async function getGenericDisplayContextForSearch(meta = {}) {
   // Only loaded when includeGenericDisplayOffers=true is sent in /search.
   // Reads review/display-only collections and never modifies Mongo.
+  const now = Date.now();
+  const cacheAgeMs = genericDisplayContextCacheData ? now - genericDisplayContextCacheLoadedAt : null;
+  const cacheValid =
+    genericDisplayContextCacheData !== null &&
+    cacheAgeMs !== null &&
+    cacheAgeMs >= 0 &&
+    cacheAgeMs < OFFERS_CACHE_TTL_MS;
+
+  if (cacheValid) {
+    meta.genericDisplayContextCache = "hit";
+    meta.genericDisplayContextCacheAgeMs = cacheAgeMs;
+    return genericDisplayContextCacheData;
+  }
+
   await getOffersCollection();
 
   const db = _mongoClient.db(MONGODB_DB);
@@ -6473,12 +6502,17 @@ async function getGenericDisplayContextForSearch(meta = {}) {
     conservativeDisplayOfferCandidates: conservativeDisplayOffers.length,
     mode: "flag_controlled_search_display"
   };
+  meta.genericDisplayContextCache = "miss";
+  meta.genericDisplayContextCacheAgeMs = 0;
 
-  return {
+  genericDisplayContextCacheData = {
     enabled: true,
     verifiedGenericCoupons,
     conservativeDisplayOffers
   };
+  genericDisplayContextCacheLoadedAt = now;
+
+  return genericDisplayContextCacheData;
 }
 
 function normalizeSearchDisplayText(value) {
@@ -7153,7 +7187,7 @@ function computeRecommendationScore({ tier, additionalSaving, easeScore, totalAf
 // entirely from live data (computePaymentOptionsFromOffers' catalog plus
 // real EMI tenures read off the offers collection) — no hard-coded banks.
 async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg) {
-  const catalog = await computePaymentOptionsFromOffers();
+  const catalog = await computePaymentOptionsFromOffers(offers);
   const selectedSet = new Set((selectedPaymentMethods || []).map(selectedPmKey));
   const candidates = [];
 
