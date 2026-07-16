@@ -337,6 +337,29 @@ function shouldRetryFlightApiFailure(status, bodyText = "") {
   return false;
 }
 
+// FlightAPI real-world finding (2026-07-15, BOM->IXU): the FIRST call for a
+// brand-new route/date can come back HTTP 200 with a genuine `itineraries`
+// array, but FlightAPI's own `stats.itineraries.total.count` (and every
+// other stat) is still zeroed out - a "search job hasn't finished
+// populating yet" snapshot, not a real error. Confirmed directly: two
+// immediate follow-up calls for the identical route/date returned the full
+// 53 itineraries with internally-consistent stats. Our retry loop
+// previously only inspected HTTP status/error text, so it accepted and
+// CACHED (10 min) whatever thin snapshot came back first - in the observed
+// case, exactly 1 itinerary instead of 53, which is what a real user saw.
+// This checks for that specific internal inconsistency as a retry signal;
+// a genuinely thin route (few real options) won't trip it, since its own
+// stats would consistently match its own itineraries count.
+function looksLikeIncompleteFlightApiResponse(parsedData) {
+  const itineraries = Array.isArray(parsedData?.itineraries) ? parsedData.itineraries : [];
+  if (itineraries.length === 0) return false;
+
+  const statsTotal = parsedData?.stats?.itineraries?.total?.count;
+  if (!Number.isFinite(statsTotal)) return false;
+
+  return statsTotal !== itineraries.length;
+}
+
 function flightApiRetryDelayMs(attempt) {
   const baseDelayMs = Number(process.env.FLIGHTAPI_RETRY_BASE_DELAY_MS || 800);
   const delay = baseDelayMs * Math.pow(2, Math.max(0, attempt - 1));
@@ -421,6 +444,11 @@ async function fetchOneWayTrip({
 
   const tried = [];
   let lastError = null;
+  // Holds the last successfully-parsed-but-suspiciously-incomplete
+  // response (see looksLikeIncompleteFlightApiResponse) so a route that
+  // genuinely never stabilizes across every attempt still returns
+  // something, rather than erroring out entirely.
+  let lastIncompleteResult = null;
 
   const timeoutMs = Number(process.env.FLIGHTAPI_TIMEOUT_MS || 12000);
   const maxAttempts = Number(process.env.FLIGHTAPI_MAX_ATTEMPTS || 3);
@@ -454,16 +482,37 @@ async function fetchOneWayTrip({
       if (res.ok) {
         try {
           const parsedData = JSON.parse(text);
-          flightApiSuccessCache.set(cacheKey, {
-            loadedAt: Date.now(),
-            data: parsedData
-          });
 
-          return {
-            status: res.status,
-            data: parsedData,
-            tried,
-          };
+          if (looksLikeIncompleteFlightApiResponse(parsedData)) {
+            triedRow.incompleteSnapshot = true;
+            triedRow.itinerariesCount = Array.isArray(parsedData?.itineraries) ? parsedData.itineraries.length : 0;
+            triedRow.statsTotalCount = parsedData?.stats?.itineraries?.total?.count ?? null;
+            lastIncompleteResult = { status: res.status, data: parsedData, tried };
+
+            if (attempt < maxAttempts) {
+              // Don't cache or return yet - retry, since FlightAPI's own
+              // stats disagree with the itineraries it just sent, a sign
+              // its search job hadn't finished populating (see
+              // looksLikeIncompleteFlightApiResponse above).
+            } else {
+              // Out of attempts - better to return the incomplete
+              // snapshot than nothing, but never cache it, so the next
+              // request gets a fresh chance at a stable response instead
+              // of being locked into this one for FLIGHTAPI_CACHE_TTL_MS.
+              return lastIncompleteResult;
+            }
+          } else {
+            flightApiSuccessCache.set(cacheKey, {
+              loadedAt: Date.now(),
+              data: parsedData
+            });
+
+            return {
+              status: res.status,
+              data: parsedData,
+              tried,
+            };
+          }
         } catch (jsonErr) {
           lastError = {
             status: "INVALID_JSON",
