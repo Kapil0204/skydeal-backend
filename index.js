@@ -185,7 +185,8 @@ const INDIAN_IATA_AIRPORTS = new Set([
   "IXM","IXR","IXS","IXU","JAI","JDH","JGA","JLR","JRG","JSA","IXY","JGB","KNU","LKO","MAA",
   "MYQ","NAG","PAT","PNQ","RJA","RPR","SAG","SLV","SXR","STV","SXV","TRV","TRZ","UDR","VGA",
   "VNS","VTZ","PNY","AGX","DIB","IMF","SHL","AIP","NDC","TIR","RDP","JRH","TEZ","TCR","TCR",
-  "COH","DHM","KUU","LEH","SBI","TCR","UDR","BEP","HJR","JLG","AJL","IXK","ISK","JAI","NMI"
+  "COH","DHM","KUU","LEH","SBI","TCR","UDR","BEP","HJR","JLG","AJL","IXK","ISK","JAI","NMI",
+  "DXN","HDO","GOX"
 ]);
 
 function isIndianAirportIata(iata) {
@@ -197,6 +198,29 @@ function isDomesticRoute(from, to) {
   const b = String(to || "").trim().toUpperCase();
   if (!a || !b) return true; // safe default
   return isIndianAirportIata(a) && isIndianAirportIata(b);
+}
+
+// Metro areas served by more than one operational airport (2026-07-16,
+// founder-reported Mumbai-Aurangabad gap: other OTAs merge Navi Mumbai
+// International into a "Mumbai" search, SkyDeal only ever queried BOM).
+// Every code in a group expands to the FULL group (symmetric) - searching
+// any one of them pulls in flights from all of them. Kept to a short,
+// explicit, manually-verified list rather than inferring from city names
+// in the airport dataset (which is crowdsourced and inconsistent - see
+// the Jewar/Noida naming note elsewhere in this file).
+const METRO_AIRPORT_GROUPS = {
+  BOM: ["BOM", "NMI"],
+  NMI: ["BOM", "NMI"],
+  DEL: ["DEL", "DXN", "HDO"],
+  DXN: ["DEL", "DXN", "HDO"],
+  HDO: ["DEL", "DXN", "HDO"],
+  GOI: ["GOI", "GOX"],
+  GOX: ["GOI", "GOX"]
+};
+
+function expandMetroAirportGroup(code) {
+  const upper = String(code || "").trim().toUpperCase();
+  return METRO_AIRPORT_GROUPS[upper] || [upper];
 }
 
 // --------------------
@@ -6814,48 +6838,117 @@ app.post("/search", async (req, res) => {
       const legStart = Date.now();
 
       try {
-        const res = await fetchOneWayTrip({
-          from: fromAirport,
-          to: toAirport,
-          date,
-          adults,
-          cabin,
-          currency
-        });
+        // Metro-group expansion (2026-07-16): if either side belongs to a
+        // multi-airport metro area (see METRO_AIRPORT_GROUPS), query every
+        // airport in that group and merge - e.g. a Mumbai search becomes
+        // BOM+NMI, not just BOM. Reduces to exactly the original single
+        // call when neither side is grouped (fromGroup/toGroup are each
+        // [code]), so an ungrouped route's cost/behavior is unchanged.
+        const fromGroup = expandMetroAirportGroup(fromAirport);
+        const toGroup = expandMetroAirportGroup(toAirport);
+        const airportPairs = [];
+        for (const f of fromGroup) {
+          for (const t of toGroup) {
+            airportPairs.push({ from: f, to: t });
+          }
+        }
+
+        const pairResults = await Promise.allSettled(
+          airportPairs.map((pair) =>
+            fetchOneWayTrip({
+              from: pair.from,
+              to: pair.to,
+              date,
+              adults,
+              cabin,
+              currency
+            })
+          )
+        );
 
         timings[flightApiTimingKey] = Date.now() - legStart;
-        meta[statusKey] = res.status;
-        meta.request[triedKey] = res.tried;
 
-        if (!isReturn) {
-          meta.flightApiRawShape = {
-            topLevelKeys: Object.keys(res.data || {}),
-            itineraries: Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0,
-            legs: Array.isArray(res.data?.legs) ? res.data.legs.length : 0,
-            segments: Array.isArray(res.data?.segments) ? res.data.segments.length : 0,
-            carriers: Array.isArray(res.data?.carriers) ? res.data.carriers.length : 0,
-            agents: Array.isArray(res.data?.agents) ? res.data.agents.length : 0,
-            quotes: Array.isArray(res.data?.quotes) ? res.data.quotes.length : 0,
-            results: Array.isArray(res.data?.results) ? res.data.results.length : 0,
-            data: Array.isArray(res.data?.data) ? res.data.data.length : 0
-          };
+        const triedAll = [];
+        let combinedFlightsRaw = [];
+        let combinedItinerariesCount = 0;
+        let lastStatus = 0;
+        let firstRawShape = null;
+
+        pairResults.forEach((settled, i) => {
+          const pair = airportPairs[i];
+
+          if (settled.status !== "fulfilled") {
+            triedAll.push({
+              from: pair.from,
+              to: pair.to,
+              status: "ERROR",
+              error: settled.reason?.message || String(settled.reason)
+            });
+            return;
+          }
+
+          const res = settled.value;
+          lastStatus = res.status;
+          triedAll.push(...(res.tried || []).map((t) => ({ ...t, pairFrom: pair.from, pairTo: pair.to })));
+
+          const itinerariesCount = Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0;
+          combinedItinerariesCount += itinerariesCount;
+
+          if (!firstRawShape) {
+            firstRawShape = {
+              topLevelKeys: Object.keys(res.data || {}),
+              itineraries: itinerariesCount,
+              legs: Array.isArray(res.data?.legs) ? res.data.legs.length : 0,
+              segments: Array.isArray(res.data?.segments) ? res.data.segments.length : 0,
+              carriers: Array.isArray(res.data?.carriers) ? res.data.carriers.length : 0,
+              agents: Array.isArray(res.data?.agents) ? res.data.agents.length : 0,
+              quotes: Array.isArray(res.data?.quotes) ? res.data.quotes.length : 0,
+              results: Array.isArray(res.data?.results) ? res.data.results.length : 0,
+              data: Array.isArray(res.data?.data) ? res.data.data.length : 0
+            };
+          }
+
+          const pairFlights = mapFlightsFromFlightAPI(res.data);
+          // Each pair's own from/to is exactly which physical airport its
+          // flights use - no need to parse it back out of FlightAPI's raw
+          // places data, we already know it from the query itself.
+          pairFlights.forEach((f) => {
+            f.departureAirportCode = pair.from;
+            f.arrivalAirportCode = pair.to;
+          });
+          combinedFlightsRaw = combinedFlightsRaw.concat(pairFlights);
+        });
+
+        if (combinedFlightsRaw.length === 0 && pairResults.every((s) => s.status !== "fulfilled")) {
+          // Every single pair failed outright (not just "0 flights") -
+          // surface this the same way a single-pair failure used to, so
+          // the existing error-handling/UI path is unaffected.
+          const firstRejection = pairResults.find((s) => s.status === "rejected");
+          throw firstRejection?.reason || new Error(`${directionLabel} FlightAPI search failed`);
+        }
+
+        meta[statusKey] = lastStatus;
+        meta.request[triedKey] = triedAll;
+
+        if (!isReturn && firstRawShape) {
+          meta.flightApiRawShape = firstRawShape;
+        }
+
+        if (airportPairs.length > 1) {
+          meta[isReturn ? "retAirportPairs" : "outAirportPairs"] = airportPairs;
         }
 
         const mapStart = Date.now();
-        const flightsRaw = mapFlightsFromFlightAPI(res.data);
+        const flightsRaw = combinedFlightsRaw;
         const flightsLimited = limitAndSortFlights(flightsRaw).slice(0, 40);
         timings[mapTimingKey] = Date.now() - mapStart;
 
         meta[rawFlightsKey] = flightsRaw.length;
         meta[returnedFlightsKey] = flightsLimited.length;
         meta[carrierRuleKey] = {
-          flightApiItineraries: Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0,
+          flightApiItineraries: combinedItinerariesCount,
           keptWithCarrierPrice: flightsRaw.length,
-          skippedWithoutCarrierPrice:
-            (Array.isArray(res.data?.itineraries) ? res.data.itineraries.length : 0) - flightsRaw.length,
-          ...(!isReturn && String(process.env.INCLUDE_FLIGHTAPI_DEBUG_META || "false").toLowerCase() === "true"
-            ? { debug: getFlightApiCarrierDebug(res.data) }
-            : {})
+          skippedWithoutCarrierPrice: combinedItinerariesCount - flightsRaw.length
         };
 
         const routeIsDomestic = isDomesticRoute(fromAirport, toAirport);
