@@ -25,7 +25,7 @@ app.use(express.json());
 // --------------------
 // Config
 // --------------------
-const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip"];
+const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip", "Ixigo"];
 
 // Phase 1 intelligent payment guide — tunables kept in one place.
 const PAYMENT_RECOMMENDATION_CONFIG = {
