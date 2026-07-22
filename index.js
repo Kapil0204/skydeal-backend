@@ -1565,6 +1565,31 @@ function isNoPaymentOffer(offer) {
   return !hasExplicitOfferPaymentMethods(offer);
 }
 
+// True when an offer requires a specific card/bank the user hasn't
+// selected. Distinguishes "add ICICI net-banking, you already bank with
+// ICICI" (same-bank, actionable) from "get a Kotak card" (a different bank
+// entirely - not something you decide while comparing one flight) so
+// cross-bank offers can be kept out of the compare card's info-offer list.
+function offerRequiresDifferentBank(offer, selectedPaymentMethods = []) {
+  if (!hasExplicitOfferPaymentMethods(offer)) return false;
+
+  const selected = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
+  if (selected.length === 0) return true;
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  if (!Array.isArray(offerPMs) || offerPMs.length === 0) return true;
+
+  const sameBank = offerPMs.some((pm) =>
+    selected.some((sel) => {
+      const offerBank = bankCanonicalFromAny(pm?.bankCanonical || pm?.bank || pm?.name || pm?.raw || "");
+      const selectedBank = bankCanonicalFromAny(sel?.name || sel?.bank || "");
+      return offerBank && selectedBank && offerBank === selectedBank;
+    })
+  );
+
+  return !sameBank;
+}
+
 function offerTargetsThisAirline(offer, airlineName) {
   const airline = normalizeText(airlineName || "");
   if (!airline) return false;
@@ -4221,6 +4246,7 @@ if (!bookingDayCheck.ok) continue;
 if (!offerAppliesToPortal(offer, portal)) continue;
 if (isSuspiciousGenericOffer(offer, offers)) continue;
 if (!offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods)) continue;
+if (offerRequiresDifferentBank(offer, selectedPaymentMethods)) continue;
 
     const coreBlob = normalizeText(
       `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""}`
@@ -4818,6 +4844,11 @@ const nonAppliedButRelevantOffers = offers
     // Do not show wrong-tenure EMI offers as related/info offers.
     // Example: if user selected 3-month HDFC EMI, do not show 6-month Yatra EMI in infoOffers.
     if (!offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods)) return false;
+
+    // Cross-bank offers ("get a Kotak card") aren't actionable from the
+    // compare card the way a same-bank EMI/net-banking nudge is - price
+    // intelligence already covers that upstream, so drop the noise here.
+    if (offerRequiresDifferentBank(offer, selectedPaymentMethods)) return false;
 
     // skip already included
     const code =
