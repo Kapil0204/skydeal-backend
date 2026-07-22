@@ -5271,7 +5271,46 @@ async function computePaymentOptionsFromOffers(preloadedOffers = null) {
     "Net Banking": buildCounts("NetBanking"),
   };
 
-  return { usedFallback: false, options, offerCounts };
+  // Additive, non-breaking (same pattern as offerCounts above): a light
+  // per-offer summary - just title + the offer's own stated discount/
+  // condition text, both already on the offer document - so the frontend
+  // can show *what* is being counted, not just the number. Capped at 6
+  // per bank to keep the response small (matches the existing infoOffers
+  // cap elsewhere). Deliberately not a live eligibility check against a
+  // specific search (no route/portal/cabin context exists at this stage) -
+  // it's the offer's own general conditions, e.g. "Domestic flights only,
+  // Min transaction Rs.10,000", not a promise it applies to any one trip.
+  const buildSummaries = (bucketKey) => {
+    const out = {};
+    for (const [bank, idxSet] of Object.entries(bucketBankOfferIdx[bucketKey] || {})) {
+      const summaries = Array.from(idxSet)
+        .slice(0, 6)
+        .map((idx) => {
+          const offer = offers[idx];
+          return {
+            title: offer?.title || null,
+            rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
+          };
+        })
+        .filter((o) => o.title || o.rawDiscount);
+      if (summaries.length > 0) out[bank] = summaries;
+    }
+    return out;
+  };
+
+  const offerSummaries = {
+    EMI: buildSummaries("EMI"),
+    CreditCard: buildSummaries("CreditCard"),
+    DebitCard: buildSummaries("DebitCard"),
+    NetBanking: buildSummaries("NetBanking"),
+    UPI: buildSummaries("UPI"),
+    Wallet: buildSummaries("Wallet"),
+    "Credit Card": buildSummaries("CreditCard"),
+    "Debit Card": buildSummaries("DebitCard"),
+    "Net Banking": buildSummaries("NetBanking"),
+  };
+
+  return { usedFallback: false, options, offerCounts, offerSummaries };
 }
 
 // --------------------
