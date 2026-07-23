@@ -602,6 +602,37 @@ function normalizeForMatch(v) {
     .trim();
 }
 
+// 2026-07-23: live-audited Akasa Air's FlightAPI carrier-direct price
+// against real OTA pages (Yatra, cross-checked against Cleartrip/Ixigo/
+// MakeMyTrip/Goibibo for one flight) for 11 flights - 3 routes (BOM-DEL,
+// BOM-BLR, BLR-DEL), dates 13 Aug and 20 Nov 2026 (3.5 months apart),
+// prices from Rs.5,101 to Rs.10,016. Every single one was EXACTLY Rs.350
+// higher on FlightAPI than the real OTA price - not approximately, not a
+// percentage (the gap didn't scale across a ~2x price range, so this is a
+// flat offset, not a fare-class percentage markup). Investigated the raw
+// FlightAPI response directly: Akasa itineraries only ever expose ONE
+// carrier-attributed pricing_option (no separate cheaper "Saver" option
+// to select instead) - the gap can't be fixed by picking a different
+// pricing_option, only by correcting the number itself. See DECISIONS.md
+// (2026-07-23) for the full investigation and evidence table. Flat
+// per-carrier Rupee amounts (not percentages) since that's what the
+// evidence actually showed - revisit if a future audit finds this no
+// longer holds, or if a fare-class/convenience-fee explanation surfaces
+// that would make a percentage more correct.
+const CARRIER_FARE_CORRECTIONS_INR = {
+  akasa: 350
+};
+
+function applyCarrierFareCorrection(amount, airlineName) {
+  const normalized = normalizeForMatch(airlineName);
+  for (const [alias, correctionInr] of Object.entries(CARRIER_FARE_CORRECTIONS_INR)) {
+    if (normalized.includes(alias)) {
+      return Math.max(0, amount - correctionInr);
+    }
+  }
+  return amount;
+}
+
 function getCarrierAliases(airlineName, carrier = {}) {
   const name = normalizeForMatch(airlineName);
   const code = normalizeForMatch(carrier?.code || carrier?.iata || carrier?.display_code || "");
@@ -923,7 +954,12 @@ function mapFlightsFromFlightAPI(raw) {
       continue;
     }
 
-    const carrierAmount = Math.min(...carrierAmounts);
+    // Correct known carrier-specific gaps between FlightAPI's reported
+    // carrier-direct price and the real, live OTA price - see
+    // CARRIER_FARE_CORRECTIONS_INR above for the evidence. A no-op for
+    // every carrier not in that list (the overwhelming majority).
+    const carrierAmountRaw = Math.min(...carrierAmounts);
+    const carrierAmount = applyCarrierFareCorrection(carrierAmountRaw, airlineName);
 
     // allFlightNumbers and segmentAirlineNames are built together, one
     // entry PER SEGMENT (not deduped) so the two stay index-aligned -
@@ -978,6 +1014,7 @@ function mapFlightsFromFlightAPI(raw) {
       carrierAgentIds,
       pricingOptionCount: pricingOptions.length,
       carrierPricingOptionCount: carrierPricingOptions.length,
+      ...(carrierAmount !== carrierAmountRaw ? { carrierPriceRawFromFlightApi: carrierAmountRaw } : {}),
     };
 
     if (String(process.env.INCLUDE_FLIGHTAPI_RAW_IN_RESULTS || "false").toLowerCase() === "true") {
