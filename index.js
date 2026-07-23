@@ -633,6 +633,38 @@ function applyCarrierFareCorrection(amount, airlineName) {
   return amount;
 }
 
+// 2026-07-23: live-audited IndiGo's FlightAPI carrier price the same way
+// as Akasa above, but the result was a different shape - portal-specific
+// and stop-count-dependent, not a single flat number. Confirmed across 3
+// non-stop flights (BOM-DEL, BOM-BLR, BLR-DEL; Rs.6,015-9,844 price
+// range, tight time-sync between the FlightAPI read and each portal
+// check to rule out ordinary fare drift): Yatra's real price is exactly
+// Rs.41 higher than FlightAPI's number every time; Cleartrip/Ixigo/
+// MakeMyTrip/Goibibo/EaseMyTrip agree with EACH OTHER exactly and are
+// Rs.56 higher, every time. A 4th flight (1-stop, same route/price
+// range) showed next to no gap (+8/-7, noise) - so this is deliberately
+// scoped to non-stop only; applying it to connecting itineraries would
+// overshoot and make things worse, not better. See DECISIONS.md
+// (2026-07-23) for the full evidence table.
+const INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR = {
+  Yatra: 41,
+  // Goibibo/MakeMyTrip/EaseMyTrip/Cleartrip/Ixigo all shared this exact
+  // number across every flight checked - not five separate guesses.
+  __default: 56
+};
+
+function applyIndigoNonstopPortalCorrection(portalBase, flight, portal) {
+  const airline = normalizeForMatch(flight?.airlineName);
+  if (!airline.includes("indigo")) return portalBase;
+  if (Number(flight?.stops) !== 0) return portalBase;
+
+  const correctionInr = Object.prototype.hasOwnProperty.call(INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR, portal)
+    ? INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR[portal]
+    : INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR.__default;
+
+  return portalBase + correctionInr;
+}
+
 function getCarrierAliases(airlineName, carrier = {}) {
   const name = normalizeForMatch(airlineName);
   const code = normalizeForMatch(carrier?.code || carrier?.iata || carrier?.display_code || "");
@@ -4670,7 +4702,7 @@ async function applyOffersToFlight(
       pricingTiming.portalRowsPriced = (pricingTiming.portalRowsPriced || 0) + 1;
     }
 
-    const portalBase = Math.round(base);
+    const portalBase = applyIndigoNonstopPortalCorrection(Math.round(base), flight, portal);
 
     // FlightAPI/search result price is already the booking-level price for the requested passenger count.
     // Do not multiply by passengers again for min-transaction eligibility, or high-minimum offers
