@@ -5070,8 +5070,29 @@ return {
 
   });
 
-  const bestPortal = portalPrices.reduce((acc, p) => (acc == null || p.finalPrice < acc.finalPrice ? p : acc), null);
+  // On an exact price tie, `<` alone would silently pick whichever portal
+  // happens to come first in OTAS (an arbitrary, unrelated ordering) -
+  // break ties alphabetically instead, so the winner is deterministic and
+  // explainable rather than a coincidence of array position.
+  const minFinalPrice = portalPrices.reduce(
+    (min, p) => (min == null || p.finalPrice < min ? p.finalPrice : min),
+    null
+  );
+  const tiedAtMin = portalPrices.filter((p) => p.finalPrice === minFinalPrice);
+  const bestPortal = tiedAtMin.length > 0
+    ? [...tiedAtMin].sort((a, b) => String(a.portal).localeCompare(String(b.portal)))[0]
+    : null;
   const bestAppliedPortal = bestPortal?.applied ? bestPortal : null;
+
+  // Only worth telling the user about a tie when every side of it is a
+  // real, verified price - a display-only estimate that happens to match
+  // isn't the same guarantee as two confirmed exact prices, so it isn't
+  // surfaced as a "same price" claim.
+  const tiedWithPortals = bestAppliedPortal?.isExactPricing === true
+    ? tiedAtMin
+        .filter((p) => p !== bestAppliedPortal && p.isExactPricing === true)
+        .map((p) => p.portal)
+    : [];
 
   return {
     ...flight,
@@ -5102,6 +5123,7 @@ return {
           genericCandidateStatus: bestAppliedPortal.genericCandidateStatus || null,
           genericPricingReadiness: bestAppliedPortal.genericPricingReadiness || null,
           explain: `Best price is on ${bestAppliedPortal.portal} because ${bestAppliedPortal.code || "an offer"} reduced ₹${bestAppliedPortal.basePrice} → ₹${bestAppliedPortal.finalPrice}`,
+          tiedWithPortals: tiedWithPortals.length > 0 ? tiedWithPortals : null,
         }
       : null,
   };
@@ -6555,6 +6577,7 @@ function slimPortalPriceForSearchResponse(row) {
     genericCandidateStatus: row.genericCandidateStatus || null,
     genericPricingReadiness: row.genericPricingReadiness || null,
     explain: row.explain || null,
+    tiedWithPortals: row.tiedWithPortals || null,
 
     // Keep hints for "more offers", but remove huge terms/raw text from normal search response.
     infoOffers: Array.isArray(row.infoOffers)
