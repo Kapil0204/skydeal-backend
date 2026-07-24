@@ -696,8 +696,31 @@ function normalizeForMatch(v) {
 // evidence actually showed - revisit if a future audit finds this no
 // longer holds, or if a fare-class/convenience-fee explanation surfaces
 // that would make a percentage more correct.
+//
+// 2026-07-24: live-audited SpiceJet the same way. First pass (5 flights,
+// mixed quote ages up to ~22hrs stale) looked messy/inconsistent - gaps of
+// Rs.350-931 vs MMT. Root cause was staleness, not a real inconsistent
+// gap: re-tested with ONLY fresh quotes (quote_age <= 30min, confirmed via
+// FlightAPI's own quote_age field) across 5 flights, 3 routes (DEL-BOM,
+// BOM-BLR, DEL-CCU), and got EXACTLY Rs.350 every single time vs MMT - same
+// amount as Akasa, confirmed coincidental (unrelated carriers/routes/fare
+// structure). Also confirmed structurally clean: every SpiceJet
+// carrier-tagged pricing option's fare-basis code ends in "SAV" (USAV/
+// VSAV/ASAV - varying only by booking-class letter U/V/A, the same "Saver"
+// fare product every time), so unlike Air India Express there's no
+// competing fare-bucket to accidentally pick the wrong one from. Yatra's
+// gap vs FlightAPI was messier (Rs.518-906) but decomposes cleanly once
+// you subtract the same Rs.350 base: the remainder (Rs.168/168/168/556/288)
+// matches the shape of Yatra's separate, still-unexplained "Instant
+// Discount" mechanism found during the Air India Express investigation -
+// not a different SpiceJet-specific rule. Deliberately NOT modeling
+// Yatra's extra discount here (no reliable formula yet); applying the same
+// flat Rs.350 to Yatra as every other portal is conservative (may slightly
+// understate Yatra's real saving, never overstates it - see conservative
+// discount principle in DECISIONS.md).
 const CARRIER_FARE_CORRECTIONS_INR = {
-  akasa: 350
+  akasa: 350,
+  spicejet: 350
 };
 
 function applyCarrierFareCorrection(amount, airlineName) {
