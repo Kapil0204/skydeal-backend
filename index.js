@@ -384,6 +384,81 @@ function looksLikeIncompleteFlightApiResponse(parsedData) {
   return statsTotal !== itineraries.length;
 }
 
+// Air India's non-stop inventory occasionally disappears from FlightAPI's
+// response for a few minutes at a time (confirmed via repeated live
+// re-checks: a route showing 0 non-stop Air India itineraries one moment
+// shows 20-30 fully-priced ones minutes later on an identical query - see
+// FLIGHTAPI_CARRIER_PRICING_AUDIT_2026-07.md). This is transient, not a
+// persistent coverage gap, so a single bounded retry is worth attempting -
+// but it must never hold up the rest of the search past a tight budget.
+function hasNonStopAirIndiaItinerary(parsedData) {
+  const itineraries = Array.isArray(parsedData?.itineraries) ? parsedData.itineraries : [];
+  if (itineraries.length === 0) return true; // no data at all - not this bug, don't retry
+
+  const legs = Object.fromEntries((parsedData.legs || []).map((l) => [l.id, l]));
+  const carriers = Object.fromEntries((parsedData.carriers || []).map((c) => [String(c.id), c]));
+
+  for (const it of itineraries) {
+    const legId = (it.leg_ids || [])[0];
+    const leg = legId ? legs[legId] : null;
+    const carrierId = leg?.marketing_carrier_ids?.[0];
+    const carrierName = carriers[String(carrierId)]?.name || "";
+    if (carrierName === "Air India" && leg?.stop_count === 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+const AIRINDIA_RETRY_TIMEOUT_MS = Number(process.env.FLIGHTAPI_AIRINDIA_RETRY_TIMEOUT_MS || 5000);
+
+// Fires at most ONE extra fetch, capped at AIRINDIA_RETRY_TIMEOUT_MS (default
+// 5s) - deliberately much shorter than the main FLIGHTAPI_TIMEOUT_MS/retry
+// loop above, since this must never turn into a 5-10s wait. Fails open: any
+// error, timeout, or still-empty result just falls back to the original
+// (already-successful) response rather than throwing.
+async function maybeRetryForMissingAirIndiaNonStop(parsedData, activeUrl, tried) {
+  if (hasNonStopAirIndiaItinerary(parsedData)) return parsedData;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AIRINDIA_RETRY_TIMEOUT_MS);
+  const startedAt = Date.now();
+
+  try {
+    const res = await fetch(activeUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      tried.push({ airIndiaNonStopRetry: true, status: res.status, elapsedMs: Date.now() - startedAt });
+      return parsedData;
+    }
+
+    const text = await res.text();
+    const retriedData = JSON.parse(text);
+    const recovered = hasNonStopAirIndiaItinerary(retriedData);
+
+    tried.push({
+      airIndiaNonStopRetry: true,
+      status: res.status,
+      recovered,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    return recovered ? retriedData : parsedData;
+  } catch (err) {
+    clearTimeout(timeout);
+    tried.push({
+      airIndiaNonStopRetry: true,
+      error: err?.name === "AbortError"
+        ? `timed out after ${AIRINDIA_RETRY_TIMEOUT_MS}ms`
+        : (err?.message || String(err)),
+      elapsedMs: Date.now() - startedAt,
+    });
+    return parsedData;
+  }
+}
+
 function flightApiRetryDelayMs(attempt) {
   const baseDelayMs = Number(process.env.FLIGHTAPI_RETRY_BASE_DELAY_MS || 800);
   const delay = baseDelayMs * Math.pow(2, Math.max(0, attempt - 1));
@@ -526,14 +601,16 @@ async function fetchOneWayTrip({
               return lastIncompleteResult;
             }
           } else {
+            const finalData = await maybeRetryForMissingAirIndiaNonStop(parsedData, activeUrl, tried);
+
             flightApiSuccessCache.set(cacheKey, {
               loadedAt: Date.now(),
-              data: parsedData
+              data: finalData
             });
 
             return {
               status: res.status,
-              data: parsedData,
+              data: finalData,
               tried,
             };
           }
@@ -661,6 +738,35 @@ function applyIndigoNonstopPortalCorrection(portalBase, flight, portal) {
   const correctionInr = Object.prototype.hasOwnProperty.call(INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR, portal)
     ? INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR[portal]
     : INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR.__default;
+
+  return portalBase + correctionInr;
+}
+
+// 2026-07-24: live-audited Air India's FlightAPI carrier-direct price the
+// same way as Akasa/IndiGo above: 5 non-stop flights, 5 different routes
+// (BOM-DEL, BLR-DEL, DEL-BOM, BOM-BLR, DEL-BLR), dates 14-18 Aug 2026,
+// prices Rs.6,222-10,100. All 5 portals except Yatra matched FlightAPI's
+// Air India price exactly - Yatra was exactly Rs.15 cheaper on all 5. This
+// is deliberately scoped to non-stop only (the only condition tested);
+// revisit if a future audit finds connecting Air India flights behave
+// differently.
+const AIRINDIA_NONSTOP_PORTAL_CORRECTIONS_INR = {
+  Yatra: -15
+  // No __default entry - every other portal matched FlightAPI's carrier
+  // price exactly, so they get no correction.
+};
+
+function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal) {
+  const airline = normalizeForMatch(flight?.airlineName);
+  // Air India Express is a separate carrier (code IX) and contains "air
+  // india" as a substring - explicitly excluded so this never misfires on it.
+  if (airline.includes("air india express")) return portalBase;
+  if (!airline.includes("air india")) return portalBase;
+  if (Number(flight?.stops) !== 0) return portalBase;
+
+  const correctionInr = Object.prototype.hasOwnProperty.call(AIRINDIA_NONSTOP_PORTAL_CORRECTIONS_INR, portal)
+    ? AIRINDIA_NONSTOP_PORTAL_CORRECTIONS_INR[portal]
+    : 0;
 
   return portalBase + correctionInr;
 }
@@ -4702,7 +4808,8 @@ async function applyOffersToFlight(
       pricingTiming.portalRowsPriced = (pricingTiming.portalRowsPriced || 0) + 1;
     }
 
-    const portalBase = applyIndigoNonstopPortalCorrection(Math.round(base), flight, portal);
+    const portalBaseAfterIndigo = applyIndigoNonstopPortalCorrection(Math.round(base), flight, portal);
+    const portalBase = applyAirIndiaNonstopPortalCorrection(portalBaseAfterIndigo, flight, portal);
 
     // FlightAPI/search result price is already the booking-level price for the requested passenger count.
     // Do not multiply by passengers again for min-transaction eligibility, or high-minimum offers
