@@ -7082,6 +7082,21 @@ app.post("/search", async (req, res) => {
     meta.mongoCollection = MONGO_COL;
     meta.mongoDb = MONGODB_DB;
 
+    // Pagination (2026-07-24): page 1 = today's original top-40 behavior.
+    // page 2 requests the NEXT 40 (ranks 41-80) instead of silently
+    // dropping them - see FLIGHTAPI_CARRIER_PRICING_AUDIT_2026-07.md for
+    // why this matters (an entire carrier, e.g. Air India Express, could
+    // rank just past 40 on a busy multi-airport route and never be shown
+    // at all). Re-uses fetchOneWayTrip's existing 10-min FlightAPI cache,
+    // so a page-2 request for the same search doesn't re-hit FlightAPI -
+    // only the additional 40 flights get priced against offers.
+    const PAGE_SIZE = 40;
+    const page = Math.max(1, Math.floor(Number(body.page) || 1));
+    const pageStart = (page - 1) * PAGE_SIZE;
+    const pageEnd = pageStart + PAGE_SIZE;
+    meta.page = page;
+    meta.pageSize = PAGE_SIZE;
+
     if (!from || !to || !outDate) {
       return res.status(400).json({
         meta: { ...meta, error: "Missing from/to/departureDate" },
@@ -7232,11 +7247,13 @@ app.post("/search", async (req, res) => {
 
         const mapStart = Date.now();
         const flightsRaw = combinedFlightsRaw;
-        const flightsLimited = limitAndSortFlights(flightsRaw).slice(0, 40);
+        const flightsSorted = limitAndSortFlights(flightsRaw);
+        const flightsLimited = flightsSorted.slice(pageStart, pageEnd);
         timings[mapTimingKey] = Date.now() - mapStart;
 
         meta[rawFlightsKey] = flightsRaw.length;
         meta[returnedFlightsKey] = flightsLimited.length;
+        meta[isReturn ? "retHasMore" : "outHasMore"] = flightsSorted.length > pageEnd;
         meta[carrierRuleKey] = {
           flightApiItineraries: combinedItinerariesCount,
           keptWithCarrierPrice: flightsRaw.length,
