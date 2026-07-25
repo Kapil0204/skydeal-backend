@@ -794,6 +794,50 @@ function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal) {
   return portalBase + correctionInr;
 }
 
+// 2026-07-24: regional carriers (Star Air confirmed, Alliance Air/Fly91/
+// IndiaOne Air structurally similar but not yet evidenced) never expose a
+// carrier-direct price via FlightAPI at all - only third-party resellers
+// (Kiwi.com, Trip.com, Kissandfly, BudgetAir). The strict "no carrier
+// price = drop the flight" rule elsewhere in mapFlightsFromFlightAPI means
+// these carriers were invisible on SkyDeal entirely, even though real,
+// bookable flights and market prices exist for them.
+//
+// Live-audited Star Air specifically: 5 flights, 3 routes (BLR-NDC,
+// BLR-VDY, BLR-GBI), against real MMT prices. The CHEAPEST available
+// reseller price was closest to the real price on all 5 (not always the
+// same named source - Kiwi.com twice, Kissandfly once, Trip.com twice -
+// so the rule is "take the minimum," not "trust one specific reseller").
+// Gap ranged 9.6%-18.1% above the real price. Chose 8% below the minimum
+// reseller price as the estimate: checked against all 5 data points, a
+// flat 10% would have UNDERSHOT the real price on 2 of them (by ₹21 and
+// ₹51) - i.e. shown a price the user couldn't actually get, violating the
+// conservative-discount principle (DECISIONS.md). 8% stays safely above
+// the real price on all 5 tested flights (margins ₹31-326).
+//
+// This is explicitly a rough estimate from a small sample (5 flights, one
+// carrier), not a confirmed exact match like the flat/portal corrections
+// above - flagged via priceSource: "estimated_min_reseller" wherever it's
+// used, so it stays distinguishable from a verified carrier price. Revisit
+// with more data before extending to Alliance Air/Fly91/IndiaOne Air -
+// each needs its own evidence, this is NOT assumed to generalize.
+const NO_CARRIER_PRICE_ESTIMATE_DISCOUNT = {
+  "star air": 0.08
+};
+
+function estimateNoCarrierPriceFallback(airlineName, nonCarrierAmounts) {
+  const normalized = normalizeForMatch(airlineName);
+
+  for (const [alias, discount] of Object.entries(NO_CARRIER_PRICE_ESTIMATE_DISCOUNT)) {
+    if (!normalized.includes(alias)) continue;
+    if (!Array.isArray(nonCarrierAmounts) || nonCarrierAmounts.length === 0) return null;
+
+    const minAmount = Math.min(...nonCarrierAmounts);
+    return Math.round(minAmount * (1 - discount));
+  }
+
+  return null;
+}
+
 function getCarrierAliases(airlineName, carrier = {}) {
   const name = normalizeForMatch(airlineName);
   const code = normalizeForMatch(carrier?.code || carrier?.iata || carrier?.display_code || "");
@@ -1109,18 +1153,38 @@ function mapFlightsFromFlightAPI(raw) {
       .map(getPricingOptionAmount)
       .filter((n) => typeof n === "number" && Number.isFinite(n) && n > 0);
 
-    // Strict SkyDeal rule:
-    // If FlightAPI does not expose the carrier-airline price, do not use OTA/cheapest price.
-    if (carrierAmounts.length === 0) {
-      continue;
-    }
+    let carrierAmountRaw;
+    let carrierAmount;
+    let priceSource;
 
-    // Correct known carrier-specific gaps between FlightAPI's reported
-    // carrier-direct price and the real, live OTA price - see
-    // CARRIER_FARE_CORRECTIONS_INR above for the evidence. A no-op for
-    // every carrier not in that list (the overwhelming majority).
-    const carrierAmountRaw = Math.min(...carrierAmounts);
-    const carrierAmount = applyCarrierFareCorrection(carrierAmountRaw, airlineName);
+    if (carrierAmounts.length > 0) {
+      // Correct known carrier-specific gaps between FlightAPI's reported
+      // carrier-direct price and the real, live OTA price - see
+      // CARRIER_FARE_CORRECTIONS_INR above for the evidence. A no-op for
+      // every carrier not in that list (the overwhelming majority).
+      carrierAmountRaw = Math.min(...carrierAmounts);
+      carrierAmount = applyCarrierFareCorrection(carrierAmountRaw, airlineName);
+      priceSource = "carrier_airline";
+    } else {
+      // Strict SkyDeal rule: if FlightAPI does not expose the
+      // carrier-airline price, do not use OTA/cheapest price - EXCEPT for
+      // the specific regional carriers evidenced in
+      // NO_CARRIER_PRICE_ESTIMATE_DISCOUNT above, where no carrier price
+      // is ever available at all and the alternative is showing the
+      // flight not at all.
+      const nonCarrierAmounts = pricingOptions
+        .map(getPricingOptionAmount)
+        .filter((n) => typeof n === "number" && Number.isFinite(n) && n > 0);
+
+      const estimate = estimateNoCarrierPriceFallback(airlineName, nonCarrierAmounts);
+      if (estimate == null) {
+        continue;
+      }
+
+      carrierAmountRaw = estimate;
+      carrierAmount = estimate;
+      priceSource = "estimated_min_reseller";
+    }
 
     // allFlightNumbers and segmentAirlineNames are built together, one
     // entry PER SEGMENT (not deduped) so the two stay index-aligned -
@@ -1171,7 +1235,7 @@ function mapFlightsFromFlightAPI(raw) {
       stops,
       layovers,
       price: carrierAmount,
-      priceSource: "carrier_airline",
+      priceSource,
       carrierAgentIds,
       pricingOptionCount: pricingOptions.length,
       carrierPricingOptionCount: carrierPricingOptions.length,
