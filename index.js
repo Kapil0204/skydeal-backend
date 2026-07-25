@@ -794,34 +794,60 @@ function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal) {
   return portalBase + correctionInr;
 }
 
-// 2026-07-24: regional carriers (Star Air confirmed, Alliance Air/Fly91/
-// IndiaOne Air structurally similar but not yet evidenced) never expose a
-// carrier-direct price via FlightAPI at all - only third-party resellers
-// (Kiwi.com, Trip.com, Kissandfly, BudgetAir). The strict "no carrier
-// price = drop the flight" rule elsewhere in mapFlightsFromFlightAPI means
-// these carriers were invisible on SkyDeal entirely, even though real,
-// bookable flights and market prices exist for them.
+// 2026-07-24/25: regional carriers (Star Air and Alliance Air confirmed,
+// Fly91/IndiaOne Air likely a different problem - see
+// FLIGHTAPI_CARRIER_PRICING_AUDIT_2026-07.md) never expose a carrier-direct
+// price via FlightAPI at all - only third-party resellers (Kiwi.com,
+// Trip.com, Kissandfly, BudgetAir, eDreams). The strict "no carrier price =
+// drop the flight" rule elsewhere in mapFlightsFromFlightAPI means these
+// carriers were invisible on SkyDeal entirely, even though real, bookable
+// flights and market prices exist for them.
 //
-// Live-audited Star Air specifically: 5 flights, 3 routes (BLR-NDC,
-// BLR-VDY, BLR-GBI), against real MMT prices. The CHEAPEST available
-// reseller price was closest to the real price on all 5 (not always the
-// same named source - Kiwi.com twice, Kissandfly once, Trip.com twice -
-// so the rule is "take the minimum," not "trust one specific reseller").
-// Gap ranged 9.6%-18.1% above the real price. Chose 8% below the minimum
-// reseller price as the estimate: checked against all 5 data points, a
-// flat 10% would have UNDERSHOT the real price on 2 of them (by ₹21 and
-// ₹51) - i.e. shown a price the user couldn't actually get, violating the
-// conservative-discount principle (DECISIONS.md). 8% stays safely above
-// the real price on all 5 tested flights (margins ₹31-326).
+// IMPORTANT MATH NOTE: the "gap %" measured in each audit below is
+// (source - real) / real, i.e. how much the source overshoots the real
+// price. The discount applied here is (source - real) / source, i.e. how
+// much to cut OFF the source. These are NOT the same percentage for the
+// same flight (discount is always the smaller number) - e.g. a source
+// that's 16.2% above real only needs a 13.96% discount to reach it exactly
+// (5294 * (1 - 0.1396) = 4555), NOT 16.2% (which would overshoot PAST real
+// and undershoot the discount ceiling). Each carrier's chosen discount
+// below is calibrated off this break-even math on its OWN tightest/lowest-
+// gap flight, then given a couple more points of safety margin - never off
+// the raw average gap.
 //
-// This is explicitly a rough estimate from a small sample (5 flights, one
-// carrier), not a confirmed exact match like the flat/portal corrections
-// above - flagged via priceSource: "estimated_min_reseller" wherever it's
-// used, so it stays distinguishable from a verified carrier price. Revisit
-// with more data before extending to Alliance Air/Fly91/IndiaOne Air -
-// each needs its own evidence, this is NOT assumed to generalize.
+// Live-audited Star Air: 5 flights, 3 routes (BLR-NDC, BLR-VDY, BLR-GBI),
+// against real MMT prices. The CHEAPEST available reseller price was
+// closest to the real price on all 5 (not always the same named source -
+// Kiwi.com twice, Kissandfly once, Trip.com twice - so the rule is "take
+// the minimum," not "trust one specific reseller"). Gap ranged 9.6%-18.1%
+// above real; tightest flight's break-even discount was 8.76% (GBI:
+// 4086->3728). Chose 8%, safely below that ceiling - stays at/above the
+// real price on all 5 tested flights (margins Rs.31-326). A flat 10%
+// would have UNDERSHOT on 2 of the 5 (by Rs.21 and Rs.51).
+//
+// Live-audited Alliance Air: 5 flights (4 distinct - one repeated on a
+// second date, same price both times), 2 routes (BLR-HYD/HYD-BLR, DEL-JAI)
+// against real MMT prices. Same "take the minimum" rule holds - BudgetAir
+// won once, Trip.com won on the other 4. Explicitly re-checked live
+// whether Trip.com alone could be trusted as a simpler single-source rule
+// (it was closest on 4/5) - re-queried the one flight where it wasn't
+// (9I-517 BLR-HYD) and confirmed LIVE, with a fresh 17-minute-old quote,
+// that Trip.com was still genuinely ~2.75x the real price (Rs.11,295 vs
+// Rs.4,109) - not stale data, a real outlier. So "minimum of whatever
+// sources exist" stays the rule; a Trip.com-only shortcut would have
+// badly failed on this flight. Gap ranged 16.2%-26.8% above real; tightest
+// flight's break-even discount was 13.96% (HYD-BLR 9I-519: 5294->4555).
+// Chose 12%, safely below that ceiling.
+//
+// Both are explicitly rough estimates from small samples, not confirmed
+// exact matches like the flat/portal corrections above - flagged via
+// priceSource: "estimated_min_reseller" wherever used, so they stay
+// distinguishable from a verified carrier price. Revisit with more data
+// before extending to any other carrier - each needs its own evidence,
+// this is NOT assumed to generalize.
 const NO_CARRIER_PRICE_ESTIMATE_DISCOUNT = {
-  "star air": 0.08
+  "star air": 0.08,
+  "alliance air": 0.12
 };
 
 function estimateNoCarrierPriceFallback(airlineName, nonCarrierAmounts) {
