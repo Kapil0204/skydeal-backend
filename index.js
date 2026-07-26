@@ -27,12 +27,26 @@ app.use(express.json());
 // --------------------
 const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip", "Ixigo"];
 
+// Single source of truth for "/search's page size" and "how many pages
+// ever get fetched" - every other cap/margin that depends on "max flights
+// per leg" derives from these two instead of duplicating its own literal.
+// This is the fix for the exact bug class that bit us twice already
+// (2026-07): PAYMENT_RECOMMENDATION_CONFIG.maxFlightsPerLeg used to be a
+// hardcoded 40 that silently went stale the moment /search grew a second
+// page, and RECOMMENDATION_SCORE_WEIGHTS.easeUnit's safety margin then
+// went stale a second time when maxFlightsPerLeg was hand-bumped to 80
+// without updating it. Change SEARCH_RESULTS_PAGE_SIZE or
+// SEARCH_MAX_PAGES here and both now update themselves automatically.
+const SEARCH_RESULTS_PAGE_SIZE = 40;
+const SEARCH_MAX_PAGES = 2; // today: page 1 (initial) + page 2 (background prefetch) - see prefetchNextPage in script.js
+const SEARCH_MAX_FLIGHTS_PER_LEG = SEARCH_RESULTS_PAGE_SIZE * SEARCH_MAX_PAGES;
+
 // Phase 1 intelligent payment guide — tunables kept in one place.
 const PAYMENT_RECOMMENDATION_CONFIG = {
   minAbsoluteSavingInr: 150,
   minPercentSaving: 0.02,        // 2%
   maxSuggestions: 2,
-  maxFlightsPerLeg: 80,           // validation cap only — /search now paginates up to 2 pages of 40 per leg, and the frontend merges both into one request
+  maxFlightsPerLeg: SEARCH_MAX_FLIGHTS_PER_LEG, // validation cap only — derived from SEARCH_RESULTS_PAGE_SIZE/SEARCH_MAX_PAGES above, not a separate literal
   maxCandidatesPerRequest: 50,    // computation guard
   // EMI tenure candidates only exist for the (typically 1-3) already-
   // selected credit cards, unlike the 50-cap above which spans every
@@ -55,6 +69,16 @@ const PAYMENT_RECOMMENDATION_CONFIG = {
 // precedence order safely (no risk of a lower-precedence factor ever
 // flipping a higher-precedence comparison), while still yielding one
 // transparent, comparable score per suggestion. Never sent to the client.
+const REC_SCORE_FLIGHT_UNIT = 100;
+const REC_SCORE_BREADTH_UNIT = 1;
+// Max realistic combined flights+breadth contribution: every affected
+// flight on both legs (SEARCH_MAX_FLIGHTS_PER_LEG x 2) at flightUnit, plus
+// a maxed-out 100% breadth at breadthUnit. Derived, not hand-counted, so
+// it can never again go stale the way it did when maxFlightsPerLeg was
+// bumped without this margin being revisited.
+const REC_SCORE_MAX_FLIGHT_BREADTH_CONTRIBUTION =
+  (SEARCH_MAX_FLIGHTS_PER_LEG * 2) * REC_SCORE_FLIGHT_UNIT + 100 * REC_SCORE_BREADTH_UNIT;
+
 const RECOMMENDATION_SCORE_WEIGHTS = {
   // Relevance tier (1 = same bank ... higher = less relevant). One tier
   // step is worth far more than the maximum plausible combined value of
@@ -65,26 +89,21 @@ const RECOMMENDATION_SCORE_WEIGHTS = {
   // differences are nowhere close to that, so in every real-world case
   // saving only ever matters as a tiebreaker within the same tier.
   savingUnit: 1_000_000,
-  // One ease-of-adoption level (0-3, see easeOfAdoptionScore). One level
-  // of difference (20,000) exceeds the max *combined* flights+breadth
-  // contribution below (16,000 + 100 = 16,100 for a round-trip search at
-  // PAYMENT_RECOMMENDATION_CONFIG.maxFlightsPerLeg=80 per leg, i.e. up to
-  // 160 combined outbound+return), so ease only ever matters once saving
-  // is tied. Raised from 10,000/80-combined when maxFlightsPerLeg itself
-  // was raised from 40 to 80 (2026-07) - re-check this margin again if
-  // maxFlightsPerLeg ever changes, since it's a hardcoded assumption
-  // about that config value, not derived from it.
-  easeUnit: 20_000,
-  // One flight improved (outbound+return combined, capped ~160 by
-  // 2x the current per-leg flight limit). breadthPercent is *derived*
-  // from this same count (breadthPercent = affected/tested*100), so the
-  // two always move together rather than being independently
+  // One ease-of-adoption level (0-3, see easeOfAdoptionScore) must always
+  // exceed the max *combined* flights+breadth contribution above, so ease
+  // only ever matters once saving is tied. A flat 2x safety margin over
+  // the derived max, rather than a hand-picked number, so this stays
+  // correct automatically if SEARCH_MAX_FLIGHTS_PER_LEG ever changes again.
+  easeUnit: REC_SCORE_MAX_FLIGHT_BREADTH_CONTRIBUTION * 2,
+  // One flight improved (outbound+return combined). breadthPercent is
+  // *derived* from this same count (breadthPercent = affected/tested*100),
+  // so the two always move together rather than being independently
   // adversarial - one flight of difference is never actually offset by
   // breadth.
-  flightUnit: 100,
+  flightUnit: REC_SCORE_FLIGHT_UNIT,
   // 1 percentage point of flights-tested that improved (0-100) - the
   // final, lowest-precedence tiebreaker.
-  breadthUnit: 1
+  breadthUnit: REC_SCORE_BREADTH_UNIT
 };
 
 // Phase 3 — single application timezone. getBookingDayName() already
@@ -7213,7 +7232,7 @@ app.post("/search", async (req, res) => {
     // at all). Re-uses fetchOneWayTrip's existing 10-min FlightAPI cache,
     // so a page-2 request for the same search doesn't re-hit FlightAPI -
     // only the additional 40 flights get priced against offers.
-    const PAGE_SIZE = 40;
+    const PAGE_SIZE = SEARCH_RESULTS_PAGE_SIZE;
     const page = Math.max(1, Math.floor(Number(body.page) || 1));
     const pageStart = (page - 1) * PAGE_SIZE;
     const pageEnd = pageStart + PAGE_SIZE;
