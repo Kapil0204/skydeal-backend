@@ -4043,6 +4043,12 @@ function evaluateOfferForFlight({
   passengers,
   allOffers = [],
   requestCache = null,
+  // Phase 3: optional hypothetical booking date (Date object), mirrors
+  // applyOffersToFlight's own evaluationBookingDate - defaults to real
+  // "now" for every existing caller. Must also be part of the eligibility
+  // memo key below (see pricingCandidateKey upstream for the same
+  // "today result must never be served for a simulated day" hazard).
+  evaluationBookingDate = null,
 }) {
   if (!offer) return { ok: false, reasons: ["NO_OFFER"] };
   // --- Fare-independent eligibility gauntlet -------------------------------
@@ -4058,11 +4064,17 @@ function evaluateOfferForFlight({
       ? requestCache.frontEligibilityMemo
       : null;
 
+  // evaluationBookingDate is part of the memo key for the same reason
+  // pricingCandidateKey upstream includes it - a real "today" verdict must
+  // never be served for a simulated "tomorrow" evaluation sharing the same
+  // requestCache, and vice versa.
+  const __frontMemoKey = `${portal}|${evaluationBookingDate ? evaluationBookingDate.toISOString().slice(0, 10) : "now"}`;
+
   let __frontResult;
   if (__frontMemo) {
     const __perOffer = __frontMemo.get(offer);
-    if (__perOffer && __perOffer.has(portal)) {
-      __frontResult = __perOffer.get(portal);
+    if (__perOffer && __perOffer.has(__frontMemoKey)) {
+      __frontResult = __perOffer.get(__frontMemoKey);
     }
   }
 
@@ -4085,9 +4097,9 @@ function evaluateOfferForFlight({
       if (isHotelOnlyOffer(offer)) return { ok: false, reasons: ["HOTEL_ONLY"] };
       if (isFirstTimeOrNewUserOffer(offer)) return { ok: false, reasons: ["FIRST_TIME_OR_NEW_USER"] };
 
-      if (isOfferExpired(offer)) return { ok: false, reasons: ["EXPIRED"] };
+      if (isOfferExpired(offer, evaluationBookingDate || undefined)) return { ok: false, reasons: ["EXPIRED"] };
 
-      const bookingDayCheck = offerMatchesBookingDay(offer);
+      const bookingDayCheck = offerMatchesBookingDay(offer, evaluationBookingDate || undefined);
       if (!bookingDayCheck.ok) {
         return {
           ok: false,
@@ -4121,7 +4133,7 @@ function evaluateOfferForFlight({
         __perOffer = new Map();
         __frontMemo.set(offer, __perOffer);
       }
-      __perOffer.set(portal, __frontResult);
+      __perOffer.set(__frontMemoKey, __frontResult);
     }
   }
 
@@ -5081,6 +5093,7 @@ for (const offer of offersToEvaluate) {
     passengers,
     allOffers: offers,
     requestCache,
+    evaluationBookingDate,
   });
 
   if (pricingTiming) {
