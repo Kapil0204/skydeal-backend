@@ -32,7 +32,7 @@ const PAYMENT_RECOMMENDATION_CONFIG = {
   minAbsoluteSavingInr: 150,
   minPercentSaving: 0.02,        // 2%
   maxSuggestions: 2,
-  maxFlightsPerLeg: 40,           // validation cap only — matches /search's existing per-leg cap
+  maxFlightsPerLeg: 80,           // validation cap only — /search now paginates up to 2 pages of 40 per leg, and the frontend merges both into one request
   maxCandidatesPerRequest: 50,    // computation guard
   // EMI tenure candidates only exist for the (typically 1-3) already-
   // selected credit cards, unlike the 50-cap above which spans every
