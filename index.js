@@ -66,15 +66,21 @@ const RECOMMENDATION_SCORE_WEIGHTS = {
   // saving only ever matters as a tiebreaker within the same tier.
   savingUnit: 1_000_000,
   // One ease-of-adoption level (0-3, see easeOfAdoptionScore). One level
-  // of difference (10,000) exceeds the max *combined* flights+breadth
-  // contribution below (8,000 + 100 = 8,100 at the current per-leg cap),
-  // so ease only ever matters once saving is tied.
-  easeUnit: 10_000,
-  // One flight improved (outbound+return combined, capped ~80 by the
-  // existing per-leg flight limit). breadthPercent is *derived* from
-  // this same count (breadthPercent = affected/tested*100), so the two
-  // always move together rather than being independently adversarial -
-  // one flight of difference is never actually offset by breadth.
+  // of difference (20,000) exceeds the max *combined* flights+breadth
+  // contribution below (16,000 + 100 = 16,100 for a round-trip search at
+  // PAYMENT_RECOMMENDATION_CONFIG.maxFlightsPerLeg=80 per leg, i.e. up to
+  // 160 combined outbound+return), so ease only ever matters once saving
+  // is tied. Raised from 10,000/80-combined when maxFlightsPerLeg itself
+  // was raised from 40 to 80 (2026-07) - re-check this margin again if
+  // maxFlightsPerLeg ever changes, since it's a hardcoded assumption
+  // about that config value, not derived from it.
+  easeUnit: 20_000,
+  // One flight improved (outbound+return combined, capped ~160 by
+  // 2x the current per-leg flight limit). breadthPercent is *derived*
+  // from this same count (breadthPercent = affected/tested*100), so the
+  // two always move together rather than being independently
+  // adversarial - one flight of difference is never actually offset by
+  // breadth.
   flightUnit: 100,
   // 1 percentage point of flights-tested that improved (0-100) - the
   // final, lowest-precedence tiebreaker.
@@ -4655,7 +4661,7 @@ const isValidButNotApplied =
   !infoEvalReasons.includes("HOTEL_ONLY") &&
   !infoEvalReasons.includes("PORTAL_MISMATCH") &&
   !infoEvalReasons.includes("SCOPE_MISMATCH") &&
-  !isOfferExpired(offer) &&
+  !isOfferExpired(offer, evaluationBookingDate || undefined) &&
   isFlightOffer(offer);
 
 const canBeShownAsMatchedInfo =
@@ -5148,7 +5154,7 @@ const nonAppliedStart = Date.now();
 const nonAppliedButRelevantOffers = offers
   .filter((offer) => {
     if (!isFlightOffer(offer)) return false;
-    if (isOfferExpired(offer)) return false;
+    if (isOfferExpired(offer, evaluationBookingDate || undefined)) return false;
     if (!offerAppliesToPortal(offer, portal)) return false;
     if (isJunkInfoOffer(offer)) return false;
 
