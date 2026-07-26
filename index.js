@@ -8044,18 +8044,20 @@ function scanMethodDateEligibility(relevantOffers, todayDateOnly, horizonDays, t
 
 // Turns a day-eligibility scan into (at most) one Phase 3 classification
 // for this method. isSelected methods are checked for "stops being
-// eligible soon" (they're presumably contributing to today's applied
-// price already); not-yet-selected methods are checked for "becomes
-// eligible soon" (mirrors, and is ranked below, Phase 1/2's normal
-// same-day suggestions - if it were eligible today, Phase 1/2 would
-// already be showing it).
+// eligible soon" when eligible today; not-yet-selected methods are
+// checked for "becomes eligible soon" (mirrors, and is ranked below,
+// Phase 1/2's normal same-day suggestions - if it were eligible today,
+// Phase 1/2 would already be showing it). A selected method that is
+// NOT eligible today (e.g. a booking-day-restricted offer like a
+// Monday-only coupon, checked on a Sunday) falls through to that same
+// "becomes eligible soon" scan below - it's already the user's own
+// payment method, so this is the one case where surfacing it matters
+// most, and the forward scan is identical either way.
 function classifyMethodTiming(dayScan, isSelected, endingSoonDays) {
   if (!dayScan.length) return null;
   const todayEligible = dayScan[0].eligible;
 
-  if (isSelected) {
-    if (!todayEligible) return null;
-
+  if (isSelected && todayEligible) {
     let endDayIndex = null;
     for (let i = 1; i < dayScan.length; i++) {
       if (!dayScan[i].eligible) { endDayIndex = i; break; }
@@ -8067,7 +8069,7 @@ function classifyMethodTiming(dayScan, isSelected, endingSoonDays) {
     return { type: "EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE", endDayIndex };
   }
 
-  if (todayEligible) return null; // already surfaced as a normal Phase 1/2 suggestion if it clears the saving bar
+  if (!isSelected && todayEligible) return null; // already surfaced as a normal Phase 1/2 suggestion if it clears the saving bar
 
   for (let i = 1; i < dayScan.length; i++) {
     if (dayScan[i].eligible) {
