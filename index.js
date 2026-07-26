@@ -8115,13 +8115,21 @@ const URGENT_TIMING_TYPES = new Set([
 const URGENT_TIMING_RANK = { AVAILABLE_TODAY_ENDS_TODAY: 0, EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE: 1, AVAILABLE_TODAY_ENDS_SOON: 2 };
 const FUTURE_TIMING_RANK = { AVAILABLE_TOMORROW: 0, AVAILABLE_UPCOMING_DAY: 1 };
 
+// Plain-language copy only - no jargon like "payment-adjusted price" or
+// "eligible travel date". Users read these as a quick reason + a rupee
+// number, not a precise technical description of what the pricing engine
+// did. Kept in one place so every timing-insight scenario stays equally
+// simple, not just whichever one prompted the last fix.
 function buildTimingInsightCopy({ method, classification, potentialSaving, currentBestPrice, hypotheticalBestPrice, todayDateOnly, evalDay }) {
   const shortLabel = paymentMethodShortLabel(method);
+  const methodType = String(method?.type || "");
+  const isEmiMethod = methodType.toUpperCase() === "EMI";
+  const canHaveEmiAlternative = methodType === "Credit Card" || methodType === "Debit Card";
 
   if (classification.type === "AVAILABLE_TODAY_ENDS_TODAY") {
     return {
       heading: `Use your ${shortLabel} offer today`,
-      message: `This offer could reduce your current final price by ₹${potentialSaving}, but it will not be available tomorrow.`,
+      message: `It's saving you ₹${potentialSaving} right now, but won't work tomorrow.`,
       label: "Ends today",
       disclaimer: null,
       estimatedFinalPrice: currentBestPrice
@@ -8132,30 +8140,28 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
     const lastUsableDay = addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1);
     return {
       heading: `Book by ${formatTimingDate(lastUsableDay, "long")} to use this offer`,
-      message: `Your selected ${shortLabel} payment method's offer expires before your flight, but the travel date is eligible.`,
+      message: `You could save about ₹${potentialSaving} with your ${shortLabel}, but only if you book before then.`,
       label: `Book by ${formatTimingDate(lastUsableDay, "short")}`,
       disclaimer: null,
       estimatedFinalPrice: currentBestPrice
     };
   }
 
-  if (classification.type === "AVAILABLE_TOMORROW") {
+  if (classification.type === "AVAILABLE_TOMORROW" || classification.type === "AVAILABLE_UPCOMING_DAY") {
+    const when = classification.type === "AVAILABLE_TOMORROW" ? "tomorrow" : formatTimingDate(evalDay, "weekday");
+    const heading = isEmiMethod
+      ? `An EMI offer becomes available ${when}`
+      : canHaveEmiAlternative
+        ? `Don't want EMI? A non-EMI ${shortLabel} offer unlocks ${when}`
+        : `Your ${shortLabel} offer becomes available ${when}`;
+    const message = canHaveEmiAlternative && !isEmiMethod
+      ? `You could save about ₹${potentialSaving} without EMI.`
+      : `You could save about ₹${potentialSaving} by paying with ${shortLabel}.`;
     return {
-      heading: `Your ${shortLabel} offer becomes available tomorrow`,
-      message: `It could reduce the payment-adjusted price by ₹${potentialSaving} if the flight fare remains unchanged.`,
-      label: "Available tomorrow",
-      disclaimer: "Flight fares may change before then.",
-      estimatedFinalPrice: hypotheticalBestPrice
-    };
-  }
-
-  if (classification.type === "AVAILABLE_UPCOMING_DAY") {
-    const weekday = formatTimingDate(evalDay, "weekday");
-    return {
-      heading: `Your ${shortLabel} offer is available on ${weekday}`,
-      message: `It could reduce the payment-adjusted price by ₹${potentialSaving} if the flight fare remains unchanged.`,
-      label: `Available ${weekday}`,
-      disclaimer: "Flight fares may change before then.",
+      heading,
+      message,
+      label: `Available ${when}`,
+      disclaimer: "Prices may change before then.",
       estimatedFinalPrice: hypotheticalBestPrice
     };
   }
