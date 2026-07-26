@@ -4457,13 +4457,19 @@ function shouldShowAsReferenceInfoOffer({
   cabin,
   isDomestic,
   appliedCouponCode,
+  // Phase 3: same evaluationBookingDate override as evaluateOfferForFlight -
+  // without this, the "use this card to unlock" hint bubbles would keep
+  // reflecting today's day-of-week eligibility during a simulated "what if
+  // a different day" reprice, even after the actual price calculation was
+  // fixed to respect it.
+  evaluationBookingDate = null,
 }) {
   if (!offer) return false;
   if (!isFlightOffer(offer)) return false;
   if (isHotelOnlyOffer(offer)) return false;
-  if (isOfferExpired(offer)) return false;
+  if (isOfferExpired(offer, evaluationBookingDate || undefined)) return false;
 
-  const bookingDayCheck = offerMatchesBookingDay(offer);
+  const bookingDayCheck = offerMatchesBookingDay(offer, evaluationBookingDate || undefined);
   if (!bookingDayCheck.ok) return false;
 
   if (!offerAppliesToPortal(offer, portal)) return false;
@@ -4525,7 +4531,8 @@ function buildInfoOffersForPortal(
   cabin,
   isDomestic,
   appliedCouponCode,
-  limit = 5
+  limit = 5,
+  evaluationBookingDate = null
 ) {
    
  const sel = Array.isArray(selectedPaymentMethods) ? selectedPaymentMethods : [];
@@ -4538,9 +4545,9 @@ function buildInfoOffersForPortal(
 if (isJunkInfoOffer(offer)) continue;
        if (!isFlightOffer(offer)) continue;
 if (isHotelOnlyOffer(offer)) continue;
-if (isOfferExpired(offer)) continue;
+if (isOfferExpired(offer, evaluationBookingDate || undefined)) continue;
 
-const bookingDayCheck = offerMatchesBookingDay(offer);
+const bookingDayCheck = offerMatchesBookingDay(offer, evaluationBookingDate || undefined);
 if (!bookingDayCheck.ok) continue;
 
 if (!offerAppliesToPortal(offer, portal)) continue;
@@ -4623,6 +4630,7 @@ if (offerRequiresDifferentBank(offer, selectedPaymentMethods)) continue;
   tripType: "one-way",
   passengers: 1,
   allOffers: offers,
+  evaluationBookingDate,
 });
 
 const showReferenceInfo = shouldShowAsReferenceInfoOffer({
@@ -4632,6 +4640,7 @@ const showReferenceInfo = shouldShowAsReferenceInfoOffer({
   cabin,
   isDomestic,
   appliedCouponCode,
+  evaluationBookingDate,
 });
 
 // NEW LOGIC — allow valid offers even if not applied
@@ -5282,7 +5291,11 @@ return {
     payment: selectedPaymentMethods,
     cabin,
     isDomestic,
-    excludedInfoCode
+    excludedInfoCode,
+    // Same reasoning as pricingCandidateKey/__frontMemoKey - a real-"today"
+    // info-offers list must never be served for a simulated day and vice
+    // versa, even sharing one requestCache within a request.
+    evaluationBookingDate: evaluationBookingDate ? evaluationBookingDate.toISOString().slice(0, 10) : null
   });
 
   const infoCache = requestCache?.infoOffersByKey;
@@ -5301,7 +5314,8 @@ return {
       cabin,
       isDomestic,
       excludedInfoCode,
-      5
+      5,
+      evaluationBookingDate
     );
 
     if (infoCache) {
