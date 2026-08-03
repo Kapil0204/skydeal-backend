@@ -7645,7 +7645,17 @@ app.post("/search", async (req, res) => {
 // flight data. No FlightAPI calls happen in this section.
 // =========================================================
 
-async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, ctx) {
+// pricingTiming (2026-08-03): optional, same object /search already
+// passes to this same underlying applyOffersToFlight call - previously
+// always passed null here, so /payment-suggestions' repriceLoopMs was
+// one opaque number with no visibility into whether the static filter,
+// the eligibility gauntlet, or the per-offer evaluate step was the real
+// cost. Purely additive counters/Date.now() diffs on a plain object,
+// identical to what /search's own hot path already runs unconditionally
+// on the same function - verified negligible there (840ms across 1,520
+// evaluateOfferCalls), so enabling it here carries the same negligible
+// cost, not a new one.
+async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, ctx, pricingTiming = null) {
   const results = [];
   for (const f of flights) {
     const enriched = await applyOffersToFlight(
@@ -7656,7 +7666,7 @@ async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, 
       ctx.cabin,
       ctx.tripType,
       ctx.isDomestic,
-      null,
+      pricingTiming,
       ctx.requestCache,
       ctx.genericDisplayContext,
       // Phase 3: only set when ctx carries a hypothetical booking-date
@@ -8536,8 +8546,13 @@ async function computePaymentSuggestionsCore(v, cfg) {
 
       const __candidateStart = Date.now();
       const hypothetical = [...v.selectedPaymentMethods, candidate];
+      // TEMPORARY (2026-08-03): diagnosing why this loop is ~4x slower per
+      // flight than /search's own pricing pass - see the pricingTiming
+      // comment on repriceFlightsForPaymentMethods above. Remove once the
+      // real bottleneck is identified and fixed.
+      const __candidatePricingTiming = {};
 
-      const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
+      const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx, __candidatePricingTiming);
       const newOutboundBest = Math.min(
         ...outboundRepriced.map((r, i) => finalPriceFromRepriced(r, v.outboundFlights[i]))
       );
@@ -8549,7 +8564,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
       let affectedReturnFlights = 0;
 
       if (v.tripType === "round-trip" && v.returnFlights.length > 0) {
-        const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx);
+        const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx, __candidatePricingTiming);
         newReturnBest = Math.min(
           ...returnRepriced.map((r, i) => finalPriceFromRepriced(r, v.returnFlights[i]))
         );
@@ -8561,7 +8576,11 @@ async function computePaymentSuggestionsCore(v, cfg) {
       const newBestPrice = newOutboundBest + newReturnBest;
       const additionalSaving = Math.round(currentBestPrice - newBestPrice);
 
-      perCandidateMs.push({ candidate: `${candidate.type}|${candidate.name}|${candidate.tenureMonths ?? ""}`, ms: Date.now() - __candidateStart });
+      perCandidateMs.push({
+        candidate: `${candidate.type}|${candidate.name}|${candidate.tenureMonths ?? ""}`,
+        ms: Date.now() - __candidateStart,
+        breakdown: __candidatePricingTiming
+      });
 
       const isValid =
         additionalSaving >= cfg.minAbsoluteSavingInr ||
