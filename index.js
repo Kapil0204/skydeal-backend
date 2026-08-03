@@ -7394,7 +7394,47 @@ app.post("/search", async (req, res) => {
             f.departureAirportCode = pair.from;
             f.arrivalAirportCode = pair.to;
           });
-          combinedFlightsRaw = combinedFlightsRaw.concat(pairFlights);
+
+          // Domestic-route sanity filter (2026-08-03, founder report): a
+          // domestic (India-to-India) search should never surface an
+          // itinerary that connects through a foreign city - FlightAPI's
+          // underlying data can include these (a carrier selling a
+          // same-day connection via its own overseas hub, for example),
+          // but no domestic traveler expects or wants a layover abroad on
+          // a purely domestic trip. Non-stop flights have no layovers and
+          // are unaffected. A layover whose airport we can't resolve to a
+          // known Indian code is treated as foreign (excluded) rather
+          // than assumed domestic - if we can't confirm it's safe, don't
+          // show it, matching "never show that" rather than "show it
+          // unless we can prove it's foreign." Filtered here (not inside
+          // mapFlightsFromFlightAPI) since "domestic" is a property of
+          // THIS pair's own query (pair.from/pair.to), not of the raw
+          // itinerary data itself - metro-group expansion never mixes
+          // domestic and foreign airports, so pair.from/pair.to always
+          // agrees with the route the user actually searched.
+          const pairIsDomestic = isIndianAirportIata(pair.from) && isIndianAirportIata(pair.to);
+          const domesticSafeFlights = pairIsDomestic
+            ? pairFlights.filter((f) => (f.layovers || []).every((l) => isIndianAirportIata(l.airportCode)))
+            : pairFlights;
+
+          // TEMPORARY (2026-08-03): verifying this filter against real
+          // FlightAPI data before treating it as done - remove once
+          // confirmed.
+          if (pairIsDomestic && domesticSafeFlights.length < pairFlights.length) {
+            meta.__domesticLayoverFilterDebug = meta.__domesticLayoverFilterDebug || [];
+            for (const f of pairFlights) {
+              if (!domesticSafeFlights.includes(f)) {
+                meta.__domesticLayoverFilterDebug.push({
+                  pair: `${pair.from}-${pair.to}`,
+                  airline: f.airlineName,
+                  stops: f.stops,
+                  layovers: (f.layovers || []).map((l) => l.airportCode)
+                });
+              }
+            }
+          }
+
+          combinedFlightsRaw = combinedFlightsRaw.concat(domesticSafeFlights);
         });
 
         if (combinedFlightsRaw.length === 0 && pairResults.every((s) => s.status !== "fulfilled")) {
