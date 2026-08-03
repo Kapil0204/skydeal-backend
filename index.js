@@ -7525,6 +7525,38 @@ app.post("/search", async (req, res) => {
         : "Return FlightAPI search failed, but outbound results are available";
     }
 
+    // "Server-side head start" (2026-08-03): sairro decode's own
+    // /payment-suggestions call always fires right after the frontend
+    // renders these results, for this exact route/selection/flight list -
+    // so start that computation now, server-side, instead of waiting for
+    // the client round-trip. Fire-and-forget: never awaited, never allowed
+    // to affect or delay this response (a failure here is silently
+    // swallowed - the frontend's own follow-up call still works exactly
+    // as before, it just won't find a head start waiting for it). Uses the
+    // full (unslimmed) flight objects already sitting in memory - the
+    // same ones bestFinalPriceOf/buildSuggestionsCacheKey read via
+    // /payment-suggestions today, just without the client having to send
+    // them back over the wire first.
+    if (outboundFlights.length > 0) {
+      getOrComputePaymentSuggestions(
+        {
+          from,
+          to,
+          travelClass: cabin,
+          tripType,
+          passengers: adults,
+          selectedPaymentMethods,
+          outboundFlights,
+          returnFlights,
+          outboundTravelDate: outDate,
+          returnTravelDate: retDate
+        },
+        PAYMENT_RECOMMENDATION_CONFIG
+      ).catch((err) => {
+        console.error("[SkyDeal] payment-suggestions head start failed", err);
+      });
+    }
+
     return res.json({
       meta,
       outboundFlights: outboundFlights.map(slimFlightForSearchResponse),
@@ -8352,78 +8384,60 @@ async function buildTimingInsights({
   ];
 }
 
-app.post("/payment-suggestions", async (req, res) => {
-  const cfg = PAYMENT_RECOMMENDATION_CONFIG;
-  const v = validatePaymentRepriceRequest(req.body, cfg);
+// Everything /payment-suggestions actually computes, minus request
+// validation and the cache/dedup lookup around it - factored out so
+// /search can also call it (see getOrComputePaymentSuggestions and the
+// "server-side head start" call site inside app.post("/search", ...)),
+// 2026-08-03. Takes the same validated `v` shape either caller produces.
+async function computePaymentSuggestionsCore(v, cfg) {
+  const startedAt = Date.now();
+  const selectedPaymentMethodCount = v.selectedPaymentMethods.length;
 
-  if (!v.ok) {
-    return res.status(400).json({ error: v.errors.join("; ") });
+  if (v.outboundFlights.length === 0) {
+    return {
+      currentBestPrice: 0,
+      suggestions: [],
+      summary: { selectedPaymentMethodCount, matchedOfferCount: 0, isOptimised: true },
+      timingInsights: [],
+      meta: { truncated: false }
+    };
   }
 
-  const startedAt = Date.now();
+  const bestOf = (flights) => Math.min(...flights.map(bestFinalPriceOf));
+  const baselineOutboundBest = bestOf(v.outboundFlights);
+  const baselineReturnBest = (v.tripType === "round-trip" && v.returnFlights.length > 0) ? bestOf(v.returnFlights) : 0;
+  const currentBestPrice = baselineOutboundBest + baselineReturnBest;
 
-  try {
-    const selectedPaymentMethodCount = v.selectedPaymentMethods.length;
+  // How many of the currently-loaded flights already have an offer
+  // applied under the current selection - a concrete, honest reading of
+  // "offers matched", not a claim about the full live offer catalog.
+  const baselineFlights = [...v.outboundFlights, ...v.returnFlights];
+  const matchedOfferCount = baselineFlights.filter((f) => f?.bestDeal?.applied === true).length;
 
-    if (v.outboundFlights.length === 0) {
-      return res.json({
-        currentBestPrice: 0,
-        suggestions: [],
-        summary: { selectedPaymentMethodCount, matchedOfferCount: 0, isOptimised: true },
-        timingInsights: [],
-        meta: { truncated: false }
-      });
-    }
+  // Temporary timing instrumentation (2026-07-15) to diagnose the ~10s
+  // first-load latency reported for Price intelligence - mirrors
+  // /search's own `timings` object. Cheap (a handful of Date.now()
+  // calls), safe to leave in the response long-term like /search does.
+  const timings = {};
+  let tMark = Date.now();
+  const mark = (label) => {
+    const now = Date.now();
+    timings[label] = now - tMark;
+    tMark = now;
+  };
 
-    const bestOf = (flights) => Math.min(...flights.map(bestFinalPriceOf));
-    const baselineOutboundBest = bestOf(v.outboundFlights);
-    const baselineReturnBest = (v.tripType === "round-trip" && v.returnFlights.length > 0) ? bestOf(v.returnFlights) : 0;
-    const currentBestPrice = baselineOutboundBest + baselineReturnBest;
+  const offers = await getOffersForSearch({});
+  mark("offersLoadMs");
 
-    // How many of the currently-loaded flights already have an offer
-    // applied under the current selection - a concrete, honest reading of
-    // "offers matched", not a claim about the full live offer catalog.
-    const baselineFlights = [...v.outboundFlights, ...v.returnFlights];
-    const matchedOfferCount = baselineFlights.filter((f) => f?.bestDeal?.applied === true).length;
-
-    // Temporary timing instrumentation (2026-07-15) to diagnose the ~10s
-    // first-load latency reported for Price intelligence - mirrors
-    // /search's own `timings` object. Cheap (a handful of Date.now()
-    // calls), safe to leave in the response long-term like /search does.
-    const timings = {};
-    let tMark = Date.now();
-    const mark = (label) => {
-      const now = Date.now();
-      timings[label] = now - tMark;
-      tMark = now;
-    };
-
-    const offers = await getOffersForSearch({});
-    mark("offersLoadMs");
-
-    // Phase 2 cache: identical (route/selection/flights) state within the
-    // TTL, and no live offer refresh since, skips candidate generation
-    // and the entire reprice loop entirely.
-    const cacheKey = buildSuggestionsCacheKey(v);
-    const cached = paymentSuggestionsCache.get(cacheKey);
-    const nowTs = Date.now();
-    if (
-      cached &&
-      (nowTs - cached.cachedAt) < cfg.suggestionsCacheTtlMs &&
-      cached.offersCacheLoadedAtSnapshot === offersCacheLoadedAt
-    ) {
-      return res.json(cached.result);
-    }
-
-    const genericDisplayContext = await getGenericDisplayContextForSearch({});
-    mark("genericDisplayContextMs");
-    const isDomestic = isDomesticRoute(v.from, v.to);
-    const requestCache = {
-      infoOffersByKey: new Map(),
-      pricingCandidatesByKey: new Map(),
-      frontEligibilityMemo: new Map(),
-      perfEligibilityMemo: true
-    };
+  const genericDisplayContext = await getGenericDisplayContextForSearch({});
+  mark("genericDisplayContextMs");
+  const isDomestic = isDomesticRoute(v.from, v.to);
+  const requestCache = {
+    infoOffersByKey: new Map(),
+    pricingCandidatesByKey: new Map(),
+    frontEligibilityMemo: new Map(),
+    perfEligibilityMemo: true
+  };
     const ctx = {
       offers,
       genericDisplayContext,
@@ -8599,22 +8613,74 @@ app.post("/payment-suggestions", async (req, res) => {
     timings.flightsTested = flightsTested;
     timings.perCandidateMs = perCandidateMs;
 
-    const responseBody = {
-      currentBestPrice,
-      suggestions,
-      summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
-      timingInsights,
-      meta: { truncated, timings }
-    };
+  return {
+    currentBestPrice,
+    suggestions,
+    summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
+    timingInsights,
+    meta: { truncated, timings }
+  };
+}
 
-    paymentSuggestionsCache.set(cacheKey, {
-      result: responseBody,
-      cachedAt: Date.now(),
-      offersCacheLoadedAtSnapshot: offersCacheLoadedAt
+// Phase 2 cache (unchanged semantics from before the 2026-08-03 refactor):
+// identical (route/selection/flights) state within the TTL, and no live
+// offer refresh since, skips candidate generation and the entire reprice
+// loop entirely.
+//
+// paymentSuggestionsInFlight is new: a request for a key that's already
+// being computed - most commonly /search's own fire-and-forget warm-up
+// (see the "server-side head start" call site in app.post("/search",
+// ...)) still running when the frontend's real /payment-suggestions call
+// lands moments later - awaits that SAME promise instead of starting a
+// second, fully redundant pass. Populated synchronously before the first
+// await inside, so a near-simultaneous second caller always finds it.
+const paymentSuggestionsInFlight = new Map();
+
+async function getOrComputePaymentSuggestions(v, cfg) {
+  const cacheKey = buildSuggestionsCacheKey(v);
+
+  const cached = paymentSuggestionsCache.get(cacheKey);
+  const nowTs = Date.now();
+  if (
+    cached &&
+    (nowTs - cached.cachedAt) < cfg.suggestionsCacheTtlMs &&
+    cached.offersCacheLoadedAtSnapshot === offersCacheLoadedAt
+  ) {
+    return cached.result;
+  }
+
+  const inFlight = paymentSuggestionsInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const promise = computePaymentSuggestionsCore(v, cfg)
+    .then((result) => {
+      paymentSuggestionsCache.set(cacheKey, {
+        result,
+        cachedAt: Date.now(),
+        offersCacheLoadedAtSnapshot: offersCacheLoadedAt
+      });
+      // Simple unbounded-growth guard - not a real LRU, just a safety net.
+      if (paymentSuggestionsCache.size > 200) paymentSuggestionsCache.clear();
+      return result;
+    })
+    .finally(() => {
+      paymentSuggestionsInFlight.delete(cacheKey);
     });
-    // Simple unbounded-growth guard - not a real LRU, just a safety net.
-    if (paymentSuggestionsCache.size > 200) paymentSuggestionsCache.clear();
 
+  paymentSuggestionsInFlight.set(cacheKey, promise);
+  return promise;
+}
+
+app.post("/payment-suggestions", async (req, res) => {
+  const cfg = PAYMENT_RECOMMENDATION_CONFIG;
+  const v = validatePaymentRepriceRequest(req.body, cfg);
+
+  if (!v.ok) {
+    return res.status(400).json({ error: v.errors.join("; ") });
+  }
+
+  try {
+    const responseBody = await getOrComputePaymentSuggestions(v, cfg);
     return res.json(responseBody);
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Payment suggestions failed" });
