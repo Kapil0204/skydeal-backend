@@ -7566,34 +7566,36 @@ app.post("/search", async (req, res) => {
     // same ones bestFinalPriceOf/buildSuggestionsCacheKey read via
     // /payment-suggestions today, just without the client having to send
     // them back over the wire first.
-    // TEMPORARY (2026-08-03): diagnosing why paymentSuggestionsInFlight
-    // doesn't seem populated by the time a page-2 prefetch checks it -
-    // remove once resolved.
-    meta.__headStartDebug = { attempted: false, inFlightSizeAfter: null, error: null };
-    if (outboundFlights.length > 0) {
-      meta.__headStartDebug.attempted = true;
-      try {
-        getOrComputePaymentSuggestions(
-          {
-            from,
-            to,
-            travelClass: cabin,
-            tripType,
-            passengers: adults,
-            selectedPaymentMethods,
-            outboundFlights,
-            returnFlights,
-            outboundTravelDate: outDate,
-            returnTravelDate: retDate
-          },
-          PAYMENT_RECOMMENDATION_CONFIG
-        ).catch((err) => {
-          console.error("[SkyDeal] payment-suggestions head start failed", err);
-        });
-      } catch (syncErr) {
-        meta.__headStartDebug.error = syncErr?.message || String(syncErr);
-      }
-      meta.__headStartDebug.inFlightSizeAfter = paymentSuggestionsInFlight.size;
+    //
+    // page === 1 only (2026-08-03 fix): the page-2 prefetch is itself a
+    // /search call and was hitting this same branch, firing a SECOND,
+    // entirely wasted head start for its own partial (ranks 41-80) flight
+    // subset - nothing ever queries suggestions for that subset, since
+    // fetchPaymentSuggestions() only ever sends the page-1 flights the
+    // frontend actually rendered. That wasted computation was itself
+    // competing for the same single CPU core as the real page-1 head
+    // start, on top of the page-2/decode contention this whole change was
+    // meant to fix in the first place - confirmed live via a temporary
+    // debug field (removed here) showing page-2's own request reaching
+    // this branch with attempted:true.
+    if (page === 1 && outboundFlights.length > 0) {
+      getOrComputePaymentSuggestions(
+        {
+          from,
+          to,
+          travelClass: cabin,
+          tripType,
+          passengers: adults,
+          selectedPaymentMethods,
+          outboundFlights,
+          returnFlights,
+          outboundTravelDate: outDate,
+          returnTravelDate: retDate
+        },
+        PAYMENT_RECOMMENDATION_CONFIG
+      ).catch((err) => {
+        console.error("[SkyDeal] payment-suggestions head start failed", err);
+      });
     }
 
     return res.json({
