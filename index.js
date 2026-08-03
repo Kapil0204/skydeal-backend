@@ -224,7 +224,17 @@ const INDIAN_IATA_AIRPORTS = new Set([
   "MYQ","NAG","PAT","PNQ","RJA","RPR","SAG","SLV","SXR","STV","SXV","TRV","TRZ","UDR","VGA",
   "VNS","VTZ","PNY","AGX","DIB","IMF","SHL","AIP","NDC","TIR","RDP","JRH","TEZ","TCR","TCR",
   "COH","DHM","KUU","LEH","SBI","TCR","UDR","BEP","HJR","JLG","AJL","IXK","ISK","JAI","NMI",
-  "DXN","HDO","GOX"
+  "DXN","HDO","GOX",
+  // Added 2026-08-03 (found live while investigating a domestic-route
+  // foreign-layover bug report): both are real, operating Indian
+  // airports missing from this list - HSR (Rajkot/Hirasar, Gujarat,
+  // opened 2023) and DBR (Darbhanga, Bihar, commercial ops since 2020).
+  // This list is manually maintained and will keep needing occasional
+  // additions as new airports open; see resolveAirportCountryCode below
+  // for a self-updating alternative used specifically for the new
+  // foreign-layover filter, so THAT check doesn't depend on this list
+  // staying perfectly current.
+  "HSR","DBR"
 ]);
 
 function isIndianAirportIata(iata) {
@@ -1113,6 +1123,29 @@ function getFlightApiCarrierDebug(raw) {
 // SkyDeal base fare must come from the flight carrier/airline source only.
 // We do NOT use OTA/cheapest marketplace pricing as base fare.
 // --------------------
+// FlightAPI's own places array is a walkable hierarchy - Airport ->
+// (parent_id) -> City -> (parent_id) -> Country, each entry typed
+// ("Airport"/"City"/"Country") with the Country entry's alt_id being a
+// real ISO country code (e.g. "IN", "SA", "BH") - verified live
+// (2026-08-03) against a raw response. Used instead of a hardcoded
+// per-airport allowlist for the domestic foreign-layover filter below,
+// since that kind of list inevitably misses newly-opened airports (see
+// the HSR/DBR note on INDIAN_IATA_AIRPORTS above, found via this exact
+// investigation) - this resolves from the API's own authoritative data
+// instead, so it can never go stale the same way.
+function resolveAirportCountryCode(place, placeById) {
+  let current = place;
+  const seen = new Set();
+  while (current && current.parent_id != null && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parent = placeById[current.parent_id];
+    if (!parent) break;
+    if (parent.type === "Country") return parent.alt_id || null;
+    current = parent;
+  }
+  return null;
+}
+
 // A leg's stop_ids/segment_ids let us tell the user WHERE a connection is
 // and how long the layover is (FlightAPI has no terminal-change data
 // anywhere in its schema, so we only surface what we can actually verify -
@@ -1150,6 +1183,7 @@ function getLegLayovers(leg, segmentById, placeById) {
       airportName: place?.name || null,
       cityName,
       durationMinutes,
+      countryCode: place ? resolveAirportCountryCode(place, placeById) : null,
     });
   }
 
@@ -7414,7 +7448,7 @@ app.post("/search", async (req, res) => {
           // agrees with the route the user actually searched.
           const pairIsDomestic = isIndianAirportIata(pair.from) && isIndianAirportIata(pair.to);
           const domesticSafeFlights = pairIsDomestic
-            ? pairFlights.filter((f) => (f.layovers || []).every((l) => isIndianAirportIata(l.airportCode)))
+            ? pairFlights.filter((f) => (f.layovers || []).every((l) => l.countryCode === "IN"))
             : pairFlights;
 
           // TEMPORARY (2026-08-03): verifying this filter against real
@@ -7428,7 +7462,7 @@ app.post("/search", async (req, res) => {
                   pair: `${pair.from}-${pair.to}`,
                   airline: f.airlineName,
                   stops: f.stops,
-                  layovers: (f.layovers || []).map((l) => l.airportCode)
+                  layovers: (f.layovers || []).map((l) => `${l.airportCode}(${l.countryCode})`)
                 });
               }
             }
