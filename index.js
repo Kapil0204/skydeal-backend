@@ -7267,11 +7267,7 @@ app.post("/search", async (req, res) => {
     // this file but already fully initialized by the time any real
     // request reaches this handler (plain module-level const, same as
     // every other shared cache this file already uses this way).
-    // TEMPORARY (2026-08-03): diagnosing why this branch doesn't seem to
-    // engage in practice - remove once resolved.
-    meta.__deferDebug = { page, inFlightSizeSeen: paymentSuggestionsInFlight.size, engaged: false };
     if (page > 1 && paymentSuggestionsInFlight.size > 0) {
-      meta.__deferDebug.engaged = true;
       const deferStart = Date.now();
       await Promise.race([
         Promise.allSettled(Array.from(paymentSuggestionsInFlight.values())),
