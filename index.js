@@ -2911,6 +2911,141 @@ if (/\bCENTRAL BANK\b|\bCENTRAL BANK OF INDIA\b/.test(s)) return "CENTRAL_BANK_O
   return normalizeBankCanonicalAlias(cleaned) || cleaned || null;
 }
 
+// Single source of truth for card-family/product-name canonicalization,
+// shared by the SELECTION side (normalizeSelectedPM, reading the user's own
+// cardFamily/cardVariant pick) and the OFFER side
+// (extractOfferCardFamilyRestrictions, text-mining an offer's own
+// title/rawDiscount/terms/structured eligiblePaymentMethods). These two used
+// to be independently hand-maintained lists and had already drifted - e.g.
+// "Select" (IDFC First's card tier) existed only on the selection side, so
+// an IDFC First Select-exclusive offer could never be recognized as
+// family-restricted and would incorrectly apply to any IDFC First card
+// (extractOfferCardFamilyRestrictions had no rule for it at all).
+//
+// Each rule's `terms` are ALL required (AND, any order, anywhere in the
+// blob) rather than one literal phrase - this is what fixes the
+// AMAZON_PAY_ICICI matching bug: real scraped offer titles read "ICICI
+// Bank Amazon Pay Credit Card...", not "Amazon Pay ICICI" in that order, so
+// a rule requiring that exact contiguous phrase silently failed on real
+// data (verified 2026-08-04 against a live offer title). Requiring "amazon
+// pay" and "icici" as independent terms - or just "amazon pay" alone,
+// since it's an ICICI-exclusive product in India - matches regardless of
+// word order.
+//
+// Tier names that are common English words shared across many banks' base
+// products (Platinum, Gold, Signature, Select, Wealth, Premier) are scoped
+// to also require their own bank's name in the blob, so e.g. IDFC First's
+// "Select" tier doesn't accidentally match unrelated boilerplate text, or
+// a different bank's own "Select"/"Premier" tier.
+const CARD_FAMILY_RULES = [
+  { code: "FLIPKART_AXIS", terms: [/\bflipkart\b/, /\baxis\b/] },
+  { code: "AXIS_ATLAS", terms: [/\baxis\b/, /\batlas\b/] },
+  { code: "AXIS_ACE", terms: [/\baxis\b/, /\bace\b/] },
+  { code: "AXIS_NEO", terms: [/\baxis\b/, /\bneo\b/] },
+  { code: "AXIS_REWARDS", terms: [/\baxis\b/, /\brewards\b/] },
+  { code: "AXIS_VISTARA", terms: [/\baxis\b/, /\bvistara\b/] },
+  { code: "AXIS_MAGNUS", terms: [/\baxis\b/, /\bmagnus\b/] },
+  { code: "AXIS_RESERVE", terms: [/\baxis\b/, /\breserve\b/] },
+  { code: "AXIS_SELECT", terms: [/\baxis\b/, /\bselect\b/] },
+  { code: "AXIS_MYZONE", terms: [/\baxis\b/, /\bmyzone\b/] },
+  { code: "AMAZON_PAY_ICICI", terms: [/\bamazon\s*pay\b/] },
+  { code: "MMT_ICICI", terms: [/\b(mmt|makemytrip)\b/, /\bicici\b/] },
+  { code: "TATA_NEU", terms: [/\btata\s*neu\b/] },
+  { code: "SWIGGY_HDFC", terms: [/\bswiggy\b/, /\bhdfc\b/] },
+  { code: "DINERS", terms: [/\bdiners\b/] },
+  { code: "INFINIA", terms: [/\binfinia\b/] },
+  { code: "REGALIA_GOLD", terms: [/\bregalia\b/, /\bgold\b/] },
+  { code: "REGALIA", terms: [/\bregalia\b/] },
+  { code: "MILLENNIA", terms: [/\bmillennia\b/] },
+  { code: "HDFC_MONEYBACK_PLUS", terms: [/\bhdfc\b/, /\bmoneyback\b/] },
+  { code: "HDFC_FREEDOM", terms: [/\bhdfc\b/, /\bfreedom\b/] },
+  { code: "MARRIOTT_HDFC", terms: [/\bmarriott\b/] },
+  { code: "INDIANOIL_HDFC", terms: [/\bindianoil\b/, /\bhdfc\b/] },
+  { code: "INDIGO_HDFC", terms: [/\b6e\s*rewards\b/] },
+  { code: "SBI_CASHBACK", terms: [/\bsbi\b/, /\bcashback\b/] },
+  { code: "SIMPLYCLICK", terms: [/\bsimplyclick\b/] },
+  { code: "SIMPLYSAVE", terms: [/\bsimplysave\b/] },
+  { code: "SBI_AURUM", terms: [/\bsbi\b/, /\baurum\b/] },
+  { code: "SBI_IRCTC", terms: [/\birctc\b/, /\bsbi\b/] },
+  { code: "SBI_BPCL", terms: [/\bbpcl\b/, /\bsbi\b/] },
+  { code: "CORAL", terms: [/\bcoral\b/] },
+  { code: "RUBYX", terms: [/\brubyx\b/] },
+  { code: "SAPPHIRO", terms: [/\bsapphiro\b/] },
+  { code: "EMERALDE", terms: [/\bemeralde\b/] },
+  { code: "HSBC_TRAVELONE", terms: [/\btravelone\b/] },
+  { code: "HSBC_CASHBACK", terms: [/\bhsbc\b/, /\bcashback\b/] },
+  { code: "HSBC_PREMIER", terms: [/\bhsbc\b/, /\bpremier\b/] },
+  { code: "MYNTRA_KOTAK", terms: [/\bmyntra\b/, /\bkotak\b/] },
+  { code: "KOTAK_WHITE", terms: [/\bkotak\b/, /\bwhite\b/] },
+  { code: "KOTAK_LEAGUE", terms: [/\bkotak\b/, /\bleague\b/] },
+  { code: "KOTAK_ZEN", terms: [/\bkotak\b/, /\bzen\b/] },
+  { code: "KOTAK_811", terms: [/\bkotak\b/, /\b811\b/] },
+  { code: "KOTAK_ROYALE", terms: [/\bkotak\b/, /\broyale\b/] },
+  { code: "AMEX_MEMBERSHIP_REWARDS", terms: [/\bmembership\s*rewards\b/] },
+  { code: "AMEX_SMARTEARN", terms: [/\bsmartearn\b/] },
+  { code: "AMEX_PLATINUM_TRAVEL", terms: [/\bplatinum\s*travel\b/] },
+  { code: "AMEX_PLATINUM_RESERVE", terms: [/\bplatinum\s*reserve\b/] },
+  { code: "INDUSIND_LEGEND", terms: [/\bindusind\b/, /\blegend\b/] },
+  { code: "INDUSIND_TIGER", terms: [/\bindusind\b/, /\btiger\b/] },
+  { code: "INDUSIND_PINNACLE", terms: [/\bindusind\b/, /\bpinnacle\b/] },
+  { code: "INDUSIND_AVIOS", terms: [/\bindusind\b/, /\bavios\b/] },
+  { code: "INDUSIND_EAZYDINER", terms: [/\bindusind\b/, /\beazydiner\b/] },
+  { code: "IDFC_SELECT", terms: [/\bidfc\b/, /\bselect\b/] },
+  { code: "IDFC_WEALTH", terms: [/\bidfc\b/, /\bwealth\b/] },
+  { code: "IDFC_MILLENNIA", terms: [/\bidfc\b/, /\bmillennia\b/] },
+  { code: "IDFC_MAYURA", terms: [/\bidfc\b/, /\bmayura\b/] },
+  { code: "AU_ALTURA", terms: [/\baltura\b/] },
+  { code: "AU_ZENITH", terms: [/\bzenith\b/] },
+  { code: "AU_VETTA", terms: [/\bvetta\b/] },
+  { code: "YES_PROSPERITY", terms: [/\bprosperity\b/] },
+  { code: "YES_MARQUEE", terms: [/\byes\s*bank\b/, /\bmarquee\b/] },
+  { code: "YES_FIRST_PREFERRED", terms: [/\byes\s*bank\b/, /\bfirst\s*preferred\b/] },
+  { code: "YES_PRIVATE", terms: [/\byes\s*bank\b/, /\bprivate\b/] },
+  { code: "SCAPIA_FEDERAL", terms: [/\bscapia\b/] },
+  { code: "FEDERAL_IMPERIO", terms: [/\bfederal\b/, /\bimperio\b/] },
+  { code: "FEDERAL_CELESTA", terms: [/\bfederal\b/, /\bcelesta\b/] },
+  { code: "BOB_ETERNA", terms: [/\b(bank\s*of\s*baroda|bobcard|bob)\b/, /\beterna\b/] },
+  { code: "BOB_PREMIER", terms: [/\b(bank\s*of\s*baroda|bobcard|bob)\b/, /\bpremier\b/] },
+  { code: "BOB_SELECT", terms: [/\b(bank\s*of\s*baroda|bobcard|bob)\b/, /\bselect\b/] },
+  { code: "ONECARD", terms: [/\bonecard\b/] },
+  { code: "PNB_LUXURA", terms: [/\bluxura\b/] },
+  { code: "SC_EASEMYTRIP", terms: [/\beasemytrip\b/, /\b(standard\s*chartered|stanchart|scb)\b/] },
+  { code: "BUSINESS_PLATINUM", terms: [/\bbusiness\s*platinum\b/] },
+  { code: "PLATINUM", terms: [/\bplatinum\b/] },
+  { code: "SIGNATURE", terms: [/\bsignature\b/] },
+  { code: "GOLD", terms: [/\bgold\b/] },
+];
+
+// Selection side: a user's own card can only be one family at a time, so
+// return the first matching rule. Order matters - specific/unique product
+// names are listed above the generic shared-tier fallbacks (Platinum,
+// Signature, Gold) so those never shadow a more specific match.
+function canonicalizeCardFamily(text) {
+  // Hyphens get silently dropped (not spaced) by normalizeText's punctuation
+  // strip, which would merge a hyphenated name like "MMT-ICICI" into one
+  // unmatchable token "mmticici" - replace with a space first so each half
+  // stays a separate word for the \b-bounded terms below.
+  const blob = normalizeText(String(text || "").replace(/-/g, " "));
+  if (!blob) return null;
+  for (const rule of CARD_FAMILY_RULES) {
+    if (rule.terms.every((re) => re.test(blob))) return rule.code;
+  }
+  return null;
+}
+
+// Offer side: an offer's eligibility text could in principle mention more
+// than one family (rare in practice), so collect every match rather than
+// stopping at the first.
+function canonicalizeAllCardFamilies(text) {
+  const blob = normalizeText(String(text || "").replace(/-/g, " "));
+  if (!blob) return [];
+  const codes = [];
+  for (const rule of CARD_FAMILY_RULES) {
+    if (rule.terms.every((re) => re.test(blob))) codes.push(rule.code);
+  }
+  return codes;
+}
+
 function normalizeSelectedPM(pm) {
   const typeRaw = String(pm?.type || "").trim();
   const nameRaw = String(pm?.name || pm?.bank || "").trim();
@@ -2953,33 +3088,11 @@ function normalizeSelectedPM(pm) {
     null;
 
     const cardFamilyRaw = String(pm?.cardFamily || pm?.cardVariant || "").trim();
-  const cardFamilyCanonical =
-    /flipkart\s*axis/i.test(cardFamilyRaw) ? "FLIPKART_AXIS" :
-    /axis\s*atlas/i.test(cardFamilyRaw) ? "AXIS_ATLAS" :
-    /axis\s*ace/i.test(cardFamilyRaw) ? "AXIS_ACE" :
-    /axis\s*neo/i.test(cardFamilyRaw) ? "AXIS_NEO" :
-    /axis\s*rewards/i.test(cardFamilyRaw) ? "AXIS_REWARDS" :
-    /axis\s*vistara/i.test(cardFamilyRaw) ? "AXIS_VISTARA" :
-    /amazon\s*pay\s*icici/i.test(cardFamilyRaw) ? "AMAZON_PAY_ICICI" :
-    /tata\s*neu/i.test(cardFamilyRaw) ? "TATA_NEU" :
-    /swiggy\s*hdfc/i.test(cardFamilyRaw) ? "SWIGGY_HDFC" :
-    /diners/i.test(cardFamilyRaw) ? "DINERS" :
-    /infinia/i.test(cardFamilyRaw) ? "INFINIA" :
-    /regalia/i.test(cardFamilyRaw) ? "REGALIA" :
-    /millennia/i.test(cardFamilyRaw) ? "MILLENNIA" :
-    /sbi\s*cashback/i.test(cardFamilyRaw) ? "SBI_CASHBACK" :
-    /business\s*platinum/i.test(cardFamilyRaw) ? "BUSINESS_PLATINUM" :
-    /platinum/i.test(cardFamilyRaw) ? "PLATINUM" :
-    /select/i.test(cardFamilyRaw) ? "SELECT" :
-    /signature/i.test(cardFamilyRaw) ? "SIGNATURE" :
-    /gold/i.test(cardFamilyRaw) ? "GOLD" :
-    /simplyclick/i.test(cardFamilyRaw) ? "SIMPLYCLICK" :
-    /simplysave/i.test(cardFamilyRaw) ? "SIMPLYSAVE" :
-    /coral/i.test(cardFamilyRaw) ? "CORAL" :
-    /rubyx/i.test(cardFamilyRaw) ? "RUBYX" :
-    /sapphiro/i.test(cardFamilyRaw) ? "SAPPHIRO" :
-    /emeralde/i.test(cardFamilyRaw) ? "EMERALDE" :
-    null;
+  // Include the selected bank name (nameRaw) in the blob so bank-scoped
+  // generic-tier rules (e.g. IDFC_SELECT, HSBC_PREMIER) can match even
+  // though the picker's own cardFamily string is just "Select"/"Premier"
+  // without repeating the bank name.
+  const cardFamilyCanonical = canonicalizeCardFamily(`${nameRaw} ${cardFamilyRaw}`);
   const isCorporate =
     pm?.isCorporate === true ? true :
     pm?.isCorporate === false ? false :
@@ -3103,47 +3216,19 @@ function extractOfferProviderRestrictions(offer, pm = null) {
 }
 
 function extractOfferCardFamilyRestrictions(offer, pm = null) {
-  const blob = normalizeText(
-    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
-  );
+  // pm?.bank/pm?.cardVariant are the scraper's own structured fields when
+  // present (cleaner and more reliable than mining title/rawDiscount text) -
+  // folding them into the blob lets bank-scoped generic-tier rules (e.g.
+  // IDFC_SELECT) match even when the offer's freeform text never states
+  // the bank name right next to the tier word.
+  //
+  // Note: a bare "select cards" phrase (e.g. "Applicable to select AU Small
+  // Finance Bank credit cards") means "eligible cards", not IDFC's "Select"
+  // product - IDFC_SELECT's rule requires "idfc" in the same blob, so this
+  // kind of unrelated-bank boilerplate can't false-positive it.
+  const blob = `${pm?.bank || ""} ${pm?.cardVariant || ""} ${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`;
 
-  const allowed = new Set();
-
-  if (/\bflipkart\s*axis\b/.test(blob)) allowed.add("FLIPKART_AXIS");
-  if (/\baxis\s*atlas\b/.test(blob)) allowed.add("AXIS_ATLAS");
-  if (/\baxis\s*ace\b/.test(blob)) allowed.add("AXIS_ACE");
-  if (/\baxis\s*neo\b/.test(blob)) allowed.add("AXIS_NEO");
-  if (/\baxis\s*rewards\b/.test(blob)) allowed.add("AXIS_REWARDS");
-  if (/\baxis\s*vistara\b/.test(blob)) allowed.add("AXIS_VISTARA");
-
-  if (/\bamazon\s*pay\s*icici\b/.test(blob)) allowed.add("AMAZON_PAY_ICICI");
-  if (/\btata\s*neu\b/.test(blob)) allowed.add("TATA_NEU");
-  if (/\bswiggy\s*hdfc\b/.test(blob)) allowed.add("SWIGGY_HDFC");
-
-  if (/\bdiners\b/.test(blob)) allowed.add("DINERS");
-  if (/\binfinia\b/.test(blob)) allowed.add("INFINIA");
-  if (/\bregalia\b/.test(blob)) allowed.add("REGALIA");
-  if (/\bmillennia\b/.test(blob)) allowed.add("MILLENNIA");
-
-  if (/\bsbi\s*cashback\b/.test(blob)) allowed.add("SBI_CASHBACK");
-
-  if (/\bbusiness\s*platinum\b/.test(blob)) allowed.add("BUSINESS_PLATINUM");
-  if (/\bplatinum\b/.test(blob)) allowed.add("PLATINUM");
-  // Do not treat generic "select cards" wording as a hard card-family restriction.
-  // Example: "Applicable to select AU Small Finance Bank credit cards" means eligible cards,
-  // not a product family named SELECT.
-  if (/\bsignature\b/.test(blob)) allowed.add("SIGNATURE");
-  if (/\bgold\b/.test(blob)) allowed.add("GOLD");
-
-  if (/\bsimplyclick\b/.test(blob)) allowed.add("SIMPLYCLICK");
-  if (/\bsimplysave\b/.test(blob)) allowed.add("SIMPLYSAVE");
-
-  if (/\bcoral\b/.test(blob)) allowed.add("CORAL");
-  if (/\brubyx\b/.test(blob)) allowed.add("RUBYX");
-  if (/\bsapphiro\b/.test(blob)) allowed.add("SAPPHIRO");
-  if (/\bemeralde\b/.test(blob)) allowed.add("EMERALDE");
-
-  return Array.from(allowed);
+  return canonicalizeAllCardFamilies(blob);
 }
 
 function extractOfferCorporateRestriction(offer, pm = null) {
