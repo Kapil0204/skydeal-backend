@@ -7566,24 +7566,34 @@ app.post("/search", async (req, res) => {
     // same ones bestFinalPriceOf/buildSuggestionsCacheKey read via
     // /payment-suggestions today, just without the client having to send
     // them back over the wire first.
+    // TEMPORARY (2026-08-03): diagnosing why paymentSuggestionsInFlight
+    // doesn't seem populated by the time a page-2 prefetch checks it -
+    // remove once resolved.
+    meta.__headStartDebug = { attempted: false, inFlightSizeAfter: null, error: null };
     if (outboundFlights.length > 0) {
-      getOrComputePaymentSuggestions(
-        {
-          from,
-          to,
-          travelClass: cabin,
-          tripType,
-          passengers: adults,
-          selectedPaymentMethods,
-          outboundFlights,
-          returnFlights,
-          outboundTravelDate: outDate,
-          returnTravelDate: retDate
-        },
-        PAYMENT_RECOMMENDATION_CONFIG
-      ).catch((err) => {
-        console.error("[SkyDeal] payment-suggestions head start failed", err);
-      });
+      meta.__headStartDebug.attempted = true;
+      try {
+        getOrComputePaymentSuggestions(
+          {
+            from,
+            to,
+            travelClass: cabin,
+            tripType,
+            passengers: adults,
+            selectedPaymentMethods,
+            outboundFlights,
+            returnFlights,
+            outboundTravelDate: outDate,
+            returnTravelDate: retDate
+          },
+          PAYMENT_RECOMMENDATION_CONFIG
+        ).catch((err) => {
+          console.error("[SkyDeal] payment-suggestions head start failed", err);
+        });
+      } catch (syncErr) {
+        meta.__headStartDebug.error = syncErr?.message || String(syncErr);
+      }
+      meta.__headStartDebug.inFlightSizeAfter = paymentSuggestionsInFlight.size;
     }
 
     return res.json({
