@@ -201,6 +201,19 @@ let genericDisplayContextCacheLoadedAt = 0;
 
 const FLIGHTAPI_CACHE_TTL_MS = Number(process.env.FLIGHTAPI_CACHE_TTL_MS || 600000);
 const flightApiSuccessCache = new Map();
+
+// Page-2 prefetch is speculative (only useful if the user clicks "next
+// page") and CPU-bound in the exact same way the payment-suggestions
+// head start is - on Render's single dedicated core, both fully-loaded
+// requests can't actually run at once, they queue behind each other.
+// Measured live (2026-08-03): decode's own computation stayed ~3.3-3.4s
+// across 3 samples, but the client-perceived wait was consistently
+// ~8.8-8.9s whenever a page-2 prefetch's request window overlapped it -
+// almost exactly decode's missing ~5s. Since decode is what the user is
+// actively looking at and prefetch only matters later (if at all), page-2
+// requests wait for any currently in-flight suggestion work to clear
+// first, capped so a stuck/slow computation can't wedge prefetch forever.
+const PAGE2_PREFETCH_DEFER_CAP_MS = Number(process.env.PAGE2_PREFETCH_DEFER_CAP_MS || 6000);
 // --------------------
 // Route geography helpers
 // --------------------
@@ -7245,6 +7258,22 @@ app.post("/search", async (req, res) => {
         outboundFlights: [],
         returnFlights: [],
       });
+    }
+
+    // See PAGE2_PREFETCH_DEFER_CAP_MS above - give any in-flight sairro
+    // decode computation priority over this speculative page-2 prefetch,
+    // since both are CPU-bound and Render's single core can't run them
+    // at once. paymentSuggestionsInFlight is declared further down in
+    // this file but already fully initialized by the time any real
+    // request reaches this handler (plain module-level const, same as
+    // every other shared cache this file already uses this way).
+    if (page > 1 && paymentSuggestionsInFlight.size > 0) {
+      const deferStart = Date.now();
+      await Promise.race([
+        Promise.allSettled(Array.from(paymentSuggestionsInFlight.values())),
+        new Promise((resolve) => setTimeout(resolve, PAGE2_PREFETCH_DEFER_CAP_MS))
+      ]);
+      timings.page2DeferredForDecodeMs = Date.now() - deferStart;
     }
 
     const mongoStart = Date.now();
