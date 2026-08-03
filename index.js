@@ -7451,23 +7451,6 @@ app.post("/search", async (req, res) => {
             ? pairFlights.filter((f) => (f.layovers || []).every((l) => l.countryCode === "IN"))
             : pairFlights;
 
-          // TEMPORARY (2026-08-03): verifying this filter against real
-          // FlightAPI data before treating it as done - remove once
-          // confirmed.
-          if (pairIsDomestic && domesticSafeFlights.length < pairFlights.length) {
-            meta.__domesticLayoverFilterDebug = meta.__domesticLayoverFilterDebug || [];
-            for (const f of pairFlights) {
-              if (!domesticSafeFlights.includes(f)) {
-                meta.__domesticLayoverFilterDebug.push({
-                  pair: `${pair.from}-${pair.to}`,
-                  airline: f.airlineName,
-                  stops: f.stops,
-                  layovers: (f.layovers || []).map((l) => `${l.airportCode}(${l.countryCode})`)
-                });
-              }
-            }
-          }
-
           combinedFlightsRaw = combinedFlightsRaw.concat(domesticSafeFlights);
         });
 
