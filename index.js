@@ -7582,6 +7582,29 @@ app.post("/search", async (req, res) => {
     // meant to fix in the first place - confirmed live via a temporary
     // debug field (removed here) showing page-2's own request reaching
     // this branch with attempted:true.
+    // Root cause of the head start never actually being found by the
+    // client's real /payment-suggestions call (found live, 2026-08-03):
+    // this object must produce the EXACT SAME cache key
+    // (buildSuggestionsCacheKey) as validatePaymentRepriceRequest builds
+    // from the client's own request, or the dedup can never match and
+    // every real call silently computes fresh anyway. Two mismatches:
+    // (1) outDate/retDate come from toISO(), which returns "" (not null)
+    // for a missing date - for a one-way search retDate is "", but the
+    // client sends returnTravelDate: lastSearchPayload.returnDate || null
+    // (i.e. null for one-way), and validatePaymentRepriceRequest's own
+    // regex normalization also collapses anything non-YYYY-MM-DD to null
+    // - so this object had "" where the real request had null, a
+    // genuinely different JSON.stringify key, for every single one-way
+    // search. (2) selectedPaymentMethods here was /search's own
+    // EMI-tenure-defaulted version (adds tenureMonths:3/defaultedTenure
+    // for a tenure-less EMI selection) - validatePaymentRepriceRequest
+    // does no such enrichment on the client's raw payload, so an EMI
+    // selection with no explicit tenure would also mismatch. Both are
+    // fixed here by deriving this object the same way
+    // validatePaymentRepriceRequest does, not by reusing /search's own
+    // already-normalized locals.
+    const dateOrNull = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || "")) ? d : null);
+
     if (page === 1 && outboundFlights.length > 0) {
       getOrComputePaymentSuggestions(
         {
@@ -7590,11 +7613,11 @@ app.post("/search", async (req, res) => {
           travelClass: cabin,
           tripType,
           passengers: adults,
-          selectedPaymentMethods,
+          selectedPaymentMethods: selectedPaymentMethodsRaw,
           outboundFlights,
           returnFlights,
-          outboundTravelDate: outDate,
-          returnTravelDate: retDate
+          outboundTravelDate: dateOrNull(outDate),
+          returnTravelDate: dateOrNull(retDate)
         },
         PAYMENT_RECOMMENDATION_CONFIG
       ).catch((err) => {
