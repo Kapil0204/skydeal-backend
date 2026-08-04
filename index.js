@@ -7781,19 +7781,29 @@ app.post("/search", async (req, res) => {
       selectedPaymentMethods.length > 0 &&
       outboundFlights.length > 0
     ) {
-      let cheapestPrice = Infinity;
-      let cheapestPortal = null;
+      // Per-portal cheapest, not one global cheapest - offers are commonly
+      // restricted to a single portal (e.g. a Yatra-only EMI offer), so
+      // checking every offer against whichever portal happened to have the
+      // single lowest fare overall would evaluate most offers against a
+      // portal they don't even apply to, failing on a portal mismatch
+      // before ever reaching the min-transaction check (found live
+      // 2026-08-04: a real Yatra HDFC offer, min-txn-only per
+      // /debug/why-not-applied in isolation, never surfaced here because
+      // the overall-cheapest fare that day was on Goibibo).
+      const cheapestPricePerPortal = {};
       for (const f of outboundFlights) {
         for (const p of (f.portalPrices || [])) {
           const price = Number(p.basePrice);
-          if (Number.isFinite(price) && price > 0 && price < cheapestPrice) {
-            cheapestPrice = price;
-            cheapestPortal = p.portal;
+          if (Number.isFinite(price) && price > 0) {
+            if (!cheapestPricePerPortal[p.portal] || price < cheapestPricePerPortal[p.portal]) {
+              cheapestPricePerPortal[p.portal] = price;
+            }
           }
         }
       }
+      const portalEntries = Object.entries(cheapestPricePerPortal);
 
-      if (Number.isFinite(cheapestPrice) && cheapestPrice > 0 && cheapestPortal) {
+      if (portalEntries.length > 0) {
         const isDomestic = isDomesticRoute(from, to);
         const ROUND_TRIP_HINT_MARGIN = 1.15; // require 2x to clear the threshold with room, not just barely
 
@@ -7801,43 +7811,50 @@ app.post("/search", async (req, res) => {
         for (const offer of offers) {
           if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
 
-          const ev = evaluateOfferForFlight({
-            offer,
-            portal: cheapestPortal,
-            baseAmount: cheapestPrice,
-            eligibilityAmount: cheapestPrice,
-            selectedPaymentMethods,
-            isDomestic,
-            cabin,
-            flightAirlineName: null,
-            tripType,
-            passengers: adults,
-            allOffers: offers,
-            requestCache: offerPricingRequestCache,
-            evaluationBookingDate: null,
-          });
+          for (const [portal, cheapestPrice] of portalEntries) {
+            const ev = evaluateOfferForFlight({
+              offer,
+              portal,
+              baseAmount: cheapestPrice,
+              eligibilityAmount: cheapestPrice,
+              selectedPaymentMethods,
+              isDomestic,
+              cabin,
+              flightAirlineName: null,
+              tripType,
+              passengers: adults,
+              allOffers: offers,
+              requestCache: offerPricingRequestCache,
+              evaluationBookingDate: null,
+            });
 
-          const isMinTxnOnlyRejection =
-            !ev.ok &&
-            Array.isArray(ev.reasons) &&
-            ev.reasons.length === 1 &&
-            (ev.reasons[0] === "MIN_TXN_NOT_MET" || ev.reasons[0] === "MIN_TXN_NOT_MET_PER_PAX") &&
-            Number.isFinite(ev.minTxn) &&
-            ev.minTxn > 0;
+            const isMinTxnOnlyRejection =
+              !ev.ok &&
+              Array.isArray(ev.reasons) &&
+              ev.reasons.length === 1 &&
+              (ev.reasons[0] === "MIN_TXN_NOT_MET" || ev.reasons[0] === "MIN_TXN_NOT_MET_PER_PAX") &&
+              Number.isFinite(ev.minTxn) &&
+              ev.minTxn > 0;
 
-          if (isMinTxnOnlyRejection && cheapestPrice * 2 >= ev.minTxn * ROUND_TRIP_HINT_MARGIN) {
-            const discountValue = extractBestNumericDiscountValue(offer);
-            if (!bestCandidate || discountValue > bestCandidate.discountValue) {
-              const rawBank =
-                offer?.eligiblePaymentMethods?.[0]?.bank ||
-                offer?.paymentMethods?.[0]?.bank ||
-                null;
-              bestCandidate = {
-                discountValue,
-                minTxn: ev.minTxn,
-                bank: rawBank ? (normalizeBankDisplayName(rawBank) || rawBank) : null,
-                rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
-              };
+            if (isMinTxnOnlyRejection && cheapestPrice * 2 >= ev.minTxn * ROUND_TRIP_HINT_MARGIN) {
+              const discountValue = extractBestNumericDiscountValue(offer);
+              if (!bestCandidate || discountValue > bestCandidate.discountValue) {
+                const rawBank =
+                  offer?.eligiblePaymentMethods?.[0]?.bank ||
+                  offer?.paymentMethods?.[0]?.bank ||
+                  null;
+                bestCandidate = {
+                  discountValue,
+                  minTxn: ev.minTxn,
+                  bank: rawBank ? (normalizeBankDisplayName(rawBank) || rawBank) : null,
+                  rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
+                  portal,
+                  cheapestPrice,
+                };
+              }
+              // Found a qualifying portal for this offer - no need to check
+              // its other portals too, move on to the next offer.
+              break;
             }
           }
         }
@@ -7847,8 +7864,8 @@ app.post("/search", async (req, res) => {
             bank: bestCandidate.bank,
             rawDiscount: bestCandidate.rawDiscount,
             minTransactionValue: bestCandidate.minTxn,
-            cheapestOneWayPrice: cheapestPrice,
-            portal: cheapestPortal,
+            cheapestOneWayPrice: bestCandidate.cheapestPrice,
+            portal: bestCandidate.portal,
           };
         }
       }
