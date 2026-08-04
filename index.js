@@ -8520,7 +8520,6 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
   const shortLabel = paymentMethodShortLabel(method);
   const methodType = String(method?.type || "");
   const isEmiMethod = methodType.toUpperCase() === "EMI";
-  const canHaveEmiAlternative = methodType === "Credit Card" || methodType === "Debit Card";
 
   if (classification.type === "AVAILABLE_TODAY_ENDS_TODAY") {
     return {
@@ -8545,14 +8544,24 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
 
   if (classification.type === "AVAILABLE_TOMORROW" || classification.type === "AVAILABLE_UPCOMING_DAY") {
     const when = classification.type === "AVAILABLE_TOMORROW" ? "tomorrow" : formatTimingDate(evalDay, "weekday");
+    // Previously had a "Don't want EMI? A non-EMI X offer unlocks..." framing
+    // for any Credit Card/Debit Card method, on the assumption that the
+    // method's TYPE could in general have an EMI variant somewhere in the
+    // catalog. That premise doesn't hold for this specific insight though -
+    // relevantOffersForMethod (above) filters strictly by
+    // offerMatchesSelectedPayment(offer, [method]), which only matches
+    // offers whose typeNorm equals this method's own type. A Credit Card
+    // selection can therefore never be driven by an EMI-typed offer here -
+    // there's no EMI in the picture to "not want". Founder-caught
+    // (2026-08-04): a user with a plain (non-EMI) ICICI credit card
+    // selected, with no EMI offer active today, saw "Don't want EMI? A
+    // non-EMI ICICI Bank offer unlocks Monday" - a real, honest "this
+    // becomes available Monday" insight wrapped in a false premise about
+    // EMI that was never actually true for their selection.
     const heading = isEmiMethod
       ? `An EMI offer becomes available ${when}`
-      : canHaveEmiAlternative
-        ? `Don't want EMI? A non-EMI ${shortLabel} offer unlocks ${when}`
-        : `Your ${shortLabel} offer becomes available ${when}`;
-    const message = canHaveEmiAlternative && !isEmiMethod
-      ? `You could save about ₹${potentialSaving} without EMI.`
-      : `You could save about ₹${potentialSaving} by paying with ${shortLabel}.`;
+      : `Your ${shortLabel} offer becomes available ${when}`;
+    const message = `You could save about ₹${potentialSaving} by paying with ${shortLabel}.`;
     return {
       heading,
       message,
