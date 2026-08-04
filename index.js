@@ -7763,6 +7763,98 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Round-trip min-transaction hint (2026-08-04, founder idea): a one-way
+    // search sometimes has a real, matching bank offer that ALMOST applies -
+    // rejected only because this fare doesn't reach the offer's minimum
+    // transaction value. A round-trip fare is a genuinely different (higher)
+    // transaction amount, so that offer might actually clear the threshold
+    // on a round-trip search - worth a subtle nudge instead of just silently
+    // showing no discount. Deliberately not a real round-trip price fetch
+    // (that's a whole second FlightAPI search) - just a directional check
+    // against 2x the cheapest one-way fare already in hand, with a margin
+    // so this doesn't fire right at the edge and then not actually clear it.
+    let roundTripMinTxnHint = null;
+    if (
+      page === 1 &&
+      tripType === "one-way" &&
+      Array.isArray(selectedPaymentMethods) &&
+      selectedPaymentMethods.length > 0 &&
+      outboundFlights.length > 0
+    ) {
+      let cheapestPrice = Infinity;
+      let cheapestPortal = null;
+      for (const f of outboundFlights) {
+        for (const p of (f.portalPrices || [])) {
+          const price = Number(p.basePrice);
+          if (Number.isFinite(price) && price > 0 && price < cheapestPrice) {
+            cheapestPrice = price;
+            cheapestPortal = p.portal;
+          }
+        }
+      }
+
+      if (Number.isFinite(cheapestPrice) && cheapestPrice > 0 && cheapestPortal) {
+        const isDomestic = isDomesticRoute(from, to);
+        const ROUND_TRIP_HINT_MARGIN = 1.15; // require 2x to clear the threshold with room, not just barely
+
+        let bestCandidate = null;
+        for (const offer of offers) {
+          if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+
+          const ev = evaluateOfferForFlight({
+            offer,
+            portal: cheapestPortal,
+            baseAmount: cheapestPrice,
+            eligibilityAmount: cheapestPrice,
+            selectedPaymentMethods,
+            isDomestic,
+            cabin,
+            flightAirlineName: null,
+            tripType,
+            passengers: adults,
+            allOffers: offers,
+            requestCache: offerPricingRequestCache,
+            evaluationBookingDate: null,
+          });
+
+          const isMinTxnOnlyRejection =
+            !ev.ok &&
+            Array.isArray(ev.reasons) &&
+            ev.reasons.length === 1 &&
+            (ev.reasons[0] === "MIN_TXN_NOT_MET" || ev.reasons[0] === "MIN_TXN_NOT_MET_PER_PAX") &&
+            Number.isFinite(ev.minTxn) &&
+            ev.minTxn > 0;
+
+          if (isMinTxnOnlyRejection && cheapestPrice * 2 >= ev.minTxn * ROUND_TRIP_HINT_MARGIN) {
+            const discountValue = extractBestNumericDiscountValue(offer);
+            if (!bestCandidate || discountValue > bestCandidate.discountValue) {
+              const rawBank =
+                offer?.eligiblePaymentMethods?.[0]?.bank ||
+                offer?.paymentMethods?.[0]?.bank ||
+                null;
+              bestCandidate = {
+                discountValue,
+                minTxn: ev.minTxn,
+                bank: rawBank ? (normalizeBankDisplayName(rawBank) || rawBank) : null,
+                rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
+              };
+            }
+          }
+        }
+
+        if (bestCandidate) {
+          roundTripMinTxnHint = {
+            bank: bestCandidate.bank,
+            rawDiscount: bestCandidate.rawDiscount,
+            minTransactionValue: bestCandidate.minTxn,
+            cheapestOneWayPrice: cheapestPrice,
+            portal: cheapestPortal,
+          };
+        }
+      }
+    }
+    meta.roundTripMinTxnHint = roundTripMinTxnHint;
+
     return res.json({
       meta,
       outboundFlights: outboundFlights.map(slimFlightForSearchResponse),
