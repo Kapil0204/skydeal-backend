@@ -8126,6 +8126,14 @@ function computeRecommendationScore({ tier, additionalSaving, easeScore, totalAf
 // Builds the list of not-yet-selected payment methods worth testing,
 // entirely from live data (computePaymentOptionsFromOffers' catalog plus
 // real EMI tenures read off the offers collection) — no hard-coded banks.
+// Providers never actively SUGGESTED to add, even when they have a live
+// offer - founder call (2026-08-04): recommending them reads as SkyDeal
+// promoting a specific app, and low-adoption providers (a user may not
+// already have the app) make for a pushy, low-value nudge. Still fully
+// selectable by hand in the payment picker for anyone who already uses
+// one - this only removes it from the proactive "Add X" suggestion path.
+const SUGGESTION_EXCLUDED_PROVIDERS = new Set(["mobikwik"]);
+
 async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg) {
   const catalog = await computePaymentOptionsFromOffers(offers);
   const selectedSet = new Set((selectedPaymentMethods || []).map(selectedPmKey));
@@ -8138,6 +8146,8 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
     const counts = catalog.offerCounts?.[uiType] || {};
 
     for (const bank of banks) {
+      if (SUGGESTION_EXCLUDED_PROVIDERS.has(String(bank).toLowerCase().trim())) continue;
+
       const count = Number(counts[bank] ?? counts[String(bank).toLowerCase()] ?? 0);
       if (count <= 0) continue;
 
