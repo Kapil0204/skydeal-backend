@@ -7764,115 +7764,6 @@ app.post("/search", async (req, res) => {
       });
     }
 
-    // Round-trip min-transaction hint (2026-08-04, founder idea): a one-way
-    // search sometimes has a real, matching bank offer that ALMOST applies -
-    // rejected only because this fare doesn't reach the offer's minimum
-    // transaction value. A round-trip fare is a genuinely different (higher)
-    // transaction amount, so that offer might actually clear the threshold
-    // on a round-trip search - worth a subtle nudge instead of just silently
-    // showing no discount. Deliberately not a real round-trip price fetch
-    // (that's a whole second FlightAPI search) - just a directional check
-    // against 2x the cheapest one-way fare already in hand, with a margin
-    // so this doesn't fire right at the edge and then not actually clear it.
-    let roundTripMinTxnHint = null;
-    if (
-      page === 1 &&
-      tripType === "one-way" &&
-      Array.isArray(selectedPaymentMethods) &&
-      selectedPaymentMethods.length > 0 &&
-      outboundFlights.length > 0
-    ) {
-      // Per-portal cheapest, not one global cheapest - offers are commonly
-      // restricted to a single portal (e.g. a Yatra-only EMI offer), so
-      // checking every offer against whichever portal happened to have the
-      // single lowest fare overall would evaluate most offers against a
-      // portal they don't even apply to, failing on a portal mismatch
-      // before ever reaching the min-transaction check (found live
-      // 2026-08-04: a real Yatra HDFC offer, min-txn-only per
-      // /debug/why-not-applied in isolation, never surfaced here because
-      // the overall-cheapest fare that day was on Goibibo).
-      const cheapestPricePerPortal = {};
-      for (const f of outboundFlights) {
-        for (const p of (f.portalPrices || [])) {
-          const price = Number(p.basePrice);
-          if (Number.isFinite(price) && price > 0) {
-            if (!cheapestPricePerPortal[p.portal] || price < cheapestPricePerPortal[p.portal]) {
-              cheapestPricePerPortal[p.portal] = price;
-            }
-          }
-        }
-      }
-      const portalEntries = Object.entries(cheapestPricePerPortal);
-
-      if (portalEntries.length > 0) {
-        const isDomestic = isDomesticRoute(from, to);
-        const ROUND_TRIP_HINT_MARGIN = 1.15; // require 2x to clear the threshold with room, not just barely
-
-        let bestCandidate = null;
-        for (const offer of offers) {
-          if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
-
-          for (const [portal, cheapestPrice] of portalEntries) {
-            const ev = evaluateOfferForFlight({
-              offer,
-              portal,
-              baseAmount: cheapestPrice,
-              eligibilityAmount: cheapestPrice,
-              selectedPaymentMethods,
-              isDomestic,
-              cabin,
-              flightAirlineName: null,
-              tripType,
-              passengers: adults,
-              allOffers: offers,
-              requestCache: offerPricingRequestCache,
-              evaluationBookingDate: null,
-            });
-
-            const isMinTxnOnlyRejection =
-              !ev.ok &&
-              Array.isArray(ev.reasons) &&
-              ev.reasons.length === 1 &&
-              (ev.reasons[0] === "MIN_TXN_NOT_MET" || ev.reasons[0] === "MIN_TXN_NOT_MET_PER_PAX") &&
-              Number.isFinite(ev.minTxn) &&
-              ev.minTxn > 0;
-
-            if (isMinTxnOnlyRejection && cheapestPrice * 2 >= ev.minTxn * ROUND_TRIP_HINT_MARGIN) {
-              const discountValue = extractBestNumericDiscountValue(offer);
-              if (!bestCandidate || discountValue > bestCandidate.discountValue) {
-                const rawBank =
-                  offer?.eligiblePaymentMethods?.[0]?.bank ||
-                  offer?.paymentMethods?.[0]?.bank ||
-                  null;
-                bestCandidate = {
-                  discountValue,
-                  minTxn: ev.minTxn,
-                  bank: rawBank ? (normalizeBankDisplayName(rawBank) || rawBank) : null,
-                  rawDiscount: offer?.rawDiscount || offer?.parsedFields?.rawDiscount || null,
-                  portal,
-                  cheapestPrice,
-                };
-              }
-              // Found a qualifying portal for this offer - no need to check
-              // its other portals too, move on to the next offer.
-              break;
-            }
-          }
-        }
-
-        if (bestCandidate) {
-          roundTripMinTxnHint = {
-            bank: bestCandidate.bank,
-            rawDiscount: bestCandidate.rawDiscount,
-            minTransactionValue: bestCandidate.minTxn,
-            cheapestOneWayPrice: bestCandidate.cheapestPrice,
-            portal: bestCandidate.portal,
-          };
-        }
-      }
-    }
-    meta.roundTripMinTxnHint = roundTripMinTxnHint;
-
     return res.json({
       meta,
       outboundFlights: outboundFlights.map(slimFlightForSearchResponse),
@@ -8556,7 +8447,11 @@ const URGENT_TIMING_TYPES = new Set([
   "AVAILABLE_TODAY_ENDS_SOON"
 ]);
 const URGENT_TIMING_RANK = { AVAILABLE_TODAY_ENDS_TODAY: 0, EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE: 1, AVAILABLE_TODAY_ENDS_SOON: 2 };
-const FUTURE_TIMING_RANK = { AVAILABLE_TOMORROW: 0, AVAILABLE_UPCOMING_DAY: 1 };
+// ROUND_TRIP_MAY_UNLOCK ranks last among future insights - it's a hedged,
+// no-real-fare-fetch estimate (see buildTimingInsights below), so a
+// concrete date-based insight ("available Monday") should win the single
+// future-insight slot (maxFutureInsights: 1) when both are present.
+const FUTURE_TIMING_RANK = { AVAILABLE_TOMORROW: 0, AVAILABLE_UPCOMING_DAY: 1, ROUND_TRIP_MAY_UNLOCK: 2 };
 
 // Plain-language copy only - no jargon like "payment-adjusted price" or
 // "eligible travel date". Users read these as a quick reason + a rupee
@@ -8754,6 +8649,104 @@ async function buildTimingInsights({
 
     if (isEndingFamily) urgent.push(insight);
     else future.push(insight);
+  }
+
+  // Round-trip min-transaction hint (2026-08-06: moved here from a
+  // standalone note in /search into the decode timing-insights panel,
+  // where this class of "your price could be different under a specific
+  // condition" signal already lives). Not a date-axis signal like the loop
+  // above (which scans forward in days) - trip TYPE, not time, is the
+  // variable - so it's computed separately: a one-way search sometimes has
+  // a real, matching offer rejected purely because the fare doesn't reach
+  // its minimum transaction value, and a round-trip fare is a genuinely
+  // different (higher) amount that might clear it. Deliberately not a real
+  // round-trip price fetch (a second full FlightAPI search) - just a
+  // directional check against 2x the cheapest one-way fare already in
+  // hand, with a margin so it doesn't fire right at the edge and then not
+  // actually clear it.
+  if (tripType === "one-way" && selectedPaymentMethods.length > 0 && outboundFlights.length > 0) {
+    const cheapestPricePerPortal = {};
+    for (const f of outboundFlights) {
+      for (const p of (f.portalPrices || [])) {
+        const price = Number(p.basePrice);
+        if (Number.isFinite(price) && price > 0) {
+          if (!cheapestPricePerPortal[p.portal] || price < cheapestPricePerPortal[p.portal]) {
+            cheapestPricePerPortal[p.portal] = price;
+          }
+        }
+      }
+    }
+    const portalEntries = Object.entries(cheapestPricePerPortal);
+
+    if (portalEntries.length > 0) {
+      const ROUND_TRIP_HINT_MARGIN = 1.15; // require 2x to clear the threshold with room, not just barely
+      let bestCandidate = null;
+
+      for (const offer of offers) {
+        if (Date.now() - startedAt > timingCfg.timingBudgetMs) break;
+        if (!offerMatchesSelectedPayment(offer, selectedPaymentMethods)) continue;
+
+        for (const [portal, cheapestPrice] of portalEntries) {
+          const ev = evaluateOfferForFlight({
+            offer,
+            portal,
+            baseAmount: cheapestPrice,
+            eligibilityAmount: cheapestPrice,
+            selectedPaymentMethods,
+            isDomestic: ctx.isDomestic,
+            cabin: ctx.cabin,
+            flightAirlineName: null,
+            tripType,
+            passengers: ctx.passengers,
+            allOffers: offers,
+            requestCache: ctx.requestCache,
+            evaluationBookingDate: null,
+          });
+
+          const isMinTxnOnlyRejection =
+            !ev.ok &&
+            Array.isArray(ev.reasons) &&
+            ev.reasons.length === 1 &&
+            (ev.reasons[0] === "MIN_TXN_NOT_MET" || ev.reasons[0] === "MIN_TXN_NOT_MET_PER_PAX") &&
+            Number.isFinite(ev.minTxn) &&
+            ev.minTxn > 0;
+
+          if (isMinTxnOnlyRejection && cheapestPrice * 2 >= ev.minTxn * ROUND_TRIP_HINT_MARGIN) {
+            const discountValue = extractBestNumericDiscountValue(offer);
+            if (!bestCandidate || discountValue > bestCandidate.discountValue) {
+              const rawBank =
+                offer?.eligiblePaymentMethods?.[0]?.bank ||
+                offer?.paymentMethods?.[0]?.bank ||
+                null;
+              bestCandidate = {
+                discountValue,
+                minTxn: ev.minTxn,
+                bank: rawBank ? (normalizeBankDisplayName(rawBank) || rawBank) : null,
+              };
+            }
+            break; // found a qualifying portal for this offer - move to the next offer
+          }
+        }
+      }
+
+      if (bestCandidate) {
+        future.push({
+          type: "ROUND_TRIP_MAY_UNLOCK",
+          urgency: "medium",
+          paymentMethod: null,
+          currentDate: todayDateOnly.toISOString().slice(0, 10),
+          availableFrom: null,
+          availableUntil: null,
+          potentialSaving: bestCandidate.discountValue || 0,
+          estimatedFinalPrice: null,
+          isOfferOnlyEstimate: true,
+          heading: `${bestCandidate.bank ? bestCandidate.bank + "'s" : "A"} offer needs a bigger booking`,
+          message: `It needs a minimum spend of ₹${bestCandidate.minTxn.toLocaleString("en-IN")}, more than this one-way fare - a round-trip search may clear it.`,
+          label: "Try round-trip",
+          disclaimer: "Estimated by doubling your one-way fare, not a real round-trip search."
+        });
+      }
+    }
   }
 
   urgent.sort((a, b) => (URGENT_TIMING_RANK[a.type] - URGENT_TIMING_RANK[b.type]) || (b.potentialSaving - a.potentialSaving));
