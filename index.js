@@ -7919,9 +7919,16 @@ app.post("/reprice-flights", async (req, res) => {
       requestCache
     };
 
-    const outboundFlights = await repriceFlightsForPaymentMethods(v.outboundFlights, v.selectedPaymentMethods, ctx);
+    // See expandEmiPaymentMethods - the client sends its raw selection
+    // (e.g. just {type:"Credit Card", name:"HDFC Bank"} even with "Show
+    // EMI offers" toggled on), so without this every EMI-typed offer is
+    // invisible here and the repriced cards would silently show non-EMI
+    // pricing after a toggle-only update (no fresh /search).
+    const selectedPaymentMethods = expandEmiPaymentMethods(v.selectedPaymentMethods, offers);
+
+    const outboundFlights = await repriceFlightsForPaymentMethods(v.outboundFlights, selectedPaymentMethods, ctx);
     const returnFlights = v.tripType === "round-trip"
-      ? await repriceFlightsForPaymentMethods(v.returnFlights, v.selectedPaymentMethods, ctx)
+      ? await repriceFlightsForPaymentMethods(v.returnFlights, selectedPaymentMethods, ctx)
       : [];
 
     return res.json({ outboundFlights, returnFlights });
@@ -8822,7 +8829,22 @@ async function computePaymentSuggestionsCore(v, cfg) {
       requestCache
     };
 
-    const candidates = await buildCandidatePaymentMethods(v.selectedPaymentMethods, offers, cfg);
+    // fetchPaymentSuggestions (frontend) sends the client's raw selection -
+    // e.g. just {type:"Credit Card", name:"HDFC Bank"} even when "Show EMI
+    // offers" is toggled on, since that toggle's own EMI expansion only
+    // ever happened inside /search's payload construction, never here.
+    // Without this, every EMI-typed offer is invisible to this whole
+    // function (offerMatchesSelectedPayment requires an exact type match,
+    // and nothing here ever carries type "EMI") - both the Phase 1/2
+    // suggestions AND the Phase 3 round-trip hint below silently can never
+    // see them. Same expansion /search and /compare-selected-trip already
+    // apply, kept separate from v.selectedPaymentMethods (used below only
+    // for the user-facing "N payment methods selected" count, which should
+    // stay the count of what the user actually picked, not the tenure
+    // variants being tried on their behalf).
+    const selectedPaymentMethods = expandEmiPaymentMethods(v.selectedPaymentMethods, offers);
+
+    const candidates = await buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg);
     mark("buildCandidatesMs");
 
     // Relevance filter runs before the (expensive) reprice loop: tier-5
@@ -8830,7 +8852,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
     // ranked last - so a larger saving from an unrelated bank can never
     // outrank, or even appear alongside, a same-bank/UPI/wallet suggestion.
     const relevantCandidates = candidates.filter(
-      (c) => candidateRelevanceTier(c, v.selectedPaymentMethods) <= 4
+      (c) => candidateRelevanceTier(c, selectedPaymentMethods) <= 4
     );
 
     const flightsTested = v.outboundFlights.length + (v.tripType === "round-trip" ? v.returnFlights.length : 0);
@@ -8845,7 +8867,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
       }
 
       const __candidateStart = Date.now();
-      const hypothetical = [...v.selectedPaymentMethods, candidate];
+      const hypothetical = [...selectedPaymentMethods, candidate];
 
       const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
       const newOutboundBest = Math.min(
@@ -8879,7 +8901,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
 
       if (!isValid) continue;
 
-      const tier = candidateRelevanceTier(candidate, v.selectedPaymentMethods);
+      const tier = candidateRelevanceTier(candidate, selectedPaymentMethods);
       const totalAffectedFlights = affectedOutboundFlights + affectedReturnFlights;
       const breadthPercent = flightsTested > 0 ? (totalAffectedFlights / flightsTested) * 100 : 0;
       const easeScore = easeOfAdoptionScore(candidate);
@@ -8966,7 +8988,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
     let timingInsights = [];
     try {
       timingInsights = await buildTimingInsights({
-        selectedPaymentMethods: v.selectedPaymentMethods,
+        selectedPaymentMethods,
         offers,
         ctx,
         currentBestPrice,
