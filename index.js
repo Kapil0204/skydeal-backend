@@ -2476,19 +2476,26 @@ function getOfferMaxDiscountAmount(offer, passengers = 1) {
 
   return null;
 }
-function getSelectedEmiTenure(selectedPaymentMethods = []) {
-  if (!Array.isArray(selectedPaymentMethods)) return null;
+// Every distinct EMI tenure currently in play, as a Set - not just one.
+// expandEmiPaymentMethods (see below) can put several tenure candidates
+// for the same bank into selectedPaymentMethods simultaneously (one per
+// real tenure that bank offers, since there's no explicit tenure picker),
+// so anything downstream that reasons about "the" selected tenure must
+// consider all of them, not just whichever happened to come first.
+function getSelectedEmiTenures(selectedPaymentMethods = []) {
+  const tenures = new Set();
+  if (!Array.isArray(selectedPaymentMethods)) return tenures;
 
   for (const pm of selectedPaymentMethods) {
     const type = String(pm?.type || "").toLowerCase();
     const tenure = Number(pm?.tenureMonths || pm?.emiTenureMonths || 0);
 
     if (type.includes("emi") && Number.isFinite(tenure) && tenure > 0) {
-      return tenure;
+      tenures.add(tenure);
     }
   }
 
-  return null;
+  return tenures;
 }
 
 function tierScopeMatchesTrip(tier, isDomestic) {
@@ -2664,7 +2671,7 @@ function pickApplicableDiscountTier(
   const amount = Number(eligibilityAmount || 0);
   if (!Number.isFinite(amount) || amount <= 0) return null;
 
-  const selectedTenure = getSelectedEmiTenure(selectedPaymentMethods);
+  const selectedTenures = getSelectedEmiTenures(selectedPaymentMethods);
 
   const eligible = tiers
     .filter((t) => {
@@ -2680,10 +2687,14 @@ function pickApplicableDiscountTier(
 
       const tierTenure = Number(t?.tenureMonths || 0);
 
-      // If user selected EMI tenure, allow exact tenure or generic all-tenure tier.
-      // If user did NOT select tenure, do NOT apply tenure-specific slabs like 6/9 months.
-      if (selectedTenure) {
-        if (tierTenure > 0 && tierTenure !== selectedTenure) return false;
+      // A tenure-specific tier is only eligible if that exact tenure is one
+      // of the ones actually being tried - expandEmiPaymentMethods can put
+      // several real tenures for the same bank into selectedPaymentMethods
+      // simultaneously (no explicit tenure picker), so "the selected
+      // tenure" is now a set, not a single value. No tenure being tried at
+      // all -> only generic (tenure-less) tiers apply, same as before.
+      if (selectedTenures.size > 0) {
+        if (tierTenure > 0 && !selectedTenures.has(tierTenure)) return false;
       } else {
         if (tierTenure > 0) return false;
       }
@@ -2694,32 +2705,35 @@ function pickApplicableDiscountTier(
       return flat > 0 || pct > 0;
     })
     .sort((a, b) => {
+      // Best true value to the user wins first - with several tenures now
+      // potentially eligible at once, this is what "try every real tenure,
+      // best price wins" actually means at the tier level (not just at the
+      // whole-offer level where it already worked this way).
+      const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
+      const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
+      if (aVal !== bVal) return bVal - aVal;
+
+      // Tie-break for equal-value ties (or percent-only tiers this rough
+      // value estimate can't distinguish): higher applicable slab first,
+      // then exact tenure over generic.
       const aMin = Number(a?.minTransactionValue || 0);
       const bMin = Number(b?.minTransactionValue || 0);
-
-      // Higher applicable slab should win first.
       if (aMin !== bMin) return bMin - aMin;
 
       const aTenure = Number(a?.tenureMonths || 0);
       const bTenure = Number(b?.tenureMonths || 0);
 
-      // Exact EMI tenure wins over generic tier.
-      if (selectedTenure) {
-        const aExact = aTenure === selectedTenure ? 1 : 0;
-        const bExact = bTenure === selectedTenure ? 1 : 0;
+      if (selectedTenures.size > 0) {
+        const aExact = selectedTenures.has(aTenure) ? 1 : 0;
+        const bExact = selectedTenures.has(bTenure) ? 1 : 0;
         if (aExact !== bExact) return bExact - aExact;
-      }
-
-      // If no tenure selected, generic all-tenure tier should win.
-      if (!selectedTenure) {
+      } else {
         const aGeneric = aTenure === 0 ? 1 : 0;
         const bGeneric = bTenure === 0 ? 1 : 0;
         if (aGeneric !== bGeneric) return bGeneric - aGeneric;
       }
 
-      const aVal = Number(a?.flatDiscountAmount || a?.discountAmount || a?.maxDiscountAmount || 0);
-      const bVal = Number(b?.flatDiscountAmount || b?.discountAmount || b?.maxDiscountAmount || 0);
-      return bVal - aVal;
+      return 0;
     });
 
   return eligible[0] || null;
@@ -4577,10 +4591,10 @@ if (
 
 
 function offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods = []) {
-  const selectedTenure = getSelectedEmiTenure(selectedPaymentMethods);
+  const selectedTenures = getSelectedEmiTenures(selectedPaymentMethods);
 
   // If user did not select EMI tenure, do not block info offers.
-  if (!selectedTenure) return true;
+  if (selectedTenures.size === 0) return true;
 
   const offerPMs = extractOfferPaymentMethodsNoInference(offer);
   if (!Array.isArray(offerPMs) || offerPMs.length === 0) return true;
@@ -4596,11 +4610,11 @@ function offerMatchesSelectedEmiTenureForInfo(offer, selectedPaymentMethods = []
     if (o.typeNorm !== "EMI" && o.emiOnly !== true) return false;
 
     if (Number.isFinite(o.tenureMonths) && o.tenureMonths > 0) {
-      return Number(o.tenureMonths) === Number(selectedTenure);
+      return selectedTenures.has(Number(o.tenureMonths));
     }
 
     if (Array.isArray(o.allowedTenures) && o.allowedTenures.length > 0) {
-      return o.allowedTenures.includes(Number(selectedTenure));
+      return o.allowedTenures.some((t) => selectedTenures.has(Number(t)));
     }
 
     // Generic EMI offer without tenure restriction can still be shown.
@@ -6876,25 +6890,10 @@ app.post("/compare-selected-trip", async (req, res) => {
 
     const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
 
-    const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
-      const type = String(pm?.type || "").toLowerCase();
-
-      if (type.includes("emi") && !Number(pm?.tenureMonths)) {
-        return {
-          ...pm,
-          tenureMonths: 3,
-          defaultedTenure: true
-        };
-      }
-
-      return pm;
-    });
-
     const includeGenericDisplayOffers =
       body.includeGenericDisplayOffers === true ||
       String(body.includeGenericDisplayOffers || "").toLowerCase() === "true";
 
-    meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.mongoCollection = MONGO_COL;
     meta.mongoDb = MONGODB_DB;
     meta.isDomestic = routeIsDomestic;
@@ -6928,6 +6927,12 @@ app.post("/compare-selected-trip", async (req, res) => {
     const col = await getOffersCollection();
     const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
     meta.offersLoaded = offers.length;
+
+    // See expandEmiPaymentMethods - a tenure-less EMI selection expands into
+    // one candidate per real tenure that bank offers, now that offers is
+    // loaded, rather than defaulting every one to a hard-coded 3 months.
+    const selectedPaymentMethods = expandEmiPaymentMethods(selectedPaymentMethodsRaw, offers);
+    meta.selectedPaymentMethods = selectedPaymentMethods;
 
     let genericDisplayContext = null;
     if (includeGenericDisplayOffers) {
@@ -7330,21 +7335,6 @@ app.post("/search", async (req, res) => {
 
     const selectedPaymentMethodsRaw = Array.isArray(body.paymentMethods) ? body.paymentMethods : [];
 
-    const selectedPaymentMethods = selectedPaymentMethodsRaw.map((pm) => {
-      const type = String(pm?.type || "").toLowerCase();
-
-      if (type.includes("emi") && !Number(pm?.tenureMonths)) {
-        return {
-          ...pm,
-          tenureMonths: 3,
-          defaultedTenure: true
-        };
-      }
-
-      return pm;
-    });
-
-    meta.selectedPaymentMethods = selectedPaymentMethods;
     meta.ENABLE_ESTIMATED_DISCOUNTS = ENABLE_ESTIMATED_DISCOUNTS;
 
     const includeGenericDisplayOffers =
@@ -7399,6 +7389,17 @@ app.post("/search", async (req, res) => {
     const offers = await getOffersForSearch(meta);
     timings.mongoOffersMs = Date.now() - mongoStart;
     meta.offersLoaded = offers.length;
+
+    // Tenure-less EMI selections ("Show EMI offers" toggled on, no tenure
+    // chosen - see expandEmiPaymentMethods) expand into one candidate per
+    // real tenure that bank offers, now that offers is loaded. Moved here
+    // (was previously computed before offers existed, defaulting every
+    // tenure-less EMI selection to a hard-coded 3 months) per founder call
+    // 2026-08-05: rather than an explicit tenure picker, just try every
+    // real tenure and let the existing best-price-across-everything-
+    // selected logic surface whichever one wins.
+    const selectedPaymentMethods = expandEmiPaymentMethods(selectedPaymentMethodsRaw, offers);
+    meta.selectedPaymentMethods = selectedPaymentMethods;
 
     let genericDisplayContext = null;
     if (includeGenericDisplayOffers) {
@@ -8134,6 +8135,82 @@ function computeRecommendationScore({ tier, additionalSaving, easeScore, totalAf
 // one - this only removes it from the proactive "Add X" suggestion path.
 const SUGGESTION_EXCLUDED_PROVIDERS = new Set(["mobikwik"]);
 
+// Real EMI tenures a bank actually offers, read live off the offers
+// collection - shared by every place that needs to turn a tenure-less EMI
+// selection into real, priceable candidates (was previously duplicated
+// inline inside buildCandidatePaymentMethods below).
+// sawGenericEmiOffer: true if at least one EMI-like offer for this bank
+// exists but never states specific tenures (e.g. "interest-free EMI"
+// with no month breakdown) - such an offer should still be triable via a
+// single tenureMonths:null candidate even when no concrete tenure number
+// was ever found.
+function findRealEmiTenuresForBank(bankName, offers, maxTenures = 12) {
+  const bankCanon = bankCanonicalFromAny(bankName);
+  if (!bankCanon) return { tenures: [], sawGenericEmiOffer: false };
+
+  const tenureSet = new Set();
+  let sawGenericEmiOffer = false;
+
+  for (const offer of offers) {
+    if (isOfferExpired(offer)) continue;
+    const pms = extractOfferPaymentMethodsNoInference(offer);
+
+    for (const pm of pms) {
+      const norm = normalizeOfferPM(pm, offer);
+      const isEmiLike = norm.typeNorm === "EMI" || (norm.typeNorm === "CREDIT_CARD" && norm.emiOnly === true);
+      if (!isEmiLike) continue;
+      if (!norm.bankCanonical || norm.bankCanonical !== bankCanon) continue;
+
+      if (Array.isArray(norm.allowedTenures) && norm.allowedTenures.length > 0) {
+        norm.allowedTenures.forEach((t) => tenureSet.add(t));
+      } else {
+        sawGenericEmiOffer = true;
+      }
+    }
+  }
+
+  // Sorted numerically first so that if a bank genuinely has more distinct
+  // tenures than the cap, which ones get dropped is at least deterministic
+  // rather than depending on arbitrary Mongo document order.
+  const tenures = Array.from(tenureSet).sort((a, b) => a - b).slice(0, maxTenures);
+  return { tenures, sawGenericEmiOffer };
+}
+
+// Turns a tenure-less EMI selection ("Show EMI offers" toggled on, no
+// specific tenure chosen) into one candidate per real tenure that bank
+// actually offers, rather than silently defaulting to 3 months. Founder
+// call (2026-08-05): an explicit tenure picker was judged too much UI
+// complexity for most users to have a real opinion on, so instead try
+// every real tenure and let the existing "best price across everything
+// you selected" logic surface whichever one wins - the winning offer's
+// own title/rawDiscount text already states its tenure, so the user still
+// sees it, just as part of the result rather than as an upfront choice.
+// An entry with an explicit tenureMonths already set (e.g. from a debug
+// endpoint, or a future picker) passes through untouched - this only
+// fills in for the "no preference stated" case.
+function expandEmiPaymentMethods(selectedPaymentMethodsRaw, offers) {
+  const out = [];
+  for (const pm of (selectedPaymentMethodsRaw || [])) {
+    const type = String(pm?.type || "").toLowerCase();
+    if (type.includes("emi") && !Number(pm?.tenureMonths)) {
+      const { tenures, sawGenericEmiOffer } = findRealEmiTenuresForBank(pm?.name || pm?.bank, offers);
+      if (tenures.length === 0) {
+        // No concrete tenure ever found for this bank - fall back to the
+        // old default rather than dropping EMI matching for it entirely,
+        // unless there's a generic (tenure-unstated) EMI offer to try as-is.
+        out.push({ ...pm, tenureMonths: sawGenericEmiOffer ? null : 3, defaultedTenure: !sawGenericEmiOffer });
+      } else {
+        for (const t of tenures) {
+          out.push({ ...pm, tenureMonths: t });
+        }
+      }
+    } else {
+      out.push(pm);
+    }
+  }
+  return out;
+}
+
 async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg) {
   const catalog = await computePaymentOptionsFromOffers(offers);
   const selectedSet = new Set((selectedPaymentMethods || []).map(selectedPmKey));
@@ -8169,8 +8246,8 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
   }
 
   // Same-bank EMI variants for already-selected credit cards, using real
-  // tenure data read off live offers via the same helpers the main offer
-  // engine already uses — no hard-coded default tenure.
+  // tenure data read off live offers via findRealEmiTenuresForBank — no
+  // hard-coded default tenure.
   const selectedCreditCards = (selectedPaymentMethods || []).filter(
     (pm) => String(pm?.type || "").toLowerCase() === "credit card"
   );
@@ -8183,38 +8260,8 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
     );
     if (alreadyHasEmi) continue;
 
-    const bankCanon = bankCanonicalFromAny(cc.name);
-    if (!bankCanon) continue;
-
-    const tenureSet = new Set();
-    let sawGenericEmiOffer = false;
-
-    for (const offer of offers) {
-      if (isOfferExpired(offer)) continue;
-      const pms = extractOfferPaymentMethodsNoInference(offer);
-
-      for (const pm of pms) {
-        const norm = normalizeOfferPM(pm, offer);
-        const isEmiLike = norm.typeNorm === "EMI" || (norm.typeNorm === "CREDIT_CARD" && norm.emiOnly === true);
-        if (!isEmiLike) continue;
-        if (!norm.bankCanonical || norm.bankCanonical !== bankCanon) continue;
-
-        if (Array.isArray(norm.allowedTenures) && norm.allowedTenures.length > 0) {
-          norm.allowedTenures.forEach((t) => tenureSet.add(t));
-        } else {
-          sawGenericEmiOffer = true;
-        }
-      }
-    }
-
-    // Sorted numerically first so that if a bank genuinely has more
-    // distinct tenures than the cap, which ones get dropped is at least
-    // deterministic rather than depending on arbitrary Mongo document
-    // order - there's no "expected saving" signal available yet to sort
-    // by at this point (that's exactly what the reprice loop below
-    // computes for whichever tenures make the cut).
-    let tenures = Array.from(tenureSet).sort((a, b) => a - b).slice(0, cfg.maxEmiTenureVariantsPerBank);
-    if (tenures.length === 0 && sawGenericEmiOffer) tenures = [null];
+    const { tenures: foundTenures, sawGenericEmiOffer } = findRealEmiTenuresForBank(cc.name, offers, cfg.maxEmiTenureVariantsPerBank);
+    const tenures = foundTenures.length === 0 && sawGenericEmiOffer ? [null] : foundTenures;
 
     for (const tenure of tenures) {
       candidates.push({
