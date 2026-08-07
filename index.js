@@ -57,7 +57,23 @@ const PAYMENT_RECOMMENDATION_CONFIG = {
   // number of distinct EMI plans).
   maxEmiTenureVariantsPerBank: 12,
   softTimeBudgetMs: 20000,        // stop testing further candidates past this
-  suggestionsCacheTtlMs: 15000    // Phase 2: dedupe repeat identical /payment-suggestions calls
+  suggestionsCacheTtlMs: 15000,   // Phase 2: dedupe repeat identical /payment-suggestions calls
+  // 2026-08-07 (founder call): repricing EVERY relevant candidate against
+  // every loaded flight (could be 40-80 after a page-2 prefetch) was the
+  // dominant cost of /payment-suggestions - confirmed live at ~13s per
+  // candidate on an 80-flight search. Screening pass reprices against only
+  // the cheapest N flights (same sampling Phase 3's timing insights
+  // already use) to cheaply rank every candidate; only the top few from
+  // that ranking get a second, full-precision pass (see
+  // candidateRefineBuffer) against the complete flight set, so the rupee
+  // saving and "improves N flights" numbers actually shown to the user are
+  // always exact, never sampled estimates - only the ranking that decides
+  // WHICH candidates get shown is approximate.
+  candidateScreeningFlightSample: 10,
+  // How many extra candidates beyond maxSuggestions get the full-precision
+  // refine pass - a small buffer against the sampled screening ranking
+  // putting the true top candidates just outside the cut.
+  candidateRefineBuffer: 2
 };
 
 // Phase 2 — recommendation scoring. Ranking precedence is: relevance tier
@@ -8856,9 +8872,24 @@ async function computePaymentSuggestionsCore(v, cfg) {
     );
 
     const flightsTested = v.outboundFlights.length + (v.tripType === "round-trip" ? v.returnFlights.length : 0);
-    const results = [];
     let truncated = false;
     const perCandidateMs = []; // temporary (2026-07-15) - see mark() above
+
+    // Phase A - screening: reprice every relevant candidate against only
+    // the cheapest candidateScreeningFlightSample flights per leg (see
+    // config comment) instead of everything loaded - this is what was
+    // actually taking ~13s per candidate on a real 80-flight search.
+    // affectedFlights/breadthPercent here are estimates from the sample,
+    // good enough to RANK candidates; the numbers actually shown to the
+    // user come from the exact refine pass below.
+    const screeningOutbound = [...v.outboundFlights]
+      .sort((a, b) => bestFinalPriceOf(a) - bestFinalPriceOf(b))
+      .slice(0, cfg.candidateScreeningFlightSample);
+    const screeningReturn = v.tripType === "round-trip"
+      ? [...v.returnFlights].sort((a, b) => bestFinalPriceOf(a) - bestFinalPriceOf(b)).slice(0, cfg.candidateScreeningFlightSample)
+      : [];
+
+    const screened = [];
 
     for (const candidate of relevantCandidates) {
       if (Date.now() - startedAt > cfg.softTimeBudgetMs) {
@@ -8869,24 +8900,24 @@ async function computePaymentSuggestionsCore(v, cfg) {
       const __candidateStart = Date.now();
       const hypothetical = [...selectedPaymentMethods, candidate];
 
-      const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
+      const outboundRepriced = await repriceFlightsForPaymentMethods(screeningOutbound, hypothetical, ctx);
       const newOutboundBest = Math.min(
-        ...outboundRepriced.map((r, i) => finalPriceFromRepriced(r, v.outboundFlights[i]))
+        ...outboundRepriced.map((r, i) => finalPriceFromRepriced(r, screeningOutbound[i]))
       );
       const affectedOutboundFlights = outboundRepriced.filter(
-        (r, i) => finalPriceFromRepriced(r, v.outboundFlights[i]) < bestFinalPriceOf(v.outboundFlights[i])
+        (r, i) => finalPriceFromRepriced(r, screeningOutbound[i]) < bestFinalPriceOf(screeningOutbound[i])
       ).length;
 
       let newReturnBest = 0;
       let affectedReturnFlights = 0;
 
-      if (v.tripType === "round-trip" && v.returnFlights.length > 0) {
-        const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx);
+      if (v.tripType === "round-trip" && screeningReturn.length > 0) {
+        const returnRepriced = await repriceFlightsForPaymentMethods(screeningReturn, hypothetical, ctx);
         newReturnBest = Math.min(
-          ...returnRepriced.map((r, i) => finalPriceFromRepriced(r, v.returnFlights[i]))
+          ...returnRepriced.map((r, i) => finalPriceFromRepriced(r, screeningReturn[i]))
         );
         affectedReturnFlights = returnRepriced.filter(
-          (r, i) => finalPriceFromRepriced(r, v.returnFlights[i]) < bestFinalPriceOf(v.returnFlights[i])
+          (r, i) => finalPriceFromRepriced(r, screeningReturn[i]) < bestFinalPriceOf(screeningReturn[i])
         ).length;
       }
 
@@ -8903,40 +8934,99 @@ async function computePaymentSuggestionsCore(v, cfg) {
 
       const tier = candidateRelevanceTier(candidate, selectedPaymentMethods);
       const totalAffectedFlights = affectedOutboundFlights + affectedReturnFlights;
-      const breadthPercent = flightsTested > 0 ? (totalAffectedFlights / flightsTested) * 100 : 0;
+      const sampleSize = screeningOutbound.length + screeningReturn.length;
+      const breadthPercent = sampleSize > 0 ? (totalAffectedFlights / sampleSize) * 100 : 0;
       const easeScore = easeOfAdoptionScore(candidate);
-      const score = computeRecommendationScore({ tier, additionalSaving, easeScore, totalAffectedFlights, breadthPercent });
+      const screeningScore = computeRecommendationScore({ tier, additionalSaving, easeScore, totalAffectedFlights, breadthPercent });
+
+      screened.push({ candidate, relevanceTier: tier, easeScore, _screeningScore: screeningScore });
+    }
+    mark("screeningLoopMs");
+
+    // When the same bank surfaces more than once (e.g. multiple valid EMI
+    // tenures), keep only the single highest-screening-score suggestion
+    // for it before spending a refine pass on it.
+    const bestScreenedByKey = new Map();
+    for (const r of screened) {
+      const key = `${r.candidate.type}|${r.candidate.name}`.toLowerCase();
+      const existing = bestScreenedByKey.get(key);
+      if (!existing || r._screeningScore > existing._screeningScore) bestScreenedByKey.set(key, r);
+    }
+    const screenedRanked = Array.from(bestScreenedByKey.values()).sort((a, b) => b._screeningScore - a._screeningScore);
+    const isOptimised = screenedRanked.length === 0;
+
+    // Phase B - refine: only the handful of candidates that could
+    // plausibly make the final cut (maxSuggestions + a small buffer, in
+    // case the sampled screening ranking put the true top candidates just
+    // outside the cut) get re-priced against the COMPLETE loaded flight
+    // set, so the rupee saving and "improves N flights" numbers actually
+    // shown to the user are always exact, never sampled estimates.
+    const refineCandidates = screenedRanked.slice(0, cfg.maxSuggestions + cfg.candidateRefineBuffer);
+    const results = [];
+
+    for (const r of refineCandidates) {
+      if (Date.now() - startedAt > cfg.softTimeBudgetMs) {
+        truncated = true;
+        break;
+      }
+
+      const hypothetical = [...selectedPaymentMethods, r.candidate];
+
+      const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
+      const newOutboundBest = Math.min(
+        ...outboundRepriced.map((rr, i) => finalPriceFromRepriced(rr, v.outboundFlights[i]))
+      );
+      const affectedOutboundFlights = outboundRepriced.filter(
+        (rr, i) => finalPriceFromRepriced(rr, v.outboundFlights[i]) < bestFinalPriceOf(v.outboundFlights[i])
+      ).length;
+
+      let newReturnBest = 0;
+      let affectedReturnFlights = 0;
+
+      if (v.tripType === "round-trip" && v.returnFlights.length > 0) {
+        const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx);
+        newReturnBest = Math.min(
+          ...returnRepriced.map((rr, i) => finalPriceFromRepriced(rr, v.returnFlights[i]))
+        );
+        affectedReturnFlights = returnRepriced.filter(
+          (rr, i) => finalPriceFromRepriced(rr, v.returnFlights[i]) < bestFinalPriceOf(v.returnFlights[i])
+        ).length;
+      }
+
+      const newBestPrice = newOutboundBest + newReturnBest;
+      const additionalSaving = Math.round(currentBestPrice - newBestPrice);
+      const totalAffectedFlights = affectedOutboundFlights + affectedReturnFlights;
+      const breadthPercent = flightsTested > 0 ? (totalAffectedFlights / flightsTested) * 100 : 0;
+      const score = computeRecommendationScore({
+        tier: r.relevanceTier,
+        additionalSaving,
+        easeScore: r.easeScore,
+        totalAffectedFlights,
+        breadthPercent
+      });
 
       results.push({
-        candidate,
-        relevanceTier: tier,
-        category: candidateCategoryLabel(tier),
+        candidate: r.candidate,
+        relevanceTier: r.relevanceTier,
+        category: candidateCategoryLabel(r.relevanceTier),
         additionalSaving,
         newBestPrice,
         affectedOutboundFlights,
         affectedReturnFlights,
         affectedFlights: totalAffectedFlights,
-        _easeScore: easeScore,
+        _easeScore: r.easeScore,
         _score: score
       });
     }
     mark("repriceLoopMs");
 
-    // When the same bank surfaces more than once (e.g. multiple valid EMI
-    // tenures), keep only the single highest-scoring suggestion for it.
-    const bestByKey = new Map();
-    for (const r of results) {
-      const key = `${r.candidate.type}|${r.candidate.name}`.toLowerCase();
-      const existing = bestByKey.get(key);
-      if (!existing || r._score > existing._score) bestByKey.set(key, r);
-    }
-
     // A single descending sort on _score reproduces the full precedence
     // order (relevance tier > saving > ease of adoption > flights
     // improved > breadth) - see RECOMMENDATION_SCORE_WEIGHTS for why this
-    // is safe rather than approximate.
-    const ranked = Array.from(bestByKey.values()).sort((a, b) => b._score - a._score);
-    const isOptimised = ranked.length === 0;
+    // is safe rather than approximate. Re-sorting here (rather than
+    // trusting screening order) since the refine pass's exact numbers can
+    // reorder a close screening ranking.
+    const ranked = results.sort((a, b) => b._score - a._score);
 
     const finalList = ranked.slice(0, cfg.maxSuggestions);
 
