@@ -8861,6 +8861,21 @@ function formatDiscountPhrase(bestDeal) {
   return "a lower price";
 }
 
+// bestDeal.paymentLabel is built by getMatchedSelectedPaymentLabel() as
+// "{rawName} • {normalizePaymentType(...)}" - that second part is an
+// internal canonical matching key ("creditcard", "netbanking", never
+// meant for display), not display copy, confirmed live (2026-08-08:
+// showed "IDBI Bank • creditcard" verbatim in production). Rebuilds a
+// clean label from the SAME selected method's own already-correct
+// .name/.type fields instead of trusting that string's formatting.
+function displayLabelForAppliedDeal(bestDeal, selectedPaymentMethods) {
+  const rawLabel = bestDeal?.paymentLabel || "";
+  const namePart = rawLabel.split("•")[0].trim();
+  const matched = (selectedPaymentMethods || []).find((pm) => pm?.name === namePart);
+  if (matched) return `${matched.name} ${matched.type}`.trim();
+  return namePart || "Your payment method";
+}
+
 function resolvePrimaryDecodeMessage({
   selectedPaymentMethods,
   outboundFlights,
@@ -8913,7 +8928,7 @@ function resolvePrimaryDecodeMessage({
   const genericDealApplied = candidateDeals.some((d) => d?.applied && d?.offerDisplayType === "applied_offer_rule");
 
   if (tier1Deal) {
-    const bankLabel = tier1Deal.paymentLabel || "Your payment method";
+    const bankLabel = displayLabelForAppliedDeal(tier1Deal, selectedPaymentMethods);
     const portal = tier1Deal.portal || "the portal";
     const discountPhrase = formatDiscountPhrase(tier1Deal);
 
