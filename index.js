@@ -8781,6 +8781,231 @@ async function buildTimingInsights({
   ];
 }
 
+// ---------- Sairro decode: primary message priority hierarchy ----------
+// Unifies what used to be two independent, always-visible sections
+// (Phase 1/2 "suggestions" and Phase 3 "timing insights") into one
+// ordered message, per founder direction (2026-08-08):
+//   Tier 1 - a live offer for exactly the payment method(s) selected
+//   Tier 2 - a better SAME-BANK option addable right now (EMI/debit/net
+//            banking, or a bank-linked UPI/wallet - never an unrelated
+//            bank, and never a generic UPI/Wallet suggestion)
+//   Tier 3 - the selected method's OWN offer unlocking soon
+//   Tier 4 - fallback reassurance, so the message never ends on silence
+// Urgency (an offer ending imminently) is NOT a separate tier - it's a
+// color/warning variant of whichever tier it belongs to. See
+// DECISIONS.md ("Sairro decode priority hierarchy") for the full
+// rationale and the founder conversation that shaped these rules.
+
+// Traces a slim bestDeal (from /search, already fully computed) back to
+// its source offer_rules document via coupon code / title, purely to
+// read a field the slim response never carried (the structured expiry
+// date) - never re-derives pricing, which stays trusted as-is.
+function findOfferSourceDoc(bestDeal, offers) {
+  if (!bestDeal || !Array.isArray(offers)) return null;
+  const code = bestDeal.code || null;
+  const title = bestDeal.title || null;
+  if (!code && !title) return null;
+
+  return offers.find((o) => {
+    const oCode = o?.couponCode || o?.code || o?.parsedFields?.couponCode || o?.parsedFields?.code || null;
+    if (code && oCode && String(oCode).toLowerCase() === String(code).toLowerCase()) return true;
+    const oTitle = o?.title || null;
+    if (title && oTitle && String(oTitle) === String(title)) return true;
+    return false;
+  }) || null;
+}
+
+// Only surfaced when genuinely imminent (founder direction: within 2-3
+// days) - a distant expiry date is noise, not something worth
+// interrupting the message for.
+function findImminentExpiry(bestDeal, offers, todayDateOnly, maxDays = 3) {
+  const offer = findOfferSourceDoc(bestDeal, offers);
+  if (!offer) return null;
+
+  const toDateRaw =
+    offer?.validityPeriod?.to ||
+    offer?.parsedFields?.validityPeriod?.to ||
+    offer?.validityPeriod?.endDate ||
+    offer?.parsedFields?.validityPeriod?.endDate ||
+    null;
+  if (!toDateRaw) return null;
+
+  const expiryDay = getTimezoneDateOnly(new Date(toDateRaw));
+  if (isNaN(expiryDay.getTime())) return null;
+
+  const daysUntil = Math.round((expiryDay.getTime() - todayDateOnly.getTime()) / 86400000);
+  if (daysUntil < 0 || daysUntil > maxDays) return null;
+
+  return { daysUntil, expiryDateISO: expiryDay.toISOString().slice(0, 10) };
+}
+
+// Finds whichever already-loaded flight (outbound, and return if
+// round-trip) achieves the current best combined price, and returns its
+// bestDeal - this is already fully computed by /search; nothing here
+// re-prices anything.
+function findBestDealsForCurrentPrice(outboundFlights, returnFlights, tripType) {
+  const bestOutbound = outboundFlights.length
+    ? outboundFlights.reduce((a, b) => (bestFinalPriceOf(a) <= bestFinalPriceOf(b) ? a : b))
+    : null;
+  const bestReturn = (tripType === "round-trip" && returnFlights.length)
+    ? returnFlights.reduce((a, b) => (bestFinalPriceOf(a) <= bestFinalPriceOf(b) ? a : b))
+    : null;
+  return { outboundBestDeal: bestOutbound?.bestDeal || null, returnBestDeal: bestReturn?.bestDeal || null };
+}
+
+function formatDiscountPhrase(bestDeal) {
+  if (bestDeal?.appliedDiscountText) return bestDeal.appliedDiscountText;
+  if (Number.isFinite(bestDeal?.actualDiscount) && bestDeal.actualDiscount > 0) {
+    return `₹${Math.round(bestDeal.actualDiscount).toLocaleString("en-IN")} off`;
+  }
+  return "a lower price";
+}
+
+function resolvePrimaryDecodeMessage({
+  selectedPaymentMethods,
+  outboundFlights,
+  returnFlights,
+  tripType,
+  suggestions,
+  timingInsights,
+  offers
+}) {
+  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) {
+    // Nothing selected yet - the existing "add a payment method" prompt
+    // already covers this; this hierarchy only applies once there's an
+    // actual selection to evaluate.
+    return null;
+  }
+
+  const todayDateOnly = getTimezoneDateOnly(new Date());
+  const { outboundBestDeal, returnBestDeal } = findBestDealsForCurrentPrice(outboundFlights, returnFlights, tripType);
+
+  // A round trip's two legs can win via different offers/portals, but the
+  // message only ever names one - outbound (the leg shown first) wins
+  // ties, matching what the user sees at the top of the results.
+  const candidateDeals = [outboundBestDeal, returnBestDeal].filter(Boolean);
+  const tier1Deal = candidateDeals.find((d) => d?.applied && d?.offerDisplayType === "applied_payment_offer") || null;
+
+  // Tier 2: the best genuinely-same-bank candidate, already ranked by the
+  // existing suggestion engine (candidateRelevanceTier === 1 covers same
+  // bank in ANY form - EMI/debit/net banking, or a bank-linked UPI/wallet
+  // if one exists) - generic UPI/Wallet suggestions unrelated to a
+  // selected bank are deliberately excluded from this hierarchy.
+  const tier2 = (suggestions || []).find((s) => s.relevanceTier === 1) || null;
+
+  // Tier 3: the selected method's OWN offer unlocking soon - cross-
+  // referenced against selectedPaymentMethods since buildTimingInsights's
+  // returned objects don't carry an isSelected flag directly. Restricted
+  // to the "future" family (URGENT_TIMING_TYPES excluded) so it never
+  // overlaps with the urgency check just below, which already covers the
+  // "ending soon" case for whatever Tier 1 is currently winning.
+  const tier3 = (timingInsights || []).find((t) =>
+    !URGENT_TIMING_TYPES.has(t.type) &&
+    selectedPaymentMethods.some((pm) => pm.type === t.paymentMethod?.type && pm.name === t.paymentMethod?.name)
+  ) || null;
+
+  // Urgency is a color/warning variant of Tier 1, not a separate tier.
+  const tier1Expiry = tier1Deal ? findImminentExpiry(tier1Deal, offers, todayDateOnly) : null;
+  const tier1Urgent = !!tier1Expiry;
+
+  // Tier 4 signal: something WAS applied, just not payment-specific - the
+  // reassurance line only makes this claim when it's actually true.
+  const genericDealApplied = candidateDeals.some((d) => d?.applied && d?.offerDisplayType === "applied_offer_rule");
+
+  if (tier1Deal) {
+    const bankLabel = tier1Deal.paymentLabel || "Your payment method";
+    const portal = tier1Deal.portal || "the portal";
+    const discountPhrase = formatDiscountPhrase(tier1Deal);
+
+    const message = {
+      tier: 1,
+      urgent: tier1Urgent,
+      heading: `${bankLabel} gets you the best price`,
+      message: `${discountPhrase} on ${portal}.`,
+      warning: tier1Urgent
+        ? (tier1Expiry.daysUntil === 0
+            ? "This offer ends today - book now to lock it in."
+            : `This offer ends ${tier1Expiry.expiryDateISO} - book soon to lock it in.`)
+        : null,
+      tip: null,
+      cta: null,
+      upsell: null,
+      mirror: null
+    };
+
+    // Tier 2 rides alongside Tier 1 when it's genuinely better - an
+    // upsell, never a replacement for the plain Tier 1 statement above.
+    if (tier2 && tier2.additionalSaving > 0) {
+      message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
+      message.upsell = tier2.message || `${tier2.paymentMethod?.name || "This option"} could save ₹${tier2.additionalSaving} instead.`;
+    } else if (tier3 && !tier1Urgent) {
+      // The "mirror" case: today's pick already wins, but a different
+      // variant of the SAME selected method (e.g. non-EMI vs EMI)
+      // genuinely unlocks soon - worth a mention, not an upsell push.
+      message.mirror = tier3.message || tier3.heading;
+    }
+
+    return message;
+  }
+
+  // No Tier 1 match - Tier 3 (the selected method unlocking soon), with
+  // Tier 2 offered alongside if it exists, else Tier 4 reassurance.
+  if (tier3) {
+    const message = {
+      tier: 3,
+      urgent: false,
+      heading: `${tier3.paymentMethod?.name || "Your offer"} isn't live yet`,
+      message: tier3.message || tier3.heading,
+      warning: "Estimated only - the fare shown today may not match the price then.",
+      tip: null,
+      cta: null,
+      upsell: null,
+      mirror: null
+    };
+
+    if (tier2 && tier2.additionalSaving > 0) {
+      message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
+    } else if (genericDealApplied) {
+      message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
+    }
+
+    return message;
+  }
+
+  // Tier 2 alone - selected method has nothing live or upcoming, but a
+  // same-bank alternative genuinely does.
+  if (tier2 && tier2.additionalSaving > 0) {
+    return {
+      tier: 2,
+      urgent: false,
+      heading: tier2.heading || `${tier2.paymentMethod?.name || "A nearby option"} could save you money`,
+      message: tier2.message || `Save ₹${tier2.additionalSaving} with ${tier2.paymentMethod?.name || "this option"}.`,
+      warning: null,
+      tip: null,
+      cta: { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod },
+      upsell: null,
+      mirror: null
+    };
+  }
+
+  // Tier 4 alone - nothing above found anything for the selected method(s).
+  const methodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
+  const methodLabel = methodNames.length ? methodNames.join(" or ") : "your selected method";
+
+  return {
+    tier: 4,
+    urgent: false,
+    heading: `No ${methodLabel} offers right now`,
+    message: `We checked ${methodLabel}'s credit card, debit card, and EMI options - nothing live at the moment.`,
+    warning: null,
+    tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
+    cta: null,
+    ctaGeneric: "Add other payment options",
+    upsell: null,
+    mirror: null
+  };
+}
+
 // Everything /payment-suggestions actually computes, minus request
 // validation and the cache/dedup lookup around it - factored out so
 // /search can also call it (see getOrComputePaymentSuggestions and the
@@ -9094,6 +9319,29 @@ async function computePaymentSuggestionsCore(v, cfg) {
       timingInsights = [];
     }
     mark("timingInsightsMs");
+
+    // Sairro decode priority hierarchy (2026-08-08) - reuses suggestions/
+    // timingInsights/offers already computed above, never re-prices
+    // anything. Wrapped defensively like timing insights: a failure here
+    // degrades to null (frontend falls back to its prior rendering) and
+    // never breaks suggestions/timingInsights, which are already done.
+    let primaryDecodeMessage = null;
+    try {
+      primaryDecodeMessage = resolvePrimaryDecodeMessage({
+        selectedPaymentMethods,
+        outboundFlights: v.outboundFlights,
+        returnFlights: v.returnFlights,
+        tripType: v.tripType,
+        suggestions,
+        timingInsights,
+        offers
+      });
+    } catch (primaryMsgErr) {
+      console.error("[SkyDeal] primary decode message failed", primaryMsgErr);
+      primaryDecodeMessage = null;
+    }
+    mark("primaryDecodeMessageMs");
+
     timings.totalMs = Date.now() - startedAt;
     timings.candidatesConsidered = relevantCandidates.length;
     timings.flightsTested = flightsTested;
@@ -9104,6 +9352,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
     suggestions,
     summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
     timingInsights,
+    primaryDecodeMessage,
     meta: { truncated, timings }
   };
 }
