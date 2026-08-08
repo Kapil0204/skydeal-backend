@@ -3673,6 +3673,44 @@ function getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods) {
 
   return null;
 }
+
+const PAYMENT_TYPE_DISPLAY_LABEL = {
+  emi: "EMI",
+  netbanking: "Net Banking",
+  creditcard: "Credit Card",
+  debitcard: "Debit Card",
+  upi: "UPI",
+  wallet: "Wallet",
+};
+
+// Same matching as getMatchedSelectedPaymentLabel, but returns the matched
+// selected-method's own clean {name, type} instead of a pre-joined string -
+// needed because a bank can be selected as MULTIPLE variants at once (e.g.
+// "ICICI Bank" as both Credit Card and EMI), and only this offer-vs-offerPM
+// match tells us which variant actually won, not just which name matches.
+function getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) {
+  if (!Array.isArray(selectedPaymentMethods) || selectedPaymentMethods.length === 0) return null;
+
+  const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+  if (offerPMs.length === 0) return null;
+
+  const sel = selectedPaymentMethods.map((x) => {
+    const t = normalizePaymentType(x?.type || x?.name || "", x?.raw || "");
+    const nm = normalizeBankName(x?.name || x?.bank || x?.raw || "");
+    return { type: t, name: nm, rawName: x?.name || x?.bank || x?.raw || "" };
+  });
+
+  for (const pm of offerPMs) {
+    const t = normalizePaymentType(pm.type, pm.raw || "");
+    const name = normalizeBankName(pm.bank || pm.name || "");
+    const match = sel.find((s) => s.type === t && (!s.name || s.name === name));
+    if (match) {
+      return { name: match.rawName, type: PAYMENT_TYPE_DISPLAY_LABEL[match.type] || match.type };
+    }
+  }
+
+  return null;
+}
 function getInfoOfferDisplayLabel(offer, selectedPaymentMethods = []) {
   const exact = getMatchedSelectedPaymentLabel(offer, selectedPaymentMethods);
   if (exact) return "Exact match";
@@ -8205,10 +8243,15 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
     .slice(0, cfg.maxCandidatesPerRequest);
 }
 
+// Always names the exact instrument (bank + type), not just the bank - a
+// user with a bank selected as more than one variant (e.g. "ICICI Bank" as
+// both Credit Card and EMI) can't tell which one a message is about
+// otherwise (confirmed live 2026-08-08: copy said "ICICI Bank" for both).
 function paymentMethodShortLabel(pm) {
   if (pm.type === "UPI") return pm.provider || pm.name || "UPI";
-  if (pm.type === "EMI") return `${pm.name} EMI`;
-  return pm.name;
+  if (!pm.name) return pm.type || "this option";
+  if (!pm.type) return pm.name;
+  return `${pm.name} ${pm.type}`.trim();
 }
 
 // Stable, machine-readable reason per suggestion (Phase 2) - a display
@@ -8865,14 +8908,24 @@ function formatDiscountPhrase(bestDeal) {
 // "{rawName} • {normalizePaymentType(...)}" - that second part is an
 // internal canonical matching key ("creditcard", "netbanking", never
 // meant for display), not display copy, confirmed live (2026-08-08:
-// showed "IDBI Bank • creditcard" verbatim in production). Rebuilds a
-// clean label from the SAME selected method's own already-correct
-// .name/.type fields instead of trusting that string's formatting.
-function displayLabelForAppliedDeal(bestDeal, selectedPaymentMethods) {
+// showed "IDBI Bank • creditcard" verbatim in production).
+//
+// Rebuilds a clean label from the SAME selected method's own
+// already-correct .name/.type fields - via getMatchedSelectedPaymentMethod,
+// which re-matches against the actual winning offer document, not just a
+// same-name lookup. A same-name lookup alone is wrong whenever a bank is
+// selected as more than one variant at once (e.g. "ICICI Bank" as both
+// Credit Card and EMI): it would silently return whichever variant happens
+// to be listed first, even when the OTHER variant is the one that actually
+// won (confirmed live 2026-08-08: EMI won the price but the card read
+// "ICICI Bank Credit Card").
+function displayLabelForAppliedDeal(bestDeal, selectedPaymentMethods, offers) {
+  const offer = findOfferSourceDoc(bestDeal, offers);
+  const matched = offer ? getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) : null;
+  if (matched?.name) return `${matched.name} ${matched.type}`.trim();
+
   const rawLabel = bestDeal?.paymentLabel || "";
   const namePart = rawLabel.split("•")[0].trim();
-  const matched = (selectedPaymentMethods || []).find((pm) => pm?.name === namePart);
-  if (matched) return `${matched.name} ${matched.type}`.trim();
   return namePart || "Your payment method";
 }
 
@@ -8928,7 +8981,7 @@ function resolvePrimaryDecodeMessage({
   const genericDealApplied = candidateDeals.some((d) => d?.applied && d?.offerDisplayType === "applied_offer_rule");
 
   if (tier1Deal) {
-    const bankLabel = displayLabelForAppliedDeal(tier1Deal, selectedPaymentMethods);
+    const bankLabel = displayLabelForAppliedDeal(tier1Deal, selectedPaymentMethods, offers);
     const portal = tier1Deal.portal || "the portal";
     const discountPhrase = formatDiscountPhrase(tier1Deal);
 
@@ -8965,11 +9018,17 @@ function resolvePrimaryDecodeMessage({
 
   // No Tier 1 match - Tier 3 (the selected method unlocking soon), with
   // Tier 2 offered alongside if it exists, else Tier 4 reassurance.
+  //
+  // tier3.heading (from buildTimingInsightCopy) is already the specific,
+  // date-aware line - "Your ICICI Bank Credit Card offer becomes available
+  // Monday" - built from a real day-eligibility scan, not a guess. A
+  // generic "X isn't live yet" replacement here throws that date away and
+  // tells the user nothing they can act on (confirmed live 2026-08-08).
   if (tier3) {
     const message = {
       tier: 3,
       urgent: false,
-      heading: `${tier3.paymentMethod?.name || "Your offer"} isn't live yet`,
+      heading: tier3.heading || `${tier3.paymentMethod?.name || "Your offer"} isn't live yet`,
       message: tier3.message || tier3.heading,
       warning: "Estimated only - the fare shown today may not match the price then.",
       tip: null,
