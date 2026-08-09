@@ -8904,6 +8904,20 @@ function formatDiscountPhrase(bestDeal) {
   return "a lower price";
 }
 
+// tier2.message (from buildSuggestionCopy, the pre-hierarchy suggestion-card
+// engine) reads "{X} gives a better offer than your selected {Y} and lowers
+// {N} flight options" - the exact "lowers N flight options" framing product
+// had already ruled out as confusing (it reads as fewer results, not a
+// lower price - see renderGuideSuggestionCardHtml's comment), plus a
+// redundant "than your selected X" clause. Using tier2.message as this
+// hierarchy's upsell/body text let that old copy straight through untouched
+// (founder catch, 2026-08-09). This composes one plain sentence instead -
+// the exact instrument name and the rupee saving, nothing else.
+function formatTier2Upsell(tier2) {
+  const label = paymentMethodShortLabel(tier2?.paymentMethod || {});
+  return `${label} gives you a better offer - save about ₹${tier2?.additionalSaving} more.`;
+}
+
 // bestDeal.paymentLabel is built by getMatchedSelectedPaymentLabel() as
 // "{rawName} • {normalizePaymentType(...)}" - that second part is an
 // internal canonical matching key ("creditcard", "netbanking", never
@@ -9005,7 +9019,7 @@ function resolvePrimaryDecodeMessage({
     // upsell, never a replacement for the plain Tier 1 statement above.
     if (tier2 && tier2.additionalSaving > 0) {
       message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
-      message.upsell = tier2.message || `${tier2.paymentMethod?.name || "This option"} could save ₹${tier2.additionalSaving} instead.`;
+      message.upsell = formatTier2Upsell(tier2);
     } else if (tier3 && !tier1Urgent) {
       // The "mirror" case: today's pick already wins, but a different
       // variant of the SAME selected method (e.g. non-EMI vs EMI)
@@ -9044,7 +9058,7 @@ function resolvePrimaryDecodeMessage({
       // card's future date was mentioned). Same upsell phrasing as the
       // Tier 1 branch, so this always names the live saving being offered.
       message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
-      message.upsell = tier2.message || `${tier2.paymentMethod?.name || "This option"} already has a live offer - save ₹${tier2.additionalSaving} now instead of waiting.`;
+      message.upsell = formatTier2Upsell(tier2);
     } else if (genericDealApplied) {
       message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
     }
@@ -9059,7 +9073,7 @@ function resolvePrimaryDecodeMessage({
       tier: 2,
       urgent: false,
       heading: tier2.heading || `${tier2.paymentMethod?.name || "A nearby option"} could save you money`,
-      message: tier2.message || `Save ₹${tier2.additionalSaving} with ${tier2.paymentMethod?.name || "this option"}.`,
+      message: formatTier2Upsell(tier2),
       warning: null,
       tip: null,
       cta: { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod },
