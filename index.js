@@ -9038,7 +9038,13 @@ function resolvePrimaryDecodeMessage({
     };
 
     if (tier2 && tier2.additionalSaving > 0) {
+      // A bare CTA button with no explanation left the user guessing why
+      // they'd bother (founder catch, 2026-08-09: EMI already had a live
+      // offer right now, but nothing on the card said so - only the credit
+      // card's future date was mentioned). Same upsell phrasing as the
+      // Tier 1 branch, so this always names the live saving being offered.
       message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
+      message.upsell = tier2.message || `${tier2.paymentMethod?.name || "This option"} already has a live offer - save ₹${tier2.additionalSaving} now instead of waiting.`;
     } else if (genericDealApplied) {
       message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
     }
