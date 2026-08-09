@@ -9055,8 +9055,21 @@ function resolvePrimaryDecodeMessage({
   const tier1Urgent = !!tier1Expiry;
 
   // Tier 4 signal: something WAS applied, just not payment-specific - the
-  // reassurance line only makes this claim when it's actually true.
-  const genericDealApplied = candidateDeals.some((d) => d?.applied && d?.offerDisplayType === "applied_offer_rule");
+  // reassurance line only makes this claim when it's actually true. Covers
+  // both a real DB-backed offer rule AND a generic checkout-coupon display
+  // estimate (Yatra FREEFLY etc, built by findGenericDisplayForPortal) -
+  // the latter is flagged isDisplayOnly/non-exact but is still genuinely
+  // reflected in the price shown on the flight card, so it's just as true
+  // a "we already applied something" claim (founder catch, 2026-08-09:
+  // ICICI-only search had a live Yatra FREEFLY discount on the card, but
+  // the decode message never mentioned it because this check only ever
+  // matched "applied_offer_rule", a string real generic-display offers
+  // don't use).
+  const genericDealApplied = candidateDeals.some((d) => d?.applied && (
+    d?.offerDisplayType === "applied_offer_rule" ||
+    d?.offerDisplayType === "conservative_generic_display_offer" ||
+    d?.offerDisplayType === "verified_generic_checkout_coupon"
+  ));
 
   if (tier1Deal) {
     const tier1Match = resolveTier1Match(tier1Deal, selectedPaymentMethods, offers);
@@ -9202,6 +9215,14 @@ function resolvePrimaryDecodeMessage({
       message.skip = "I'll wait";
       if (tier3Pct != null && pct != null) {
         message.sticky = `Opens ${whenPhrase} for ${tier3Pct} off — or save ${pct}% today with ${label}`;
+      }
+      // A same-bank EMI CTA and a generic site discount aren't mutually
+      // exclusive facts - both can genuinely be true at once (founder
+      // catch, 2026-08-09: exact scenario above), so this used to be an
+      // "else if" that silently dropped the site-discount tip whenever a
+      // Tier 2 CTA was also shown.
+      if (genericDealApplied) {
+        message.tip = "Not into EMI? A site discount's already applied either way.";
       }
     } else if (genericDealApplied) {
       // No same-bank alternative either - offer the one real next step
