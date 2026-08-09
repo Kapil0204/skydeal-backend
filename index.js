@@ -8535,7 +8535,13 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
       message: `It's saving you ₹${potentialSaving} right now, but won't work tomorrow.`,
       label: "Ends today",
       disclaimer: null,
-      estimatedFinalPrice: currentBestPrice
+      estimatedFinalPrice: currentBestPrice,
+      // Raw numbers, not just the pre-formatted rupee string above - so
+      // callers that want a percentage (the decode hierarchy's own copy,
+      // which talks in "N% off" rather than rupees) don't have to parse
+      // one back out of message text.
+      potentialSaving,
+      currentBestPrice
     };
   }
 
@@ -8546,7 +8552,9 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
       message: `You could save about ₹${potentialSaving} with your ${shortLabel}, but only if you book before then.`,
       label: `Book by ${formatTimingDate(lastUsableDay, "short")}`,
       disclaimer: null,
-      estimatedFinalPrice: currentBestPrice
+      estimatedFinalPrice: currentBestPrice,
+      potentialSaving,
+      currentBestPrice
     };
   }
 
@@ -8575,7 +8583,9 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
       message,
       label: `Available ${when}`,
       disclaimer: "Prices may change before then.",
-      estimatedFinalPrice: hypotheticalBestPrice
+      estimatedFinalPrice: hypotheticalBestPrice,
+      potentialSaving,
+      currentBestPrice
     };
   }
 
@@ -8705,6 +8715,7 @@ async function buildTimingInsights({
       availableFrom: isEndingFamily ? todayDateOnly.toISOString().slice(0, 10) : evalDay.toISOString().slice(0, 10),
       availableUntil: isEndingFamily ? addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1).toISOString().slice(0, 10) : null,
       potentialSaving,
+      currentBestPrice,
       estimatedFinalPrice: copy.estimatedFinalPrice,
       isOfferOnlyEstimate: !isEndingFamily,
       heading: copy.heading,
@@ -8904,18 +8915,49 @@ function formatDiscountPhrase(bestDeal) {
   return "a lower price";
 }
 
-// tier2.message (from buildSuggestionCopy, the pre-hierarchy suggestion-card
-// engine) reads "{X} gives a better offer than your selected {Y} and lowers
-// {N} flight options" - the exact "lowers N flight options" framing product
-// had already ruled out as confusing (it reads as fewer results, not a
-// lower price - see renderGuideSuggestionCardHtml's comment), plus a
-// redundant "than your selected X" clause. Using tier2.message as this
-// hierarchy's upsell/body text let that old copy straight through untouched
-// (founder catch, 2026-08-09). This composes one plain sentence instead -
-// the exact instrument name and the rupee saving, nothing else.
-function formatTier2Upsell(tier2) {
+// The agreed decode-hierarchy mockup (2026-08-08, decode_priority_hierarchy_mock.html)
+// talks in percentages ("10% off", "save 15% today"), never rupees - a
+// discount is easier to size up at a glance as a percent than as a bare
+// rupee figure without its base price for context. Returns null (never a
+// misleading 0%/NaN) when there isn't a clean base price to divide by, so
+// callers can fall back to the rupee phrasing instead.
+function computeDiscountPercent(basePrice, discountAmount) {
+  const base = Number(basePrice);
+  const discount = Number(discountAmount);
+  if (!(Number.isFinite(base) && base > 0 && Number.isFinite(discount) && discount > 0)) return null;
+  const pct = Math.round((discount / base) * 100);
+  return pct > 0 ? pct : null;
+}
+
+function formatDiscountPercentPhrase(bestDeal) {
+  const pct = computeDiscountPercent(bestDeal?.basePrice, bestDeal?.actualDiscount);
+  if (pct != null) return `${pct}% off`;
+  // Flat-amount offers with no clean base (rare) - a rupee figure is still
+  // honest here, just not the preferred phrasing.
+  return formatDiscountPhrase(bestDeal);
+}
+
+// tier2 (a Phase 1/2 suggestion) carries additionalSaving/newBestPrice as
+// raw rupee numbers - newBestPrice + additionalSaving is the price WITHOUT
+// this option, i.e. the base a "% off" should be computed against.
+function tier2PercentAndLabel(tier2) {
   const label = paymentMethodShortLabel(tier2?.paymentMethod || {});
-  return `${label} gives you a better offer - save about ₹${tier2?.additionalSaving} more.`;
+  const saving = Number(tier2?.additionalSaving);
+  const newBest = Number(tier2?.newBestPrice);
+  if (Number.isFinite(saving) && saving > 0 && Number.isFinite(newBest)) {
+    const pct = computeDiscountPercent(newBest + saving, saving);
+    if (pct != null) return { label, pct };
+  }
+  return { label, pct: null };
+}
+
+// A future timing insight (Tier 3) stores its rupee saving pre-formatted
+// into .message text - this pulls the raw numbers buildTimingInsightCopy
+// also returns (potentialSaving, currentBestPrice) to compute the same
+// kind of percentage instead.
+function tier3PercentPhrase(tier3) {
+  const pct = computeDiscountPercent(tier3?.currentBestPrice, tier3?.potentialSaving);
+  return pct != null ? `${pct}%` : null;
 }
 
 // bestDeal.paymentLabel is built by getMatchedSelectedPaymentLabel() as
@@ -8924,23 +8966,27 @@ function formatTier2Upsell(tier2) {
 // meant for display), not display copy, confirmed live (2026-08-08:
 // showed "IDBI Bank • creditcard" verbatim in production).
 //
-// Rebuilds a clean label from the SAME selected method's own
-// already-correct .name/.type fields - via getMatchedSelectedPaymentMethod,
-// which re-matches against the actual winning offer document, not just a
+// Resolves a clean {name, type, label} from the SAME selected method's own
+// already-correct fields - via getMatchedSelectedPaymentMethod, which
+// re-matches against the actual winning offer document, not just a
 // same-name lookup. A same-name lookup alone is wrong whenever a bank is
 // selected as more than one variant at once (e.g. "ICICI Bank" as both
 // Credit Card and EMI): it would silently return whichever variant happens
 // to be listed first, even when the OTHER variant is the one that actually
 // won (confirmed live 2026-08-08: EMI won the price but the card read
-// "ICICI Bank Credit Card").
-function displayLabelForAppliedDeal(bestDeal, selectedPaymentMethods, offers) {
+// "ICICI Bank Credit Card"). Returning the raw {name} (not just a joined
+// string) also lets callers check whether a Tier 2 candidate is the SAME
+// bank the user already picked, or a genuinely different one.
+function resolveTier1Match(bestDeal, selectedPaymentMethods, offers) {
   const offer = findOfferSourceDoc(bestDeal, offers);
   const matched = offer ? getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) : null;
-  if (matched?.name) return `${matched.name} ${matched.type}`.trim();
+  if (matched?.name) {
+    return { name: matched.name, type: matched.type, label: `${matched.name} ${matched.type}`.trim() };
+  }
 
   const rawLabel = bestDeal?.paymentLabel || "";
   const namePart = rawLabel.split("•")[0].trim();
-  return namePart || "Your payment method";
+  return { name: namePart || null, type: null, label: namePart || "Your payment method" };
 }
 
 function resolvePrimaryDecodeMessage({
@@ -8995,14 +9041,18 @@ function resolvePrimaryDecodeMessage({
   const genericDealApplied = candidateDeals.some((d) => d?.applied && d?.offerDisplayType === "applied_offer_rule");
 
   if (tier1Deal) {
-    const bankLabel = displayLabelForAppliedDeal(tier1Deal, selectedPaymentMethods, offers);
+    const tier1Match = resolveTier1Match(tier1Deal, selectedPaymentMethods, offers);
+    const bankLabel = tier1Match.label;
     const portal = tier1Deal.portal || "the portal";
-    const discountPhrase = formatDiscountPhrase(tier1Deal);
+    const tier1Pct = computeDiscountPercent(tier1Deal.basePrice, tier1Deal.actualDiscount);
+    const discountPhrase = formatDiscountPercentPhrase(tier1Deal);
 
     const message = {
       tier: 1,
       urgent: tier1Urgent,
-      heading: `${bankLabel} gets you the best price`,
+      tag: tier1Urgent ? "Same bank • ends today" : "Same bank • live today",
+      tagVariant: tier1Urgent ? "urgent" : "live",
+      heading: `Your ${bankLabel} gets you the best price`,
       message: `${discountPhrase} on ${portal}.`,
       warning: tier1Urgent
         ? (tier1Expiry.daysUntil === 0
@@ -9011,20 +9061,47 @@ function resolvePrimaryDecodeMessage({
         : null,
       tip: null,
       cta: null,
+      skip: null,
       upsell: null,
       mirror: null
     };
 
-    // Tier 2 rides alongside Tier 1 when it's genuinely better - an
-    // upsell, never a replacement for the plain Tier 1 statement above.
-    if (tier2 && tier2.additionalSaving > 0) {
-      message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
-      message.upsell = formatTier2Upsell(tier2);
+    // Whether Tier 2 is a different variant of the SAME bank the user
+    // already matched on (e.g. Credit Card vs EMI, both selected) or a
+    // genuinely different bank/card also selected changes how this should
+    // read: same bank is a quiet FYI about their own card - they'd just be
+    // re-choosing between two things they already picked, not adding
+    // anything new, so no CTA. A different selected bank is a real,
+    // actionable choice worth a button.
+    const sameBankAsTier1 = !!(tier2 && tier1Match.name && tier2.paymentMethod?.name
+      && normalizeBankName(tier2.paymentMethod.name) === normalizeBankName(tier1Match.name));
+
+    if (tier2 && tier2.additionalSaving > 0 && sameBankAsTier1) {
+      const { label, pct: tier2Pct } = tier2PercentAndLabel(tier2);
+      const promptWord = tier2.paymentMethod?.type || "a different way to pay";
+      if (tier1Pct != null) message.heading = `Your ${bankLabel} already saves you ${tier1Pct}%`;
+      message.message = tier2Pct != null
+        ? `Comfortable with ${promptWord}? ${label} saves ${tier2Pct}% instead.`
+        : `Comfortable with ${promptWord}? ${label} could save you more.`;
+    } else if (tier2 && tier2.additionalSaving > 0) {
+      const { label, pct } = tier2PercentAndLabel(tier2);
+      message.cta = {
+        label: pct != null ? `Add ${label} (save ${pct}% instead)` : (tier2.primaryActionLabel || `Add ${label}`),
+        paymentMethod: tier2.paymentMethod
+      };
+      message.skip = "Not for me";
     } else if (tier3 && !tier1Urgent) {
       // The "mirror" case: today's pick already wins, but a different
       // variant of the SAME selected method (e.g. non-EMI vs EMI)
       // genuinely unlocks soon - worth a mention, not an upsell push.
-      message.mirror = tier3.message || tier3.heading;
+      const tier3Pct = tier3PercentPhrase(tier3);
+      const tier3Label = paymentMethodShortLabel(tier3.paymentMethod || {});
+      const tier3When = tier3.label ? tier3.label.replace(/^Available\s+/, "") : "soon";
+      if (tier1Pct != null) message.heading = `Your ${bankLabel} already saves you ${tier1Pct}%`;
+      message.mirror = tier3Pct != null
+        ? `Prefer not to use ${tier1Match.type || "this method"}? A ${tier3Label} offer opens ${tier3When}, saving ${tier3Pct}.`
+        : (tier3.message || tier3.heading);
+      message.warning = `Fare may change before ${tier3When} - this isn't a locked-in price.`;
     }
 
     return message;
@@ -9032,35 +9109,51 @@ function resolvePrimaryDecodeMessage({
 
   // No Tier 1 match - Tier 3 (the selected method unlocking soon), with
   // Tier 2 offered alongside if it exists, else Tier 4 reassurance.
-  //
-  // tier3.heading (from buildTimingInsightCopy) is already the specific,
-  // date-aware line - "Your ICICI Bank Credit Card offer becomes available
-  // Monday" - built from a real day-eligibility scan, not a guess. A
-  // generic "X isn't live yet" replacement here throws that date away and
-  // tells the user nothing they can act on (confirmed live 2026-08-08).
   if (tier3) {
+    const tier3Tag = tier3.label ? tier3.label.replace(/^Available\s+/, "Opens ") : "Opens soon";
+    const tier3Pct = tier3PercentPhrase(tier3);
+    const tier3Label = paymentMethodShortLabel(tier3.paymentMethod || {});
+    const whenMatch = /^Opens\s+(.+)/.exec(tier3Tag);
+    const whenPhrase = whenMatch ? whenMatch[1] : "soon";
+    const hasTier2 = !!(tier2 && tier2.additionalSaving > 0);
+
     const message = {
       tier: 3,
       urgent: false,
-      heading: tier3.heading || `${tier3.paymentMethod?.name || "Your offer"} isn't live yet`,
-      message: tier3.message || tier3.heading,
-      warning: "Estimated only - the fare shown today may not match the price then.",
+      tag: tier3Tag,
+      tagVariant: "warn",
+      heading: `Your ${tier3Label} offer isn't live yet`,
+      // The percent claim only appears alongside a genuine live
+      // alternative (hasTier2) - without one, all this can honestly say
+      // is when it opens, not what it's worth doing about it today.
+      message: hasTier2 && tier3Pct != null
+        ? `It opens ${whenPhrase} - you'd save ${tier3Pct} then, though the fare may change before you book.`
+        : `It opens ${whenPhrase}, though the fare may change before you book.`,
+      warning: `Estimated only - the fare shown today may not match ${whenPhrase}'s price.`,
       tip: null,
       cta: null,
+      skip: null,
+      ctaGeneric: null,
       upsell: null,
       mirror: null
     };
 
-    if (tier2 && tier2.additionalSaving > 0) {
+    if (hasTier2) {
       // A bare CTA button with no explanation left the user guessing why
       // they'd bother (founder catch, 2026-08-09: EMI already had a live
       // offer right now, but nothing on the card said so - only the credit
-      // card's future date was mentioned). Same upsell phrasing as the
-      // Tier 1 branch, so this always names the live saving being offered.
-      message.cta = { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod };
-      message.upsell = formatTier2Upsell(tier2);
+      // card's future date was mentioned).
+      const { label, pct } = tier2PercentAndLabel(tier2);
+      message.cta = {
+        label: pct != null ? `Add ${label} (save ${pct}% today)` : (tier2.primaryActionLabel || `Add ${label}`),
+        paymentMethod: tier2.paymentMethod
+      };
+      message.skip = "I'll wait";
     } else if (genericDealApplied) {
+      // No same-bank alternative either - offer the one real next step
+      // (a different card/UPI/wallet entirely) instead of a dead end.
       message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
+      message.ctaGeneric = "Add other payment options";
     }
 
     return message;
@@ -9069,14 +9162,20 @@ function resolvePrimaryDecodeMessage({
   // Tier 2 alone - selected method has nothing live or upcoming, but a
   // same-bank alternative genuinely does.
   if (tier2 && tier2.additionalSaving > 0) {
+    const { label, pct } = tier2PercentAndLabel(tier2);
     return {
       tier: 2,
       urgent: false,
-      heading: tier2.heading || `${tier2.paymentMethod?.name || "A nearby option"} could save you money`,
-      message: formatTier2Upsell(tier2),
+      tag: "Nearby offer • live today",
+      tagVariant: "live",
+      heading: pct != null ? `${label} could save you ${pct}%` : (tier2.heading || `${label} could save you money`),
+      message: pct != null
+        ? `${label} has a live offer today that beats your selected payment method by ${pct}%.`
+        : `Add ${label} to unlock a live offer today.`,
       warning: null,
       tip: null,
-      cta: { label: tier2.primaryActionLabel || `Add ${tier2.paymentMethod?.name || "this option"}`, paymentMethod: tier2.paymentMethod },
+      cta: { label: pct != null ? `Add ${label} (save ${pct}%)` : (tier2.primaryActionLabel || `Add ${label}`), paymentMethod: tier2.paymentMethod },
+      skip: null,
       upsell: null,
       mirror: null
     };
@@ -9089,11 +9188,14 @@ function resolvePrimaryDecodeMessage({
   return {
     tier: 4,
     urgent: false,
+    tag: genericDealApplied ? "Site discount applied" : "Nothing live today",
+    tagVariant: "live",
     heading: `No ${methodLabel} offers right now`,
     message: `We checked ${methodLabel}'s credit card, debit card, and EMI options - nothing live at the moment.`,
     warning: null,
     tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
     cta: null,
+    skip: null,
     ctaGeneric: "Add other payment options",
     upsell: null,
     mirror: null
