@@ -8989,6 +8989,24 @@ function resolveTier1Match(bestDeal, selectedPaymentMethods, offers) {
   return { name: namePart || null, type: null, label: namePart || "Your payment method" };
 }
 
+// Whether a SPECIFIC selected method (this exact bank+type, not just the
+// bank generally) has a live applied_payment_offer on ANY currently-loaded
+// flight, not just whichever flight happens to be cheapest overall - used
+// for the Tier 1 + cross-bank-Tier 2 parenthetical ("X, your other
+// selected card, has no live offer today"), which is a claim about that
+// card across the whole loaded search, not about a single flight.
+function selectedMethodHasLiveOffer(pm, outboundFlights, returnFlights, offers) {
+  const allFlights = [...(outboundFlights || []), ...(returnFlights || [])];
+  for (const f of allFlights) {
+    const bd = f?.bestDeal;
+    if (!bd?.applied || bd.offerDisplayType !== "applied_payment_offer") continue;
+    const offer = findOfferSourceDoc(bd, offers);
+    const matched = offer ? getMatchedSelectedPaymentMethod(offer, [pm]) : null;
+    if (matched?.name) return true;
+  }
+  return false;
+}
+
 function resolvePrimaryDecodeMessage({
   selectedPaymentMethods,
   outboundFlights,
@@ -9053,6 +9071,11 @@ function resolvePrimaryDecodeMessage({
       tag: tier1Urgent ? "Same bank • ends today" : "Same bank • live today",
       tagVariant: tier1Urgent ? "urgent" : "live",
       heading: `Your ${bankLabel} gets you the best price`,
+      // The actual price transition, for the decode card's own price
+      // hero - only ever set when both numbers are real (an applied
+      // Tier 1 deal always has them), never a guess.
+      priceNow: Number.isFinite(tier1Deal.finalPrice) ? tier1Deal.finalPrice : null,
+      priceWas: Number.isFinite(tier1Deal.basePrice) ? tier1Deal.basePrice : null,
       message: `${discountPhrase} on ${portal}.`,
       warning: tier1Urgent
         ? (tier1Expiry.daysUntil === 0
@@ -9063,7 +9086,13 @@ function resolvePrimaryDecodeMessage({
       cta: null,
       skip: null,
       upsell: null,
-      mirror: null
+      mirror: null,
+      // Condensed one-line version for the sticky banner shown once the
+      // full card scrolls out of view - same underlying fact, just short
+      // enough for a single line.
+      sticky: tier1Urgent
+        ? `${discountPhrase} with ${bankLabel} — ends today`
+        : `${discountPhrase} with your ${bankLabel} on ${portal}`
     };
 
     // Whether Tier 2 is a different variant of the SAME bank the user
@@ -9083,6 +9112,9 @@ function resolvePrimaryDecodeMessage({
       message.message = tier2Pct != null
         ? `Comfortable with ${promptWord}? ${label} saves ${tier2Pct}% instead.`
         : `Comfortable with ${promptWord}? ${label} could save you more.`;
+      if (tier1Pct != null && tier2Pct != null) {
+        message.sticky = `${tier1Pct}% off now — ${label} could save ${tier2Pct}%`;
+      }
     } else if (tier2 && tier2.additionalSaving > 0) {
       const { label, pct } = tier2PercentAndLabel(tier2);
       message.cta = {
@@ -9090,6 +9122,21 @@ function resolvePrimaryDecodeMessage({
         paymentMethod: tier2.paymentMethod
       };
       message.skip = "Not for me";
+      if (tier1Pct != null && pct != null) {
+        message.sticky = `${tier1Pct}% off with ${bankLabel} — or ${pct}% via ${label}`;
+      }
+
+      // Tier 2 here is a genuinely different selected bank/card, not just
+      // a not-yet-selected candidate - if THAT card's own selection also
+      // has nothing live today, say so, so the user understands why
+      // today's win came from the OTHER card they picked, not this one.
+      const otherSelected = (selectedPaymentMethods || []).find((pm) =>
+        pm?.name && normalizeBankName(pm.name) !== normalizeBankName(tier1Match.name)
+      );
+      if (otherSelected && !selectedMethodHasLiveOffer(otherSelected, outboundFlights, returnFlights, offers)) {
+        const otherLabel = paymentMethodShortLabel(otherSelected);
+        message.message = `${discountPhrase} on ${portal}. (${otherLabel}, your other selected card, has no live offer today.)`;
+      }
     } else if (tier3 && !tier1Urgent) {
       // The "mirror" case: today's pick already wins, but a different
       // variant of the SAME selected method (e.g. non-EMI vs EMI)
@@ -9102,6 +9149,9 @@ function resolvePrimaryDecodeMessage({
         ? `Prefer not to use ${tier1Match.type || "this method"}? A ${tier3Label} offer opens ${tier3When}, saving ${tier3Pct}.`
         : (tier3.message || tier3.heading);
       message.warning = `Fare may change before ${tier3When} - this isn't a locked-in price.`;
+      if (tier1Pct != null && tier3Pct != null) {
+        message.sticky = `${tier1Pct}% off with ${bankLabel} — ${tier3Label} opens ${tier3When} for ${tier3Pct}`;
+      }
     }
 
     return message;
@@ -9135,7 +9185,8 @@ function resolvePrimaryDecodeMessage({
       skip: null,
       ctaGeneric: null,
       upsell: null,
-      mirror: null
+      mirror: null,
+      sticky: `${tier3Label} offer opens ${whenPhrase}`
     };
 
     if (hasTier2) {
@@ -9149,6 +9200,9 @@ function resolvePrimaryDecodeMessage({
         paymentMethod: tier2.paymentMethod
       };
       message.skip = "I'll wait";
+      if (tier3Pct != null && pct != null) {
+        message.sticky = `Opens ${whenPhrase} for ${tier3Pct} off — or save ${pct}% today with ${label}`;
+      }
     } else if (genericDealApplied) {
       // No same-bank alternative either - offer the one real next step
       // (a different card/UPI/wallet entirely) instead of a dead end.
@@ -9177,7 +9231,8 @@ function resolvePrimaryDecodeMessage({
       cta: { label: pct != null ? `Add ${label} (save ${pct}%)` : (tier2.primaryActionLabel || `Add ${label}`), paymentMethod: tier2.paymentMethod },
       skip: null,
       upsell: null,
-      mirror: null
+      mirror: null,
+      sticky: pct != null ? `${label} could save you ${pct}% today` : `Add ${label} to save more`
     };
   }
 
@@ -9198,7 +9253,10 @@ function resolvePrimaryDecodeMessage({
     skip: null,
     ctaGeneric: "Add other payment options",
     upsell: null,
-    mirror: null
+    mirror: null,
+    sticky: genericDealApplied
+      ? `No ${methodLabel} offer — site discount already applied`
+      : `No ${methodLabel} offer live today`
   };
 }
 
