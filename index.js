@@ -9215,24 +9215,40 @@ function resolvePrimaryDecodeMessage({
 
   // Tier 2 alone - selected method has nothing live or upcoming, but a
   // same-bank alternative genuinely does.
+  //
+  // The #1 rule of this whole hierarchy (founder's own priority order:
+  // "the payment method selected as is > immediate payment method offers
+  // > tips and warnings") is that the heading states the truth about the
+  // SELECTED method first, even when that truth is "nothing" - every
+  // other branch already does this (Tier 3's "isn't live yet", Tier 4's
+  // "No X offers right now"). This branch alone skipped straight to the
+  // alternative, which read as if sairro just didn't bother checking
+  // their actual pick (founder catch, 2026-08-10). "Nearby" in the tag
+  // was also wrong on its own terms - a live, same-bank, right-now offer
+  // isn't "nearby", it's exactly as live and real as Tier 1's own tag
+  // says, so it reuses that same tag text.
   if (tier2 && tier2.additionalSaving > 0) {
     const { label, pct } = tier2PercentAndLabel(tier2);
+    const tier2MethodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
+    const tier2MethodLabel = tier2MethodNames.length ? tier2MethodNames.join(" or ") : "your selected method";
     return {
       tier: 2,
       urgent: false,
-      tag: "Nearby offer • live today",
+      tag: "Same bank • live today",
       tagVariant: "live",
-      heading: pct != null ? `${label} could save you ${pct}%` : (tier2.heading || `${label} could save you money`),
+      heading: `No ${tier2MethodLabel} offer right now`,
       message: pct != null
-        ? `${label} has a live offer today that beats your selected payment method by ${pct}%.`
-        : `Add ${label} to unlock a live offer today.`,
+        ? `${label}, though, has a live offer today - save ${pct}% by switching.`
+        : `${label}, though, has a live offer today.`,
       warning: null,
       tip: null,
       cta: { label: pct != null ? `Add ${label} (save ${pct}%)` : (tier2.primaryActionLabel || `Add ${label}`), paymentMethod: tier2.paymentMethod },
       skip: null,
       upsell: null,
       mirror: null,
-      sticky: pct != null ? `${label} could save you ${pct}% today` : `Add ${label} to save more`
+      sticky: pct != null
+        ? `No ${tier2MethodLabel} offer — ${label} saves ${pct}% instead`
+        : `No ${tier2MethodLabel} offer — ${label} has one`
     };
   }
 
