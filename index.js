@@ -9201,7 +9201,13 @@ function resolvePrimaryDecodeMessage({
     message = {
       tier: 1,
       urgent: tier1Urgent,
-      tag: tier1Urgent ? (tier1EndsToday ? "Same bank • ends today" : "Same bank • ends soon") : "Same bank • live today",
+      // "Same bank" made sense on Tier 2-alone's tag (it explicitly pivots
+      // to a DIFFERENT card, so naming whose bank it is matters), but on
+      // Tier 1's own card there's no comparison happening in the tag
+      // itself - it read as unexplained internal jargon ("same bank as
+      // what?"), not something a user could parse (Kapil feedback,
+      // 2026-08-10). Just state the plain fact this tag is actually for.
+      tag: tier1Urgent ? (tier1EndsToday ? "Ends today" : "Ends soon") : "Live today",
       tagVariant: tier1Urgent ? "urgent" : "live",
       heading: `Your ${bankLabel} gets you the best price`,
       // The actual price transition, for the decode card's own price
@@ -9225,12 +9231,19 @@ function resolvePrimaryDecodeMessage({
     };
 
     // Whether Tier 2 is a different variant of the SAME bank the user
-    // already matched on (e.g. Credit Card vs EMI, both selected) or a
-    // genuinely different bank/card also selected changes how this should
-    // read: same bank is a quiet FYI about their own card - they'd just be
-    // re-choosing between two things they already picked, not adding
-    // anything new, so no CTA. A different selected bank is a real,
-    // actionable choice worth a button.
+    // already matched on (e.g. Credit Card vs EMI) or a genuinely
+    // different bank changes the MESSAGING (a quiet same-bank nudge vs a
+    // more assertive cross-bank pitch) but not whether a CTA belongs here.
+    // buildCandidatePaymentMethods explicitly excludes anything already in
+    // selectedPaymentMethods (selectedSet.has(key) -> skip; alreadyHasEmi
+    // -> skip) before it ever becomes a suggestion, so tier2 - in BOTH
+    // branches - is always a genuinely not-yet-added method, never
+    // something the user already has. The old "same bank = quiet FYI
+    // about their own card, they'd just be re-choosing between two things
+    // they already picked" reasoning was factually wrong: there was
+    // nothing to click, so "Comfortable with EMI?" had no way to actually
+    // answer yes (Kapil feedback, 2026-08-10). Both branches now offer the
+    // same real Add action.
     const sameBankAsTier1 = !!(tier2 && tier1Match.name && tier2.paymentMethod?.name
       && normalizeBankName(tier2.paymentMethod.name) === normalizeBankName(tier1Match.name));
 
@@ -9241,6 +9254,11 @@ function resolvePrimaryDecodeMessage({
       message.message = tier2Pct != null
         ? `Comfortable with ${promptWord}? ${label} saves ${tier2Pct}% instead.`
         : `Comfortable with ${promptWord}? ${label} could save you more.`;
+      message.cta = {
+        label: tier2Pct != null ? `Add ${label} (save ${tier2Pct}%)` : (tier2.primaryActionLabel || `Add ${label}`),
+        paymentMethod: tier2.paymentMethod
+      };
+      message.skip = "Not for me";
       if (tier1Pct != null && tier2Pct != null) {
         message.sticky = `${tier1Pct}% off now — ${label} could save ${tier2Pct}%`;
       }
