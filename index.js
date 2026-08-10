@@ -2689,7 +2689,7 @@ function pickApplicableDiscountTier(
 
   const selectedTenures = getSelectedEmiTenures(selectedPaymentMethods);
 
-  const eligible = tiers
+  const eligibleFiltered = tiers
     .filter((t) => {
       if (!tierScopeMatchesTrip(t, isDomestic)) return false;
       if (!tierTripTypeMatchesRequest(t, tripType)) return false;
@@ -2719,7 +2719,43 @@ function pickApplicableDiscountTier(
       const pct = Number(t?.discountPercent || 0);
 
       return flat > 0 || pct > 0;
-    })
+    });
+
+  // Two or more tiers can legitimately coexist for different real reasons
+  // (different tenures, different price brackets) - the sort below picks
+  // the best genuine one among those. But when tiers share the EXACT SAME
+  // bracket (same min/max transaction value, same tenure, same scope) and
+  // still disagree on the discount amount, that's not a legitimate choice
+  // between real options - it's ambiguous/conflicting source data
+  // (confirmed live, 2026-08-10: HDFCEMI's own DB record carries two
+  // separate "INR 7,500 - INR 14,999" tiers, one worth ₹750 and one worth
+  // ₹1,250, with nothing else distinguishing them - picking the larger one
+  // applied a discount MMT's own checkout didn't actually honor, shown to
+  // the user as "14% off" against a real ~10%). Collapsing same-bracket
+  // duplicates to their minimum value first, before the normal
+  // best-of-distinct-options sort runs, is the conservative choice - this
+  // app's whole premise is the TRUE final price, so understating an
+  // uncertain discount is a far smaller trust cost than promising one that
+  // turns out wrong at checkout. Distinct, non-duplicate tiers (different
+  // brackets or tenures) are completely unaffected.
+  const bracketKey = (t) => [
+    Number(t?.minTransactionValue || 0),
+    Number(t?.maxTransactionValue || 0),
+    Number(t?.tenureMonths || 0),
+    String(t?.scope || "")
+  ].join("|");
+  const tierValue = (t) => Number(t?.flatDiscountAmount || t?.discountAmount || t?.discountPercent || 0);
+
+  const minByBracket = new Map();
+  for (const t of eligibleFiltered) {
+    const key = bracketKey(t);
+    const existing = minByBracket.get(key);
+    if (!existing || tierValue(t) < tierValue(existing)) {
+      minByBracket.set(key, t);
+    }
+  }
+
+  const eligible = Array.from(minByBracket.values())
     .sort((a, b) => {
       // Best true value to the user wins first - with several tenures now
       // potentially eligible at once, this is what "try every real tenure,
@@ -8947,13 +8983,35 @@ function formatDiscountPercentPhrase(bestDeal) {
 
 // tier2 (a Phase 1/2 suggestion) carries additionalSaving/newBestPrice as
 // raw rupee numbers - newBestPrice + additionalSaving is the price WITHOUT
-// this option, i.e. the base a "% off" should be computed against.
-function tier2PercentAndLabel(tier2) {
+// this option, i.e. the base a "% off" should be computed against, UNLESS
+// a true (pre-any-discount) base price is passed in separately.
+//
+// That second case matters: when Tier 2 is shown alongside an ALREADY-
+// winning Tier 1 (the sameBankAsTier1 branch and the cross-bank CTA
+// branch below), "the price WITHOUT this option" is Tier 1's own
+// already-discounted price, not the fare's true original price - so the
+// percentage this used to compute was "how much cheaper is switching
+// than your ALREADY-discounted price", a genuinely small number, while
+// reading exactly like "this offer's own discount is only N%". A real
+// example: ICICI Credit Card at 10% off (₹8724 -> ₹7852) with ICICI EMI
+// as Tier 2 said "EMI saves 2% instead" - mathematically correct for
+// what it measured (2% cheaper than the ALREADY-discounted ₹7852), but
+// EMI's own real discount off the true ₹8724 base is closer to 12%
+// (founder-caught, 2026-08-10: "is it even true?" - it was true for a
+// metric nobody was claiming to show). Passing trueBasePrice (the
+// tier1Deal's own basePrice, when a Tier 1 winner exists) makes this
+// consistent with how Tier 1's own "N% off" is computed - the same
+// fare's true original price - so the two percentages are directly
+// comparable instead of one being quietly measured against the other.
+function tier2PercentAndLabel(tier2, trueBasePrice) {
   const label = paymentMethodShortLabel(tier2?.paymentMethod || {});
   const saving = Number(tier2?.additionalSaving);
   const newBest = Number(tier2?.newBestPrice);
   if (Number.isFinite(saving) && saving > 0 && Number.isFinite(newBest)) {
-    const pct = computeDiscountPercent(newBest + saving, saving);
+    const hasTrueBase = Number.isFinite(trueBasePrice) && trueBasePrice > 0;
+    const base = hasTrueBase ? trueBasePrice : (newBest + saving);
+    const discount = hasTrueBase ? (trueBasePrice - newBest) : saving;
+    const pct = computeDiscountPercent(base, discount);
     if (pct != null) return { label, pct };
   }
   return { label, pct: null };
@@ -9177,7 +9235,7 @@ function resolvePrimaryDecodeMessage({
       && normalizeBankName(tier2.paymentMethod.name) === normalizeBankName(tier1Match.name));
 
     if (tier2 && tier2.additionalSaving > 0 && sameBankAsTier1) {
-      const { label, pct: tier2Pct } = tier2PercentAndLabel(tier2);
+      const { label, pct: tier2Pct } = tier2PercentAndLabel(tier2, tier1Deal.basePrice);
       const promptWord = tier2.paymentMethod?.type || "a different way to pay";
       if (tier1Pct != null) message.heading = `Your ${bankLabel} already saves you ${tier1Pct}%`;
       message.message = tier2Pct != null
@@ -9187,7 +9245,7 @@ function resolvePrimaryDecodeMessage({
         message.sticky = `${tier1Pct}% off now — ${label} could save ${tier2Pct}%`;
       }
     } else if (tier2 && tier2.additionalSaving > 0) {
-      const { label, pct } = tier2PercentAndLabel(tier2);
+      const { label, pct } = tier2PercentAndLabel(tier2, tier1Deal.basePrice);
       message.cta = {
         label: pct != null ? `Add ${label} (save ${pct}% instead)` : (tier2.primaryActionLabel || `Add ${label}`),
         paymentMethod: tier2.paymentMethod
@@ -9261,7 +9319,15 @@ function resolvePrimaryDecodeMessage({
       // they'd bother (founder catch, 2026-08-09: EMI already had a live
       // offer right now, but nothing on the card said so - only the credit
       // card's future date was mentioned).
-      const { label, pct } = tier2PercentAndLabel(tier2);
+      //
+      // Same "% off the TRUE base, not off an already-discounted price"
+      // fix as the Tier 1 branch above: no tier1Deal exists here, but a
+      // GENERIC (non-payment-specific) discount can still be reducing
+      // currentBestPrice (genericDealApplied) - if so, that applied
+      // deal's own basePrice is the fare's real original price, not
+      // currentBestPrice itself.
+      const genericBaseDeal = genericDealApplied ? candidateDeals.find((d) => d?.applied) : null;
+      const { label, pct } = tier2PercentAndLabel(tier2, genericBaseDeal?.basePrice);
       message.cta = {
         label: pct != null ? `Add ${label} (save ${pct}% today)` : (tier2.primaryActionLabel || `Add ${label}`),
         paymentMethod: tier2.paymentMethod
