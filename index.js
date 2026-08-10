@@ -6131,6 +6131,14 @@ else failReasons.push("PAYMENT_MISMATCH");
           flatDiscountAmount: offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? null,
           maxDiscountAmount: offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? null,
           minTransactionValue: minTxn || 0,
+          // Surfaces the actual per-slab structure a tiered offer (e.g.
+          // "up to ₹7,500 instant discount") resolves against - the
+          // top-level discountPercent/flatDiscountAmount fields above are
+          // null for these, so without this there was no way to see WHICH
+          // slab's amount actually produced discountedPrice/actualDiscount
+          // (Kapil ask, 2026-08-10: verify a displayed 14% against the
+          // real offer doc).
+          discountTiers: offer?.discountTiers || offer?.parsedFields?.discountTiers || null,
           discountedPrice: Number.isFinite(discounted) ? discounted : null,
           actualDiscount,
           expired: !!expired,
@@ -9043,16 +9051,62 @@ function resolvePrimaryDecodeMessage({
   // referenced against selectedPaymentMethods since buildTimingInsights's
   // returned objects don't carry an isSelected flag directly. Restricted
   // to the "future" family (URGENT_TIMING_TYPES excluded) so it never
-  // overlaps with the urgency check just below, which already covers the
-  // "ending soon" case for whatever Tier 1 is currently winning.
+  // overlaps with the urgency check just below, for whatever Tier 1 is
+  // currently winning.
   const tier3 = (timingInsights || []).find((t) =>
     !URGENT_TIMING_TYPES.has(t.type) &&
     selectedPaymentMethods.some((pm) => pm.type === t.paymentMethod?.type && pm.name === t.paymentMethod?.name)
   ) || null;
 
+  const tier1Match = tier1Deal ? resolveTier1Match(tier1Deal, selectedPaymentMethods, offers) : null;
+
   // Urgency is a color/warning variant of Tier 1, not a separate tier.
-  const tier1Expiry = tier1Deal ? findImminentExpiry(tier1Deal, offers, todayDateOnly) : null;
-  const tier1Urgent = !!tier1Expiry;
+  //
+  // Two independent signals can establish it, checked in this order:
+  //
+  // 1. A matching URGENT-family timing insight (AVAILABLE_TODAY_ENDS_TODAY /
+  //    AVAILABLE_TODAY_ENDS_SOON / EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE) for
+  //    the SAME bank+type currently winning Tier 1. These come from
+  //    buildTimingInsights's day-by-day eligibility scan
+  //    (scanMethodDateEligibility/classifyMethodTiming), which understands
+  //    booking-day restrictions - e.g. a "Monday only" coupon - via
+  //    offerMatchesBookingDay, and is reprice-verified (it actually checks
+  //    tomorrow's eligibility, not just a date field).
+  // 2. Only when no such insight exists (timing budget exceeded, this ran
+  //    outside /payment-suggestions, etc.) - findImminentExpiry()'s much
+  //    dumber check of the offer's raw validityPeriod.to date range.
+  //
+  // findImminentExpiry() alone used to be the ONLY signal here, and it has
+  // no concept of booking-day restrictions at all - a live-today,
+  // gone-tomorrow Monday-only offer produced no urgency warning whatsoever
+  // (founder-caught, 2026-08-10), even though the day-aware scan already
+  // existed and already correctly classified that exact case for other
+  // purposes (buildTimingInsightCopy's "won't work tomorrow" copy).
+  const tier1UrgentInsight = tier1Match
+    ? (timingInsights || []).find((t) =>
+        URGENT_TIMING_TYPES.has(t.type) &&
+        t.paymentMethod?.type === tier1Match.type &&
+        normalizeBankName(t.paymentMethod?.name) === normalizeBankName(tier1Match.name)
+      ) || null
+    : null;
+  const tier1ExpiryFallback = (!tier1UrgentInsight && tier1Deal)
+    ? findImminentExpiry(tier1Deal, offers, todayDateOnly)
+    : null;
+  const tier1Urgent = !!tier1UrgentInsight || !!tier1ExpiryFallback;
+  const tier1EndsToday = tier1UrgentInsight
+    ? tier1UrgentInsight.type === "AVAILABLE_TODAY_ENDS_TODAY"
+    : (tier1ExpiryFallback ? tier1ExpiryFallback.daysUntil === 0 : false);
+  // The insight's own copy (buildTimingInsightCopy) is already specific
+  // and reprice-verified ("It's saving you ₹X right now, but won't work
+  // tomorrow.") - only fall back to the generic date-based sentence when
+  // urgency came from the raw validityPeriod check instead.
+  const tier1UrgentWarning = tier1UrgentInsight
+    ? tier1UrgentInsight.message
+    : (tier1ExpiryFallback
+        ? (tier1EndsToday
+            ? "This offer ends today - book now to lock it in."
+            : `This offer ends ${tier1ExpiryFallback.expiryDateISO} - book soon to lock it in.`)
+        : null);
 
   // Tier 4 signal: something WAS applied, just not payment-specific - the
   // reassurance line only makes this claim when it's actually true. Covers
@@ -9071,17 +9125,25 @@ function resolvePrimaryDecodeMessage({
     d?.offerDisplayType === "verified_generic_checkout_coupon"
   ));
 
+  // Built by whichever tier branch below matches, then run through one
+  // shared post-processing step (the round-trip-min-txn tip, see below)
+  // before the single return at the end - so that fix, and any future
+  // one like it, automatically applies to every tier instead of needing
+  // to be copy-pasted into each branch separately (founder direction,
+  // 2026-08-10: "fix them logically so all such errors won't happen in
+  // future").
+  let message = null;
+
   if (tier1Deal) {
-    const tier1Match = resolveTier1Match(tier1Deal, selectedPaymentMethods, offers);
     const bankLabel = tier1Match.label;
     const portal = tier1Deal.portal || "the portal";
     const tier1Pct = computeDiscountPercent(tier1Deal.basePrice, tier1Deal.actualDiscount);
     const discountPhrase = formatDiscountPercentPhrase(tier1Deal);
 
-    const message = {
+    message = {
       tier: 1,
       urgent: tier1Urgent,
-      tag: tier1Urgent ? "Same bank • ends today" : "Same bank • live today",
+      tag: tier1Urgent ? (tier1EndsToday ? "Same bank • ends today" : "Same bank • ends soon") : "Same bank • live today",
       tagVariant: tier1Urgent ? "urgent" : "live",
       heading: `Your ${bankLabel} gets you the best price`,
       // The actual price transition, for the decode card's own price
@@ -9090,11 +9152,7 @@ function resolvePrimaryDecodeMessage({
       priceNow: Number.isFinite(tier1Deal.finalPrice) ? tier1Deal.finalPrice : null,
       priceWas: Number.isFinite(tier1Deal.basePrice) ? tier1Deal.basePrice : null,
       message: `${discountPhrase} on ${portal}.`,
-      warning: tier1Urgent
-        ? (tier1Expiry.daysUntil === 0
-            ? "This offer ends today - book now to lock it in."
-            : `This offer ends ${tier1Expiry.expiryDateISO} - book soon to lock it in.`)
-        : null,
+      warning: tier1UrgentWarning,
       tip: null,
       cta: null,
       skip: null,
@@ -9104,7 +9162,7 @@ function resolvePrimaryDecodeMessage({
       // full card scrolls out of view - same underlying fact, just short
       // enough for a single line.
       sticky: tier1Urgent
-        ? `${discountPhrase} with ${bankLabel} — ends today`
+        ? `${discountPhrase} with ${bankLabel} — ${tier1EndsToday ? "ends today" : "ends soon"}`
         : `${discountPhrase} with your ${bankLabel} on ${portal}`
     };
 
@@ -9166,13 +9224,9 @@ function resolvePrimaryDecodeMessage({
         message.sticky = `${tier1Pct}% off with ${bankLabel} — ${tier3Label} opens ${tier3When} for ${tier3Pct}`;
       }
     }
-
-    return message;
-  }
-
-  // No Tier 1 match - Tier 3 (the selected method unlocking soon), with
-  // Tier 2 offered alongside if it exists, else Tier 4 reassurance.
-  if (tier3) {
+  } else if (tier3) {
+    // No Tier 1 match - Tier 3 (the selected method unlocking soon), with
+    // Tier 2 offered alongside if it exists, else Tier 4 reassurance.
     const tier3Tag = tier3.label ? tier3.label.replace(/^Available\s+/, "Opens ") : "Opens soon";
     const tier3Pct = tier3PercentPhrase(tier3);
     const tier3Label = paymentMethodShortLabel(tier3.paymentMethod || {});
@@ -9180,7 +9234,7 @@ function resolvePrimaryDecodeMessage({
     const whenPhrase = whenMatch ? whenMatch[1] : "soon";
     const hasTier2 = !!(tier2 && tier2.additionalSaving > 0);
 
-    const message = {
+    message = {
       tier: 3,
       urgent: false,
       tag: tier3Tag,
@@ -9230,29 +9284,25 @@ function resolvePrimaryDecodeMessage({
       message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
       message.ctaGeneric = "Add other payment options";
     }
-
-    return message;
-  }
-
-  // Tier 2 alone - selected method has nothing live or upcoming, but a
-  // same-bank alternative genuinely does.
-  //
-  // The #1 rule of this whole hierarchy (founder's own priority order:
-  // "the payment method selected as is > immediate payment method offers
-  // > tips and warnings") is that the heading states the truth about the
-  // SELECTED method first, even when that truth is "nothing" - every
-  // other branch already does this (Tier 3's "isn't live yet", Tier 4's
-  // "No X offers right now"). This branch alone skipped straight to the
-  // alternative, which read as if sairro just didn't bother checking
-  // their actual pick (founder catch, 2026-08-10). "Nearby" in the tag
-  // was also wrong on its own terms - a live, same-bank, right-now offer
-  // isn't "nearby", it's exactly as live and real as Tier 1's own tag
-  // says, so it reuses that same tag text.
-  if (tier2 && tier2.additionalSaving > 0) {
+  } else if (tier2 && tier2.additionalSaving > 0) {
+    // Tier 2 alone - selected method has nothing live or upcoming, but a
+    // same-bank alternative genuinely does.
+    //
+    // The #1 rule of this whole hierarchy (founder's own priority order:
+    // "the payment method selected as is > immediate payment method offers
+    // > tips and warnings") is that the heading states the truth about the
+    // SELECTED method first, even when that truth is "nothing" - every
+    // other branch already does this (Tier 3's "isn't live yet", Tier 4's
+    // "No X offers right now"). This branch alone skipped straight to the
+    // alternative, which read as if sairro just didn't bother checking
+    // their actual pick (founder catch, 2026-08-10). "Nearby" in the tag
+    // was also wrong on its own terms - a live, same-bank, right-now offer
+    // isn't "nearby", it's exactly as live and real as Tier 1's own tag
+    // says, so it reuses that same tag text.
     const { label, pct } = tier2PercentAndLabel(tier2);
     const tier2MethodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
     const tier2MethodLabel = tier2MethodNames.length ? tier2MethodNames.join(" or ") : "your selected method";
-    return {
+    message = {
       tier: 2,
       urgent: false,
       tag: "Same bank • live today",
@@ -9271,30 +9321,52 @@ function resolvePrimaryDecodeMessage({
         ? `No ${tier2MethodLabel} offer — ${label} saves ${pct}% instead`
         : `No ${tier2MethodLabel} offer — ${label} has one`
     };
+  } else {
+    // Tier 4 alone - nothing above found anything for the selected method(s).
+    const methodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
+    const methodLabel = methodNames.length ? methodNames.join(" or ") : "your selected method";
+
+    message = {
+      tier: 4,
+      urgent: false,
+      tag: genericDealApplied ? "Site discount applied" : "Nothing live today",
+      tagVariant: "live",
+      heading: `No ${methodLabel} offers right now`,
+      message: `We checked ${methodLabel}'s credit card, debit card, and EMI options - nothing live at the moment.`,
+      warning: null,
+      tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
+      cta: null,
+      skip: null,
+      ctaGeneric: "Add other payment options",
+      upsell: null,
+      mirror: null,
+      sticky: genericDealApplied
+        ? `No ${methodLabel} offer — site discount already applied`
+        : `No ${methodLabel} offer live today`
+    };
   }
 
-  // Tier 4 alone - nothing above found anything for the selected method(s).
-  const methodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
-  const methodLabel = methodNames.length ? methodNames.join(" or ") : "your selected method";
+  // Cross-tier signal, not specific to any one tier's own logic: a
+  // selected method's real offer was rejected ONLY because this fare is
+  // below its minimum transaction amount, and a round-trip search would
+  // likely clear that minimum (buildTimingInsights's ROUND_TRIP_MAY_UNLOCK,
+  // computed generically off whatever offers/prices this search actually
+  // has - never hardcoded to a specific bank/offer). It used to be
+  // computed correctly but silently dropped: the insight is built with
+  // paymentMethod:null (it isn't about one method), while Tier 3's own
+  // selection above requires a paymentMethod match, so it could never be
+  // picked up there (founder-caught, 2026-08-10). Applying it once, here,
+  // after every tier branch has already had a chance to set its own tip,
+  // means it fills the gap on whichever tier didn't already have one
+  // instead of needing to be wired into each branch separately.
+  if (message && !message.tip) {
+    const roundTripHint = (timingInsights || []).find((t) => t.type === "ROUND_TRIP_MAY_UNLOCK") || null;
+    if (roundTripHint) {
+      message.tip = roundTripHint.message;
+    }
+  }
 
-  return {
-    tier: 4,
-    urgent: false,
-    tag: genericDealApplied ? "Site discount applied" : "Nothing live today",
-    tagVariant: "live",
-    heading: `No ${methodLabel} offers right now`,
-    message: `We checked ${methodLabel}'s credit card, debit card, and EMI options - nothing live at the moment.`,
-    warning: null,
-    tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
-    cta: null,
-    skip: null,
-    ctaGeneric: "Add other payment options",
-    upsell: null,
-    mirror: null,
-    sticky: genericDealApplied
-      ? `No ${methodLabel} offer — site discount already applied`
-      : `No ${methodLabel} offer live today`
-  };
+  return message;
 }
 
 // Everything /payment-suggestions actually computes, minus request
