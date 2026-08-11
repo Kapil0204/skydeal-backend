@@ -8627,8 +8627,8 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
 
   if (classification.type === "AVAILABLE_TODAY_ENDS_TODAY") {
     return {
-      heading: `Use your ${shortLabel} offer today`,
-      message: `It's saving you ₹${potentialSaving} right now, but won't work tomorrow.`,
+      heading: `Your saving may end today`,
+      message: `This ${shortLabel} offer saves ₹${potentialSaving} right now, but may not work tomorrow.`,
       label: "Ends today",
       disclaimer: null,
       estimatedFinalPrice: currentBestPrice,
@@ -8644,8 +8644,8 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
   if (classification.type === "EXPIRES_BEFORE_TRAVEL_BUT_BOOKABLE" || classification.type === "AVAILABLE_TODAY_ENDS_SOON") {
     const lastUsableDay = addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1);
     return {
-      heading: `Book by ${formatTimingDate(lastUsableDay, "long")} to use this offer`,
-      message: `You could save about ₹${potentialSaving} with your ${shortLabel}, but only if you book before then.`,
+      heading: `Use this offer before ${formatTimingDate(lastUsableDay, "long")}`,
+      message: `You could save about ₹${potentialSaving} with ${shortLabel} if you book before then.`,
       label: `Book by ${formatTimingDate(lastUsableDay, "short")}`,
       disclaimer: null,
       estimatedFinalPrice: currentBestPrice,
@@ -8670,10 +8670,22 @@ function buildTimingInsightCopy({ method, classification, potentialSaving, curre
     // non-EMI ICICI Bank offer unlocks Monday" - a real, honest "this
     // becomes available Monday" insight wrapped in a false premise about
     // EMI that was never actually true for their selection.
-    const heading = isEmiMethod
-      ? `An EMI offer becomes available ${when}`
-      : `Your ${shortLabel} offer becomes available ${when}`;
-    const message = `You could save about ₹${potentialSaving} by paying with ${shortLabel}.`;
+    // Doc's D-section splits this three ways (EMI / non-EMI card / UPI &
+    // wallet) - "without using EMI" only makes sense to say for an actual
+    // card, so it stays its own branch rather than folding into the
+    // generic UPI/wallet phrasing.
+    const isCardMethod = /credit|debit/i.test(methodType);
+    let heading, message;
+    if (isEmiMethod) {
+      heading = `A lower price may unlock ${when}`;
+      message = `Your ${shortLabel} EMI option could save about ₹${potentialSaving}.`;
+    } else if (isCardMethod) {
+      heading = `Your card offer unlocks ${when}`;
+      message = `You could save about ₹${potentialSaving} without using EMI.`;
+    } else {
+      heading = `Your ${shortLabel} offer unlocks ${when}`;
+      message = `You could save about ₹${potentialSaving} by paying with ${shortLabel}.`;
+    }
     return {
       heading,
       message,
@@ -9385,7 +9397,10 @@ function resolvePrimaryDecodeMessage({
       urgent: false,
       tag: tier3Tag,
       tagVariant: "warn",
-      heading: `Your ${tier3Label} offer isn't live yet`,
+      // Matches the doc's D-section "unlocks {when}" framing (copy audit,
+      // 2026-08-11) - leads with the upcoming opportunity, not with what's
+      // currently absent.
+      heading: `Your ${tier3Label} offer unlocks ${whenPhrase}`,
       // The percent claim only appears alongside a genuine live
       // alternative (hasTier2) - without one, all this can honestly say
       // is when it opens, not what it's worth doing about it today.
@@ -9446,8 +9461,8 @@ function resolvePrimaryDecodeMessage({
     // "the payment method selected as is > immediate payment method offers
     // > tips and warnings") is that the heading states the truth about the
     // SELECTED method first, even when that truth is "nothing" - every
-    // other branch already does this (Tier 3's "isn't live yet", Tier 4's
-    // "No X offers right now"). This branch alone skipped straight to the
+    // other branch already does this (Tier 3's own heading, Tier 4's
+    // "We checked your X"). This branch alone skipped straight to the
     // alternative, which read as if sairro just didn't bother checking
     // their actual pick (founder catch, 2026-08-10). "Nearby" in the tag
     // was also wrong on its own terms - a live, same-bank, right-now offer
@@ -9478,7 +9493,9 @@ function resolvePrimaryDecodeMessage({
       warning: null,
       tip: null,
       cta: { label: pct != null ? `Add ${label} (save ${pct}%)` : (tier2.primaryActionLabel || `Add ${label}`), paymentMethod: tier2.paymentMethod },
-      skip: null,
+      // QC-caught (copy audit, 2026-08-11): every other CTA-bearing branch
+      // pairs its "Add X" button with a way to say no - this one didn't.
+      skip: "Not for me",
       upsell: null,
       mirror: null,
       sticky: pct != null
@@ -9490,13 +9507,19 @@ function resolvePrimaryDecodeMessage({
     const methodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
     const methodLabel = methodNames.length ? methodNames.join(" or ") : "your selected method";
 
+    // Matches SAIRRO_VOICE_AND_CONTENT.md's A6 Case 3 ("Selected payment
+    // method has no offer"): leads with "we checked" + reassurance that a
+    // real best-available price was still found, instead of a checklist
+    // ("credit card, debit card, and EMI options") followed by a bare
+    // negative - the doc's own core principle is "never make the user
+    // feel they failed to save money" (copy audit, 2026-08-11).
     message = {
       tier: 4,
       urgent: false,
       tag: genericDealApplied ? "Site discount applied" : "Nothing live today",
       tagVariant: "live",
-      heading: `No ${methodLabel} offers right now`,
-      message: `We checked ${methodLabel}'s credit card, debit card, and EMI options - nothing live at the moment.`,
+      heading: `We checked your ${methodLabel}`,
+      message: `This didn't unlock a lower price for this flight. We still found the best available deal across portals.`,
       warning: null,
       tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
       cta: null,
@@ -9505,8 +9528,8 @@ function resolvePrimaryDecodeMessage({
       upsell: null,
       mirror: null,
       sticky: genericDealApplied
-        ? `No ${methodLabel} offer — site discount already applied`
-        : `No ${methodLabel} offer live today`
+        ? `Checked your ${methodLabel} — a site discount's already applied`
+        : `Checked your ${methodLabel} — best available price shown`
     };
   }
 
