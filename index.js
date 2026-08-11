@@ -7929,6 +7929,38 @@ function finalPriceFromRepriced(row, originalFlight) {
   return Number(originalFlight?.price) || 0;
 }
 
+// Same idea as finalPriceFromRepriced, but the BEFORE-discount price - used
+// to compute a candidate's own true percentage (QC-caught, 2026-08-11:
+// newBestPrice/additionalSaving are a "best across all loaded flights"
+// aggregate, not tied to any single flight's fare, so borrowing a
+// DIFFERENT flight's base price to compute "%" produced a real but
+// inexact number, e.g. a genuine 10% offer showing as 12%). Pairing each
+// candidate's newBestPrice with the SAME flight's own base price (see
+// findBestIndexAndBasePrice below) makes the percentage exact by
+// construction, not approximated from an unrelated flight.
+function basePriceFromRepriced(row, originalFlight) {
+  if (row?.bestDeal?.applied && Number.isFinite(row.bestDeal.basePrice)) return row.bestDeal.basePrice;
+  return Number(originalFlight?.price) || 0;
+}
+
+// Finds the index achieving the minimum final price in a repriced batch,
+// returning both that price and the SAME flight's own base price - so a
+// candidate's discount percentage can always be computed same-flight,
+// never mixed across two different flights' fares.
+function findBestIndexAndBasePrice(repriced, originalFlights) {
+  let bestIdx = 0;
+  let bestFinal = Infinity;
+  for (let i = 0; i < repriced.length; i++) {
+    const final = finalPriceFromRepriced(repriced[i], originalFlights[i]);
+    if (final < bestFinal) {
+      bestFinal = final;
+      bestIdx = i;
+    }
+  }
+  const bestBase = repriced.length > 0 ? basePriceFromRepriced(repriced[bestIdx], originalFlights[bestIdx]) : 0;
+  return { bestFinal: repriced.length > 0 ? bestFinal : 0, bestBase };
+}
+
 function validatePaymentRepriceRequest(body, cfg) {
   const errors = [];
   const from = String(body?.from || "").trim().toUpperCase();
@@ -9027,6 +9059,24 @@ function tier2PercentAndLabel(tier2, trueBasePrice) {
   const label = paymentMethodShortLabel(tier2?.paymentMethod || {});
   const saving = Number(tier2?.additionalSaving);
   const newBest = Number(tier2?.newBestPrice);
+  const candidateBase = Number(tier2?.newBestBasePrice);
+
+  // Prefer the candidate's OWN same-flight base price (newBestBasePrice,
+  // added 2026-08-11) - exact by construction, since it's the true fare of
+  // the SAME flight newBestPrice was actually achieved on.
+  // newBestPrice/additionalSaving are a "best achievable across every
+  // loaded flight" aggregate, not tied to any one flight, so an
+  // externally-passed trueBasePrice (e.g. a DIFFERENT flight's
+  // tier1Deal.basePrice) could silently mismatch and produce a
+  // real-but-inexact percentage (QC-caught: a genuine 10% offer read as
+  // 12% this way, one flight's true base subtracted against a cheaper
+  // flight's discounted price). trueBasePrice is kept only as a
+  // defensive fallback for the case newBestBasePrice wasn't computed.
+  if (Number.isFinite(candidateBase) && candidateBase > 0 && Number.isFinite(newBest)) {
+    const pct = computeDiscountPercent(candidateBase, candidateBase - newBest);
+    if (pct != null) return { label, pct };
+  }
+
   if (Number.isFinite(saving) && saving > 0 && Number.isFinite(newBest)) {
     const hasTrueBase = Number.isFinite(trueBasePrice) && trueBasePrice > 0;
     const base = hasTrueBase ? trueBasePrice : (newBest + saving);
@@ -9675,27 +9725,30 @@ async function computePaymentSuggestionsCore(v, cfg) {
       const hypothetical = [...selectedPaymentMethods, r.candidate];
 
       const outboundRepriced = await repriceFlightsForPaymentMethods(v.outboundFlights, hypothetical, ctx);
-      const newOutboundBest = Math.min(
-        ...outboundRepriced.map((rr, i) => finalPriceFromRepriced(rr, v.outboundFlights[i]))
-      );
+      const { bestFinal: newOutboundBest, bestBase: newOutboundBestBase } = findBestIndexAndBasePrice(outboundRepriced, v.outboundFlights);
       const affectedOutboundFlights = outboundRepriced.filter(
         (rr, i) => finalPriceFromRepriced(rr, v.outboundFlights[i]) < bestFinalPriceOf(v.outboundFlights[i])
       ).length;
 
       let newReturnBest = 0;
+      let newReturnBestBase = 0;
       let affectedReturnFlights = 0;
 
       if (v.tripType === "round-trip" && v.returnFlights.length > 0) {
         const returnRepriced = await repriceFlightsForPaymentMethods(v.returnFlights, hypothetical, ctx);
-        newReturnBest = Math.min(
-          ...returnRepriced.map((rr, i) => finalPriceFromRepriced(rr, v.returnFlights[i]))
-        );
+        ({ bestFinal: newReturnBest, bestBase: newReturnBestBase } = findBestIndexAndBasePrice(returnRepriced, v.returnFlights));
         affectedReturnFlights = returnRepriced.filter(
           (rr, i) => finalPriceFromRepriced(rr, v.returnFlights[i]) < bestFinalPriceOf(v.returnFlights[i])
         ).length;
       }
 
       const newBestPrice = newOutboundBest + newReturnBest;
+      // The SAME-flight base price behind newBestPrice above - lets any
+      // consumer compute this candidate's own true discount percentage
+      // (newBestBasePrice - newBestPrice) / newBestBasePrice exactly,
+      // instead of approximating with a different flight's fare or the
+      // already-discounted currentBestPrice (QC-caught, 2026-08-11).
+      const newBestBasePrice = newOutboundBestBase + newReturnBestBase;
       const additionalSaving = Math.round(currentBestPrice - newBestPrice);
       const totalAffectedFlights = affectedOutboundFlights + affectedReturnFlights;
       const breadthPercent = flightsTested > 0 ? (totalAffectedFlights / flightsTested) * 100 : 0;
@@ -9713,6 +9766,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
         category: candidateCategoryLabel(r.relevanceTier),
         additionalSaving,
         newBestPrice,
+        newBestBasePrice,
         affectedOutboundFlights,
         affectedReturnFlights,
         affectedFlights: totalAffectedFlights,
@@ -9762,6 +9816,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
         label,
         additionalSaving: r.additionalSaving,
         newBestPrice: r.newBestPrice,
+        newBestBasePrice: r.newBestBasePrice,
         affectedFlights: r.affectedFlights,
         affectedOutboundFlights: r.affectedOutboundFlights,
         affectedReturnFlights: r.affectedReturnFlights,
