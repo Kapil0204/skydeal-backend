@@ -3114,7 +3114,6 @@ function canonicalizeAllCardFamilies(text) {
 
 function normalizeSelectedPM(pm) {
   const typeRaw = String(pm?.type || "").trim();
-  const nameRaw = String(pm?.name || pm?.bank || "").trim();
   const t = typeRaw.toLowerCase().replace(/\s+/g, "");
 
   const typeNorm =
@@ -3125,6 +3124,19 @@ function normalizeSelectedPM(pm) {
     /upi/.test(t) ? "UPI" :
     /wallet/.test(t) ? "WALLET" :
     null;
+
+  // For a UPI selection, the app identity lives in pm.provider, not
+  // pm.name - buildSelectedPaymentMethod() (skydeal-frontend/script.js)
+  // always sets name to the literal string "UPI" and puts the real app
+  // name ("MobiKwik", "Google Pay", etc) in provider. Falling back to
+  // pm.name/pm.bank here meant every UPI selection canonicalized to the
+  // same generic "UPI" bank identity regardless of which app was picked,
+  // so a bank/app-restricted UPI offer (e.g. MobiKwik's MBKUPI) could
+  // never match no matter what the user selected (QC-caught, 2026-08-11).
+  // Every other type keeps reading pm.name/pm.bank exactly as before.
+  const nameRaw = (typeNorm === "UPI" && pm?.provider)
+    ? String(pm.provider).trim()
+    : String(pm?.name || pm?.bank || "").trim();
 
   const bankCanonical = bankCanonicalFromAny(nameRaw);
 
@@ -5864,18 +5876,12 @@ async function computePaymentOptionsFromOffers(preloadedOffers = null) {
   const wallet = Array.from(buckets.Wallet).sort();
 
   const options = {
-    // Legacy keys used by frontend/tests
     EMI: emi,
-    CreditCard: creditCard,
-    DebitCard: debitCard,
-    NetBanking: netBanking,
-    UPI: upi,
-    Wallet: wallet,
-
-    // Friendly aliases for future UI
     "Credit Card": creditCard,
     "Debit Card": debitCard,
     "Net Banking": netBanking,
+    UPI: upi,
+    Wallet: wallet,
   };
 
   // Additive, non-breaking: how many live offers back each bank/app, so the
@@ -5891,14 +5897,11 @@ async function computePaymentOptionsFromOffers(preloadedOffers = null) {
 
   const offerCounts = {
     EMI: buildCounts("EMI"),
-    CreditCard: buildCounts("CreditCard"),
-    DebitCard: buildCounts("DebitCard"),
-    NetBanking: buildCounts("NetBanking"),
-    UPI: buildCounts("UPI"),
-    Wallet: buildCounts("Wallet"),
     "Credit Card": buildCounts("CreditCard"),
     "Debit Card": buildCounts("DebitCard"),
     "Net Banking": buildCounts("NetBanking"),
+    UPI: buildCounts("UPI"),
+    Wallet: buildCounts("Wallet"),
   };
 
   // Additive, non-breaking (same pattern as offerCounts above): a light
@@ -5930,14 +5933,11 @@ async function computePaymentOptionsFromOffers(preloadedOffers = null) {
 
   const offerSummaries = {
     EMI: buildSummaries("EMI"),
-    CreditCard: buildSummaries("CreditCard"),
-    DebitCard: buildSummaries("DebitCard"),
-    NetBanking: buildSummaries("NetBanking"),
-    UPI: buildSummaries("UPI"),
-    Wallet: buildSummaries("Wallet"),
     "Credit Card": buildSummaries("CreditCard"),
     "Debit Card": buildSummaries("DebitCard"),
     "Net Banking": buildSummaries("NetBanking"),
+    UPI: buildSummaries("UPI"),
+    Wallet: buildSummaries("Wallet"),
   };
 
   return { usedFallback: false, options, offerCounts, offerSummaries };
@@ -8074,8 +8074,15 @@ function candidateKey(c) {
 //          ranked last).
 function candidateRelevanceTier(candidate, selectedPaymentMethods) {
   const candidateBankCanon = bankCanonicalFromAny(candidate?.name);
+  // Reuses normalizeSelectedPM's bank-identity resolution (not a raw
+  // bankCanonicalFromAny(pm?.name) read) so a selected UPI method is
+  // correctly identified by its real app (pm.provider), not the generic
+  // literal "UPI" every UPI selection's pm.name holds - same root cause
+  // as the offer-matching fix (2026-08-11): without this, a user who had
+  // already selected e.g. "UPI: MobiKwik" themselves would never be
+  // recognized as "same brand" against a MobiKwik candidate of another type.
   const sameBank = !!candidateBankCanon && (selectedPaymentMethods || []).some(
-    (pm) => bankCanonicalFromAny(pm?.name) === candidateBankCanon
+    (pm) => normalizeSelectedPM(pm).bankCanonical === candidateBankCanon
   );
   if (sameBank) return 1;
 
@@ -8219,7 +8226,20 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
     const counts = catalog.offerCounts?.[uiType] || {};
 
     for (const bank of banks) {
-      if (SUGGESTION_EXCLUDED_PROVIDERS.has(String(bank).toLowerCase().trim())) continue;
+      if (SUGGESTION_EXCLUDED_PROVIDERS.has(String(bank).toLowerCase().trim())) {
+        // The exclusion exists to avoid proactively pushing an app the user
+        // has never indicated they have (founder call, 2026-08-04). That
+        // rationale doesn't apply once they've already selected this exact
+        // brand under a different payment type (e.g. Wallet: MobiKwik) -
+        // suggesting MobiKwik's own UPI offer at that point isn't "SkyDeal
+        // promoting a new app," it's surfacing a different payment mode
+        // within an app they already told us they use (Kapil, 2026-08-11).
+        const bankCanon = bankCanonicalFromAny(bank);
+        const alreadyUsesThisBrand = bankCanon && (selectedPaymentMethods || []).some(
+          (pm) => normalizeSelectedPM(pm).bankCanonical === bankCanon
+        );
+        if (!alreadyUsesThisBrand) continue;
+      }
 
       const count = Number(counts[bank] ?? counts[String(bank).toLowerCase()] ?? 0);
       if (count <= 0) continue;
@@ -9383,7 +9403,17 @@ function resolvePrimaryDecodeMessage({
     // was also wrong on its own terms - a live, same-bank, right-now offer
     // isn't "nearby", it's exactly as live and real as Tier 1's own tag
     // says, so it reuses that same tag text.
-    const { label, pct } = tier2PercentAndLabel(tier2);
+    //
+    // Same "% off the TRUE base, not off an already-discounted price" fix
+    // as the Tier 1 and Tier 3-alone branches (2026-08-10, commit
+    // 5b60474) - this call site was missed in that pass. No tier1Deal
+    // exists here, but a GENERIC (non-payment-specific) discount can still
+    // be reducing currentBestPrice (genericDealApplied) - if so, that
+    // applied deal's own basePrice is the fare's real original price, not
+    // currentBestPrice itself (QC-caught, 2026-08-11: a real 10% Kotak EMI
+    // offer was displaying as "save 6%").
+    const genericBaseDealForTier2Alone = genericDealApplied ? candidateDeals.find((d) => d?.applied) : null;
+    const { label, pct } = tier2PercentAndLabel(tier2, genericBaseDealForTier2Alone?.basePrice);
     const tier2MethodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
     const tier2MethodLabel = tier2MethodNames.length ? tier2MethodNames.join(" or ") : "your selected method";
     message = {
