@@ -20,7 +20,18 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(cors());
-app.use(express.json());
+// Default 100kb was tripping real /payment-suggestions and /reprice-flights
+// requests on round-trip searches - each request echoes back every loaded
+// flight's already-computed bestDeal (portal comparison text, offer
+// constraints, infoOffers) so the backend can read its applied/finalPrice
+// fields, and at 80 flights per leg that routinely lands in the 70-100kb+
+// range depending on how many offers matched. A 413 fails identically on
+// every retry (unlike a timeout), so it was surfacing as the sairro decode
+// card's offline-fallback message on ordinary round-trip payment-method
+// changes (Kapil, 2026-08-12, reproduced live). Raised to match the same
+// "measure the real worst case, don't guess" precedent already used for
+// this app's fetch timeouts.
+app.use(express.json({ limit: "2mb" }));
 
 // --------------------
 // Config
