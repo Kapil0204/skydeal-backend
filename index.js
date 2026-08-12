@@ -8339,6 +8339,28 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
     .slice(0, cfg.maxCandidatesPerRequest);
 }
 
+// Drops a trailing " Bank" from a bank's own display name only - not any
+// occurrence of the substring "Bank" (e.g. "Bank of Baroda" is left
+// untouched, since "Bank" isn't its last word there). "ICICI Bank Credit
+// Card" read as a redundant double financial-institution marker; "ICICI
+// Credit Card" matches how people actually refer to their own card
+// (Kapil, 2026-08-12).
+function stripTrailingBankWord(name) {
+  return String(name || "").replace(/\s+Bank$/i, "").trim();
+}
+
+// Shared instrument-label builder (Kapil, 2026-08-12). EMI in this
+// catalog is always a credit card converted to EMI, not its own
+// instrument - "ICICI EMI" alone doesn't say what unlocks the EMI,
+// "ICICI Credit Card EMI" does. Every other type keeps its own name.
+function formatBankTypeLabel(name, type) {
+  const shortName = stripTrailingBankWord(name);
+  if (!shortName) return type || "";
+  if (!type) return shortName;
+  if (String(type).toUpperCase() === "EMI") return `${shortName} Credit Card EMI`;
+  return `${shortName} ${type}`;
+}
+
 // Always names the exact instrument (bank + type), not just the bank - a
 // user with a bank selected as more than one variant (e.g. "ICICI Bank" as
 // both Credit Card and EMI) can't tell which one a message is about
@@ -8346,8 +8368,8 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
 function paymentMethodShortLabel(pm) {
   if (pm.type === "UPI") return pm.provider || pm.name || "UPI";
   if (!pm.name) return pm.type || "this option";
-  if (!pm.type) return pm.name;
-  return `${pm.name} ${pm.type}`.trim();
+  if (!pm.type) return stripTrailingBankWord(pm.name);
+  return formatBankTypeLabel(pm.name, pm.type);
 }
 
 // Stable, machine-readable reason per suggestion (Phase 2) - a display
@@ -9057,6 +9079,19 @@ function computeDiscountPercent(basePrice, discountAmount) {
   return pct > 0 ? pct : null;
 }
 
+// Approximates a live generic/checkout discount as a percentage, for the
+// "a site discount's already applied" family of tips - "applied" alone
+// doesn't say how much, which reads as vague rather than reassuring
+// (Kapil, 2026-08-12). Rounds UP, not to nearest - the copy always says
+// "about X%", so it should never be an understatement.
+function genericDiscountApproxPercent(deal) {
+  const base = Number(deal?.basePrice);
+  const discount = Number(deal?.actualDiscount);
+  if (!(Number.isFinite(base) && base > 0 && Number.isFinite(discount) && discount > 0)) return null;
+  const pct = Math.ceil((discount / base) * 100);
+  return pct > 0 ? pct : null;
+}
+
 function formatDiscountPercentPhrase(bestDeal) {
   const pct = computeDiscountPercent(bestDeal?.basePrice, bestDeal?.actualDiscount);
   if (pct != null) return `${pct}% off`;
@@ -9156,12 +9191,12 @@ function resolveTier1Match(bestDeal, selectedPaymentMethods, offers) {
   const offer = findOfferSourceDoc(bestDeal, offers);
   const matched = offer ? getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) : null;
   if (matched?.name) {
-    return { name: matched.name, type: matched.type, label: `${matched.name} ${matched.type}`.trim() };
+    return { name: matched.name, type: matched.type, label: formatBankTypeLabel(matched.name, matched.type) };
   }
 
   const rawLabel = bestDeal?.paymentLabel || "";
   const namePart = rawLabel.split("•")[0].trim();
-  return { name: namePart || null, type: null, label: namePart || "Your payment method" };
+  return { name: namePart || null, type: null, label: stripTrailingBankWord(namePart) || "Your payment method" };
 }
 
 // Whether a SPECIFIC selected method (this exact bank+type, not just the
@@ -9472,12 +9507,21 @@ function resolvePrimaryDecodeMessage({
       // "else if" that silently dropped the site-discount tip whenever a
       // Tier 2 CTA was also shown.
       if (genericDealApplied) {
-        message.tip = "Not into EMI? A site discount's already applied either way.";
+        // Quantified, not just "applied" - a bare "applied" doesn't say
+        // how much, which reads as vague (Kapil, 2026-08-12).
+        const genericPct = genericDiscountApproxPercent(genericBaseDeal);
+        message.tip = genericPct != null
+          ? `Not into EMI? We've found a site discount worth about ${genericPct}% either way.`
+          : "Not into EMI? A site discount's already applied either way.";
       }
     } else if (genericDealApplied) {
       // No same-bank alternative either - offer the one real next step
       // (a different card/UPI/wallet entirely) instead of a dead end.
-      message.tip = "Not into EMI? No worries - we've already applied a site discount for you.";
+      const genericBaseDealNoTier2 = candidateDeals.find((d) => d?.applied);
+      const genericPctNoTier2 = genericDiscountApproxPercent(genericBaseDealNoTier2);
+      message.tip = genericPctNoTier2 != null
+        ? `Not into EMI? No worries - we've found a site discount worth about ${genericPctNoTier2}% for you.`
+        : "Not into EMI? No worries - we've already applied a site discount for you.";
       message.ctaGeneric = "Add other payment options";
     }
   } else if (tier2 && tier2.additionalSaving > 0) {
@@ -9540,22 +9584,33 @@ function resolvePrimaryDecodeMessage({
     // ("credit card, debit card, and EMI options") followed by a bare
     // negative - the doc's own core principle is "never make the user
     // feel they failed to save money" (copy audit, 2026-08-11).
+    // Quantified, not just "applied" - see genericDiscountApproxPercent
+    // (Kapil, 2026-08-12).
+    const genericBaseDealTier4 = genericDealApplied ? candidateDeals.find((d) => d?.applied) : null;
+    const genericPctTier4 = genericDiscountApproxPercent(genericBaseDealTier4);
+
     message = {
       tier: 4,
       urgent: false,
-      tag: genericDealApplied ? "Site discount applied" : "Nothing live today",
+      tag: genericPctTier4 != null ? `~${genericPctTier4}% site discount` : (genericDealApplied ? "Site discount applied" : "Nothing live today"),
       tagVariant: "live",
       heading: `We checked your ${methodLabel}`,
       message: `This didn't unlock a lower price for this flight. We still found the best available deal across portals.`,
       warning: null,
-      tip: genericDealApplied ? "Don't worry - we've already applied a site discount for you." : null,
+      tip: genericDealApplied
+        ? (genericPctTier4 != null
+            ? `Don't worry - we've found a site discount worth about ${genericPctTier4}% for you.`
+            : "Don't worry - we've already applied a site discount for you.")
+        : null,
       cta: null,
       skip: null,
       ctaGeneric: "Add other payment options",
       upsell: null,
       mirror: null,
       sticky: genericDealApplied
-        ? `Checked your ${methodLabel} — a site discount's already applied`
+        ? (genericPctTier4 != null
+            ? `Checked your ${methodLabel} — about ${genericPctTier4}% site discount found`
+            : `Checked your ${methodLabel} — a site discount's already applied`)
         : `Checked your ${methodLabel} — best available price shown`
     };
   }
