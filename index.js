@@ -6952,6 +6952,8 @@ app.get("/debug/payment-match-trace", async (req, res) => {
 });
 
 app.get("/debug/build-version", (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   res.json({
     service: "skydeal-backend",
     buildMarker: "flightapi-cache-retry-attempts-3-2026-06-20",
@@ -10149,6 +10151,8 @@ function calculateGenericCouponCandidate(candidate, adults, basePrice) {
 }
 
 app.get("/debug/generic-coupon-candidates", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   try {
     const portal = normalizeDebugText(req.query.portal);
     const routeType = normalizeDebugText(req.query.routeType || "international");
@@ -10233,6 +10237,8 @@ app.get("/debug/generic-coupon-candidates", async (req, res) => {
 // This reads from generic_checkout_display_offer_candidates only.
 // It does not affect /search, offer_rules, or live pricing.
 app.get("/debug/generic-display-offer-candidates", async (req, res) => {
+  if (!requireDebugEnabled(req, res)) return;
+
   let client;
 
   try {
