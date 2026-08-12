@@ -8777,16 +8777,13 @@ async function buildTimingInsights({
     const simCtx = { ...ctx, evaluationBookingDate: evalDay };
 
     const outboundSim = await repriceFlightsForPaymentMethods(outboundSample, hypothetical, simCtx);
-    const newOutboundBest = Math.min(
-      ...outboundSim.map((r, i) => finalPriceFromRepriced(r, outboundSample[i]))
-    );
+    const { bestFinal: newOutboundBest, bestBase: newOutboundBestBase } = findBestIndexAndBasePrice(outboundSim, outboundSample);
 
     let newReturnBest = 0;
+    let newReturnBestBase = 0;
     if (tripType === "round-trip" && returnSample.length > 0) {
       const returnSim = await repriceFlightsForPaymentMethods(returnSample, hypothetical, simCtx);
-      newReturnBest = Math.min(
-        ...returnSim.map((r, i) => finalPriceFromRepriced(r, returnSample[i]))
-      );
+      ({ bestFinal: newReturnBest, bestBase: newReturnBestBase } = findBestIndexAndBasePrice(returnSim, returnSample));
     }
 
     const hypotheticalBestPrice = newOutboundBest + newReturnBest;
@@ -8804,10 +8801,29 @@ async function buildTimingInsights({
       (currentBestPrice > 0 && potentialSaving / currentBestPrice >= recCfg.minPercentSaving);
     if (!isValid) continue;
 
+    // For the "becomes available" (future) family only: replace
+    // potentialSaving with the offer's own true saving, computed
+    // same-flight against newOutboundBestBase/newReturnBestBase - NOT the
+    // gap-against-currentBestPrice value computed above, which is really
+    // "how much better than today's realistic fallback" (itself possibly
+    // already reduced by an unrelated generic coupon), not the offer's
+    // own rate. The "ending" family's copy ("it's saving you ₹X right
+    // now, won't work tomorrow") is a legitimately different,
+    // vs-realistic-fallback claim and keeps the original value; only the
+    // future family's "you could save ₹X by paying with X" claims to
+    // describe the OFFER'S OWN value (QC-caught from a live screenshot,
+    // 2026-08-12: a real ~10% ICICI offer was showing as "save 4%").
+    // isMeaningful/isValid above stay gated on the original vs-fallback
+    // diff - that decides whether this is worth surfacing at all, a
+    // separate question from what number to display once it is.
+    const trueBasePrice = newOutboundBestBase + newReturnBestBase;
+    const trueSaving = Math.round(Math.max(0, trueBasePrice - hypotheticalBestPrice));
+    const displaySaving = isEndingFamily ? potentialSaving : (trueSaving || potentialSaving);
+
     const copy = buildTimingInsightCopy({
       method,
       classification,
-      potentialSaving,
+      potentialSaving: displaySaving,
       currentBestPrice,
       hypotheticalBestPrice,
       todayDateOnly,
@@ -8822,7 +8838,11 @@ async function buildTimingInsights({
       currentDate: todayDateOnly.toISOString().slice(0, 10),
       availableFrom: isEndingFamily ? todayDateOnly.toISOString().slice(0, 10) : evalDay.toISOString().slice(0, 10),
       availableUntil: isEndingFamily ? addDaysToDateOnly(todayDateOnly, classification.endDayIndex - 1).toISOString().slice(0, 10) : null,
-      potentialSaving,
+      potentialSaving: displaySaving,
+      // trueBasePrice: additive, future-family only - lets tier3PercentPhrase
+      // compute this offer's own real discount % same-flight-exact, instead
+      // of against currentBestPrice (see comment above).
+      trueBasePrice: !isEndingFamily && trueBasePrice > 0 ? trueBasePrice : null,
       currentBestPrice,
       estimatedFinalPrice: copy.estimatedFinalPrice,
       isOfferOnlyEstimate: !isEndingFamily,
@@ -9100,11 +9120,18 @@ function tier2PercentAndLabel(tier2, trueBasePrice) {
 }
 
 // A future timing insight (Tier 3) stores its rupee saving pre-formatted
-// into .message text - this pulls the raw numbers buildTimingInsightCopy
-// also returns (potentialSaving, currentBestPrice) to compute the same
-// kind of percentage instead.
+// into .message text - this pulls the raw numbers to compute the same
+// kind of percentage instead. Prefers trueBasePrice (the SAME flight's
+// real fare the offer's own discount was computed against, added
+// 2026-08-12) over currentBestPrice - the latter is today's realistic
+// fallback price, not the offer's own base, and dividing by it produced a
+// real-but-wrong percentage (QC-caught from a live screenshot: a genuine
+// ~10% ICICI offer read as "save 4%").
 function tier3PercentPhrase(tier3) {
-  const pct = computeDiscountPercent(tier3?.currentBestPrice, tier3?.potentialSaving);
+  const base = Number.isFinite(tier3?.trueBasePrice) && tier3.trueBasePrice > 0
+    ? tier3.trueBasePrice
+    : tier3?.currentBestPrice;
+  const pct = computeDiscountPercent(base, tier3?.potentialSaving);
   return pct != null ? `${pct}%` : null;
 }
 
