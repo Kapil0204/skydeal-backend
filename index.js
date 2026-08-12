@@ -9552,6 +9552,11 @@ function resolvePrimaryDecodeMessage({
     const { label, pct } = tier2PercentAndLabel(tier2, genericBaseDealForTier2Alone?.basePrice);
     const tier2MethodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
     const tier2MethodLabel = tier2MethodNames.length ? tier2MethodNames.join(" or ") : "your selected method";
+    // QC-caught (Kapil, 2026-08-12): this branch never checked
+    // genericDealApplied at all, unlike its Tier 3/Tier 4 siblings - the
+    // "we've found a site discount" reassurance silently never showed
+    // here even when one was genuinely backing the price.
+    const genericPctTier2Alone = genericDiscountApproxPercent(genericBaseDealForTier2Alone);
     message = {
       tier: 2,
       urgent: false,
@@ -9562,7 +9567,9 @@ function resolvePrimaryDecodeMessage({
         ? `${label}, though, has a live offer today - save ${pct}% by switching.`
         : `${label}, though, has a live offer today.`,
       warning: null,
-      tip: null,
+      tip: genericPctTier2Alone != null
+        ? `We've also found a site discount worth about ${genericPctTier2Alone}% either way.`
+        : null,
       cta: { label: pct != null ? `Add ${label} (save ${pct}%)` : (tier2.primaryActionLabel || `Add ${label}`), paymentMethod: tier2.paymentMethod },
       // QC-caught (copy audit, 2026-08-11): every other CTA-bearing branch
       // pairs its "Add X" button with a way to say no - this one didn't.
