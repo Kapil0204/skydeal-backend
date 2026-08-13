@@ -10412,6 +10412,28 @@ app.get("/debug/generic-display-offer-candidates", async (req, res) => {
   }
 });
 
+// Body-parser failures (an oversized body over the 2mb limit above, or
+// malformed JSON) throw before any route's own try/catch ever runs, so
+// they fell through to Express's built-in default error handler - the
+// only place in this API that didn't return this app's {error: "..."}
+// JSON convention (QA, 2026-08-12: confirmed live - a >2mb POST to
+// /reprice-flights came back as a text/html "Payload Too Large" page,
+// and malformed JSON came back as a text/html "Bad Request" page).
+// Normalizes just those two known body-parser failure modes; anything
+// else still falls through to Express's default handler unchanged; every
+// route already handles its own errors.
+app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "Request body too large (max 2mb)." });
+  }
+
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "Malformed JSON in request body." });
+  }
+
+  next(err);
+});
+
 app.listen(PORT, () => {
   console.log(`SkyDeal backend listening on ${PORT}`);
 });
