@@ -2099,7 +2099,7 @@ function offerRequiresOneWayOnly(offer) {
 
   return hasOneWay && !hasRoundTrip;
 }
-function getPassengerRestrictionResult(offer, passengers = 1) {
+function getPassengerRestrictionResult(offer, passengers = 1, infants = 0) {
   const pax = Math.max(1, Number(passengers) || 1);
 
   const blob = normalizeText(
@@ -2146,15 +2146,20 @@ function getPassengerRestrictionResult(offer, passengers = 1) {
     }
   }
 
-  // Infant restrictions
+  // Infant restrictions - enforced now that real infant counts exist
+  // (/search only for now; /reprice-flights and /payment-suggestions don't
+  // carry infants yet, so an offer excluded here can still show as
+  // available after a payment-method-only reprice - known follow-up).
+  const infantCount = Math.max(0, Number(infants) || 0);
   if (
-    /\binfant not allowed\b/.test(blob) ||
-    /\bnot valid with infant\b/.test(blob) ||
-    /\bexcluding infant\b/.test(blob)
+    infantCount > 0 &&
+    (
+      /\binfant not allowed\b/.test(blob) ||
+      /\bnot valid with infant\b/.test(blob) ||
+      /\bexcluding infant\b/.test(blob)
+    )
   ) {
-    // current request model does not separately carry infants
-    // keep this as informational only for now
-    return { ok: true, warning: "INFANT_RESTRICTION_PRESENT_BUT_NOT_ENFORCED" };
+    return { ok: false, reason: "INFANT_RESTRICTION_PRESENT" };
   }
 
   return { ok: true };
@@ -4325,6 +4330,7 @@ function evaluateOfferForFlight({
   flightAirlineName,
   tripType,
   passengers,
+  infants = 0,
   allOffers = [],
   requestCache = null,
   // Phase 3: optional hypothetical booking date (Date object), mirrors
@@ -4516,7 +4522,7 @@ if (isCashbackStyleOffer(offer)) {
   if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
   }
-  const passengerRestriction = getPassengerRestrictionResult(offer, passengers);
+  const passengerRestriction = getPassengerRestrictionResult(offer, passengers, infants);
   if (!passengerRestriction.ok) {
     return {
       ok: false,
@@ -5212,7 +5218,13 @@ async function applyOffersToFlight(
   // if this were booked on day X" timing simulation. Defaults to real
   // "now" for every existing caller - behavior is unchanged unless a
   // caller explicitly passes this.
-  evaluationBookingDate = null
+  evaluationBookingDate = null,
+  // Real infant headcount, separate from `passengers` (which is
+  // adults+children - infants never count toward passenger-count offer
+  // restrictions or discount multipliers). Defaults to 0 for every
+  // existing caller, so only /search's real infant threading changes
+  // behavior.
+  infants = 0
 ) {
   const base = typeof flight.price === "number" ? flight.price : 0;
 
@@ -5239,6 +5251,10 @@ async function applyOffersToFlight(
   // expiry/booking-day checks below depend on it, so a "today" result
   // must never be served for a simulated "tomorrow" evaluation and vice
   // versa, even when both share one requestCache within a request.
+  // infants is intentionally not part of this key: it's constant for the
+  // lifetime of a single request (requestCache is created fresh per
+  // request), so it can never vary between a cache write and a cache hit
+  // within the same requestCache the way passengers/evaluationBookingDate can.
   const pricingCandidateKey = JSON.stringify({
     portal,
     isDomestic,
@@ -5285,7 +5301,7 @@ async function applyOffersToFlight(
 
         if (tripType === "one-way" && offerRequiresRoundTrip(offer)) return false;
 
-        const passengerRestriction = getPassengerRestrictionResult(offer, passengers);
+        const passengerRestriction = getPassengerRestrictionResult(offer, passengers, infants);
         if (!passengerRestriction.ok) return false;
 
         const manualCabinScope = offerMatchesManualCabinScope(offer, cabin, isDomestic);
@@ -5384,6 +5400,7 @@ for (const offer of offersToEvaluate) {
     flightAirlineName: flight.airlineName,
     tripType,
     passengers,
+    infants,
     allOffers: offers,
     requestCache,
     evaluationBookingDate,
@@ -6992,9 +7009,14 @@ app.post("/compare-selected-trip", async (req, res) => {
       ""
     ).trim().toUpperCase();
 
+    // This endpoint never calls FlightAPI (it re-prices flights the client
+    // already selected), so only the offer-eligibility count matters here -
+    // prefer body.passengers (adults+children) over body.adults (true adult
+    // headcount) now that the two can diverge. Falls back to body.adults for
+    // older clients that only ever sent one value.
     const adults = Math.max(
       1,
-      Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
+      Math.floor(Number(body.passengers ?? body.adults ?? 1) || 1)
     );
     const cabin = normalizeCabin(body.travelClass || body.cabin);
     const routeIsDomestic = isDomesticRoute(from, to);
@@ -7441,6 +7463,21 @@ app.post("/search", async (req, res) => {
       1,
       Math.floor(Number(body.adults ?? body.passengers ?? 1) || 1)
     );
+    const children = Math.max(0, Math.floor(Number(body.children ?? 0) || 0));
+    // Server-side clamp mirrors the client's max-1-infant-per-adult rule -
+    // never trust the client value alone.
+    const infants = Math.min(
+      adults,
+      Math.max(0, Math.floor(Number(body.infants ?? 0) || 0))
+    );
+
+    // Real per-tier headcount - FlightAPI only.
+    const flightApiPassengerCounts = { adults, children, infants };
+    // Offer engine / eligibility count everywhere else - adults + children,
+    // infants excluded (an infant rides on an adult's lap and isn't charged
+    // a fare or counted against passenger-count offer restrictions).
+    const offerEligibilityPassengers = adults + children;
+
     const cabin = normalizeCabin(body.travelClass || body.cabin);
     const currency = "INR";
 
@@ -7568,7 +7605,9 @@ app.post("/search", async (req, res) => {
               from: pair.from,
               to: pair.to,
               date,
-              adults,
+              adults: flightApiPassengerCounts.adults,
+              children: flightApiPassengerCounts.children,
+              infants: flightApiPassengerCounts.infants,
               cabin,
               currency
             })
@@ -7695,13 +7734,15 @@ app.post("/search", async (req, res) => {
               f,
               selectedPaymentMethods,
               offers,
-              adults,
+              offerEligibilityPassengers,
               cabin,
               tripType,
               routeIsDomestic,
               timings.offerPricingBreakdown || (timings.offerPricingBreakdown = {}),
               offerPricingRequestCache,
-              genericDisplayContext
+              genericDisplayContext,
+              null,
+              flightApiPassengerCounts.infants
             )
           );
         }
@@ -7862,7 +7903,13 @@ app.post("/search", async (req, res) => {
           to,
           travelClass: cabin,
           tripType,
-          passengers: adults,
+          // Must match what the real subsequent /payment-suggestions call
+          // will send (validatePaymentRepriceRequest -> v.passengers), or
+          // this head-start pre-warm produces a cache entry under the wrong
+          // key and is silently wasted - same failure class as the
+          // outDate/retDate and selectedPaymentMethods normalization this
+          // block already had to fix once (see comment above).
+          passengers: offerEligibilityPassengers,
           selectedPaymentMethods: selectedPaymentMethodsRaw,
           outboundFlights,
           returnFlights,
