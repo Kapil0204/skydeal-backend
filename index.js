@@ -486,13 +486,18 @@ function hasNonStopAirIndiaItinerary(parsedData) {
   return false;
 }
 
-const AIRINDIA_RETRY_TIMEOUT_MS = Number(process.env.FLIGHTAPI_AIRINDIA_RETRY_TIMEOUT_MS || 5000);
+const AIRINDIA_RETRY_TIMEOUT_MS = Number(process.env.FLIGHTAPI_AIRINDIA_RETRY_TIMEOUT_MS || 1500);
 
 // Fires at most ONE extra fetch, capped at AIRINDIA_RETRY_TIMEOUT_MS (default
-// 5s) - deliberately much shorter than the main FLIGHTAPI_TIMEOUT_MS/retry
-// loop above, since this must never turn into a 5-10s wait. Fails open: any
-// error, timeout, or still-empty result just falls back to the original
-// (already-successful) response rather than throwing.
+// 1.5s, lowered from 5s on 2026-08-14 - a live search showed 4 retries firing
+// in one request with 0 recoveries, each burning up to the full 5s budget on
+// the critical path; still blocking rather than backgrounded so a genuinely
+// fast recovery still reaches the request that needed it, but the worst-case
+// cost is now bounded much tighter) - deliberately much shorter than the main
+// FLIGHTAPI_TIMEOUT_MS/retry loop above, since this must never turn into a
+// 5-10s wait. Fails open: any error, timeout, or still-empty result just
+// falls back to the original (already-successful) response rather than
+// throwing.
 async function maybeRetryForMissingAirIndiaNonStop(parsedData, activeUrl, tried) {
   if (hasNonStopAirIndiaItinerary(parsedData)) return parsedData;
 
