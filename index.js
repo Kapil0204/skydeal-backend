@@ -828,7 +828,14 @@ const INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR = {
   __default: 56
 };
 
-function applyIndigoNonstopPortalCorrection(portalBase, flight, portal) {
+// 2026-08-13: this correction was originally a flat add regardless of
+// passenger count. Live-checked against real portal pages (not assumed):
+// Yatra and MakeMyTrip both explicitly label this fare "/adult" on the
+// exact same flight even with 2 travelers selected, and EaseMyTrip showed
+// the real gap going from Rs.10 (1 adult) to Rs.20 (2 adults) - an exact
+// 2x scale. Confirmed real, per-seat behavior, not portal-specific -
+// scaling by passenger count here.
+function applyIndigoNonstopPortalCorrection(portalBase, flight, portal, passengers = 1) {
   const airline = normalizeForMatch(flight?.airlineName);
   if (!airline.includes("indigo")) return portalBase;
   if (Number(flight?.stops) !== 0) return portalBase;
@@ -837,7 +844,8 @@ function applyIndigoNonstopPortalCorrection(portalBase, flight, portal) {
     ? INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR[portal]
     : INDIGO_NONSTOP_PORTAL_CORRECTIONS_INR.__default;
 
-  return portalBase + correctionInr;
+  const pax = Math.max(1, Number(passengers) || 1);
+  return portalBase + correctionInr * pax;
 }
 
 // 2026-07-24: live-audited Air India's FlightAPI carrier-direct price the
@@ -854,7 +862,9 @@ const AIRINDIA_NONSTOP_PORTAL_CORRECTIONS_INR = {
   // price exactly, so they get no correction.
 };
 
-function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal) {
+// 2026-08-13: scaled by passenger count for the same reason as the IndiGo
+// correction above - see that comment for the live evidence.
+function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal, passengers = 1) {
   const airline = normalizeForMatch(flight?.airlineName);
   // Air India Express is a separate carrier (code IX) and contains "air
   // india" as a substring - explicitly excluded so this never misfires on it.
@@ -866,7 +876,8 @@ function applyAirIndiaNonstopPortalCorrection(portalBase, flight, portal) {
     ? AIRINDIA_NONSTOP_PORTAL_CORRECTIONS_INR[portal]
     : 0;
 
-  return portalBase + correctionInr;
+  const pax = Math.max(1, Number(passengers) || 1);
+  return portalBase + correctionInr * pax;
 }
 
 // 2026-07-24/25: regional carriers (Star Air and Alliance Air confirmed,
@@ -5238,8 +5249,8 @@ async function applyOffersToFlight(
       pricingTiming.portalRowsPriced = (pricingTiming.portalRowsPriced || 0) + 1;
     }
 
-    const portalBaseAfterIndigo = applyIndigoNonstopPortalCorrection(Math.round(base), flight, portal);
-    const portalBase = applyAirIndiaNonstopPortalCorrection(portalBaseAfterIndigo, flight, portal);
+    const portalBaseAfterIndigo = applyIndigoNonstopPortalCorrection(Math.round(base), flight, portal, passengers);
+    const portalBase = applyAirIndiaNonstopPortalCorrection(portalBaseAfterIndigo, flight, portal, passengers);
 
     // FlightAPI/search result price is already the booking-level price for the requested passenger count.
     // Do not multiply by passengers again for min-transaction eligibility, or high-minimum offers
