@@ -4439,92 +4439,115 @@ function evaluateOfferForFlight({
   }
 
   if (__frontResult) return __frontResult;
-  const rawDiscountText = String(
-  offer?.rawDiscount ||
-  offer?.parsedFields?.rawDiscount ||
-  ""
-).toLowerCase();
+  // Offer-only discount-structure check (2026-08-14): every input below
+  // (offer.discountTiers/flatDiscountAmount/maxDiscountAmount/
+  // discountPercent/title/rawDiscount/offerSummary/pricingEligible/
+  // hasDeterministicDiscount) is a static field of `offer` itself - never
+  // the flight/portal/date/payment-method - so the result is identical on
+  // every call for the same offer within a request. Memoized per offer.
+  // NOT merged with the similar-looking check further below
+  // (hasComputableDiscountBeforeCalc) - confirmed by direct comparison
+  // that one also checks offer.discountAmount/parsedFields.discountAmount
+  // as extra fallbacks, and requires a tier to have an actual positive
+  // value rather than just being present - a real difference, not
+  // copy-paste duplication, so kept as its own separate memo.
+  const __offerStructureMemo = requestCache?.offerDiscountStructureMemo || null;
+  let __offerStructure = __offerStructureMemo ? __offerStructureMemo.get(offer) : undefined;
 
-const hasTiers =
-  Array.isArray(offer?.discountTiers) && offer.discountTiers.length > 0;
+  if (__offerStructure === undefined) {
+    const rawDiscountText = String(
+      offer?.rawDiscount ||
+      offer?.parsedFields?.rawDiscount ||
+      ""
+    ).toLowerCase();
 
-const structuredFlatAmount = Number(
-  offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0
-);
+    const hasTiers =
+      Array.isArray(offer?.discountTiers) && offer.discountTiers.length > 0;
 
-const structuredMaxCap = Number(
-  offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0
-);
+    const structuredFlatAmount = Number(
+      offer?.flatDiscountAmount ?? offer?.parsedFields?.flatDiscountAmount ?? 0
+    );
 
-const structuredPercent = Number(
-  offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0
-);
+    const structuredMaxCap = Number(
+      offer?.maxDiscountAmount ?? offer?.parsedFields?.maxDiscountAmount ?? 0
+    );
 
-// For best-deal eligibility, only trust a percent clearly visible in the
-// concise offer fields. Do NOT infer percent from long rawText here, because
-// rawText can contain unrelated terms/tiers and can make cap-only "up to" offers
-// look deterministic.
-const conciseDiscountBlob = String(
-  `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
-).toLowerCase();
+    const structuredPercent = Number(
+      offer?.discountPercent ?? offer?.parsedFields?.discountPercent ?? 0
+    );
 
-const concisePercentMatch =
-  conciseDiscountBlob.match(/(?:flat\s*)?(\d{1,2})\s*%\s*(?:instant\s*)?(?:discount|off)/i) ||
-  conciseDiscountBlob.match(/(?:instant\s*)?(?:discount|off)[^%]{0,40}(\d{1,2})\s*%/i) ||
-  conciseDiscountBlob.match(/\b(\d{1,2})\s*%\s*off\b/i);
+    // For best-deal eligibility, only trust a percent clearly visible in the
+    // concise offer fields. Do NOT infer percent from long rawText here, because
+    // rawText can contain unrelated terms/tiers and can make cap-only "up to" offers
+    // look deterministic.
+    const conciseDiscountBlob = String(
+      `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+    ).toLowerCase();
 
-const parsedPercent = concisePercentMatch
-  ? Number(concisePercentMatch[1])
-  : 0;
+    const concisePercentMatch =
+      conciseDiscountBlob.match(/(?:flat\s*)?(\d{1,2})\s*%\s*(?:instant\s*)?(?:discount|off)/i) ||
+      conciseDiscountBlob.match(/(?:instant\s*)?(?:discount|off)[^%]{0,40}(\d{1,2})\s*%/i) ||
+      conciseDiscountBlob.match(/\b(\d{1,2})\s*%\s*off\b/i);
 
-const hasStructuredFlat =
-  Number.isFinite(structuredFlatAmount) && structuredFlatAmount > 0;
+    const parsedPercent = concisePercentMatch
+      ? Number(concisePercentMatch[1])
+      : 0;
 
-const hasStructuredCap =
-  Number.isFinite(structuredMaxCap) && structuredMaxCap > 0;
+    const hasStructuredFlat =
+      Number.isFinite(structuredFlatAmount) && structuredFlatAmount > 0;
 
-const hasStructuredPercent =
-  Number.isFinite(structuredPercent) && structuredPercent > 0;
+    const hasStructuredCap =
+      Number.isFinite(structuredMaxCap) && structuredMaxCap > 0;
 
-const hasParsedPercent =
-  Number.isFinite(parsedPercent) && parsedPercent > 0;
+    const hasStructuredPercent =
+      Number.isFinite(structuredPercent) && structuredPercent > 0;
 
-// Important:
-// maxDiscountAmount is only a cap. It is NOT the actual discount by itself.
-// A direct best deal must have a computable discount source:
-// - discount tiers, OR
-// - flat discount, OR
-// - structured/parsed percentage.
-// Cap-only / "up to ₹X" offers must not become applied winners.
-const hasComputableDiscountStructure =
-  hasTiers ||
-  hasStructuredFlat ||
-  hasStructuredPercent ||
-  hasParsedPercent;
+    const hasParsedPercent =
+      Number.isFinite(parsedPercent) && parsedPercent > 0;
 
-const isTrustedCappedPercentOffer =
-  offer?.pricingEligible === true &&
-  offer?.hasDeterministicDiscount === true &&
-  (hasStructuredPercent || hasParsedPercent) &&
-  (hasStructuredCap || hasStructuredFlat);
+    // Important:
+    // maxDiscountAmount is only a cap. It is NOT the actual discount by itself.
+    // A direct best deal must have a computable discount source:
+    // - discount tiers, OR
+    // - flat discount, OR
+    // - structured/parsed percentage.
+    // Cap-only / "up to ₹X" offers must not become applied winners.
+    const hasComputableDiscountStructure =
+      hasTiers ||
+      hasStructuredFlat ||
+      hasStructuredPercent ||
+      hasParsedPercent;
 
-const isCapOnlyDiscount =
-  hasStructuredCap && !hasComputableDiscountStructure;
+    const isTrustedCappedPercentOffer =
+      offer?.pricingEligible === true &&
+      offer?.hasDeterministicDiscount === true &&
+      (hasStructuredPercent || hasParsedPercent) &&
+      (hasStructuredCap || hasStructuredFlat);
 
-const isUnsafeUpToOnly =
-  /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
-  !hasComputableDiscountStructure &&
-  !isTrustedCappedPercentOffer;
+    const isCapOnlyDiscount =
+      hasStructuredCap && !hasComputableDiscountStructure;
 
-if (isCapOnlyDiscount) {
-  return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
-}
+    const isUnsafeUpToOnly =
+      /\bup\s*to\b|\bupto\b/.test(rawDiscountText) &&
+      !hasComputableDiscountStructure &&
+      !isTrustedCappedPercentOffer;
 
-if (isUnsafeUpToOnly) {
-  return { ok: false, reasons: ["UNSAFE_UPTO_OFFER"] };
-}
+    __offerStructure = { isCapOnlyDiscount, isUnsafeUpToOnly };
 
-if (isCashbackStyleOffer(offer)) {
+    if (__offerStructureMemo) {
+      __offerStructureMemo.set(offer, __offerStructure);
+    }
+  }
+
+  if (__offerStructure.isCapOnlyDiscount) {
+    return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
+  }
+
+  if (__offerStructure.isUnsafeUpToOnly) {
+    return { ok: false, reasons: ["UNSAFE_UPTO_OFFER"] };
+  }
+
+  if (isCashbackStyleOffer(offer)) {
   return { ok: false, reasons: ["CASHBACK_NOT_UPFRONT_PRICE"] };
 }
 
@@ -4586,113 +4609,78 @@ if (
     }
   }
 
-  // Final deterministic-discount guard before price calculation.
-  // A maxDiscountAmount is only a cap. It must not be treated as the discount itself.
-  const directTiers =
-    offer?.discountTiers ||
-    offer?.parsedFields?.discountTiers ||
-    [];
+  // Deterministic-discount guard before price calculation (2026-08-14):
+  // offer-only (see note above on why this is a separate memo from the
+  // structure check above, not merged with it). Memoized per offer.
+  const __directDiscountMemo = requestCache?.offerDirectDiscountMemo || null;
+  let __directDiscount = __directDiscountMemo ? __directDiscountMemo.get(offer) : undefined;
 
-  const hasRealTierDiscount =
-    Array.isArray(directTiers) &&
-    directTiers.some((t) => {
-      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
-      const tierPct = Number(t?.discountPercent || 0);
-      return tierFlat > 0 || tierPct > 0;
-    });
+  if (__directDiscount === undefined) {
+    const directTiers =
+      offer?.discountTiers ||
+      offer?.parsedFields?.discountTiers ||
+      [];
 
-  const directFlat = Number(
-    offer?.flatDiscountAmount ??
-    offer?.parsedFields?.flatDiscountAmount ??
-    offer?.discountAmount ??
-    offer?.parsedFields?.discountAmount ??
-    0
-  );
+    const hasRealTierDiscount =
+      Array.isArray(directTiers) &&
+      directTiers.some((t) => {
+        const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
+        const tierPct = Number(t?.discountPercent || 0);
+        return tierFlat > 0 || tierPct > 0;
+      });
 
-  const directPct = Number(
-    offer?.discountPercent ??
-    offer?.parsedFields?.discountPercent ??
-    0
-  );
+    const directFlat = Number(
+      offer?.flatDiscountAmount ??
+      offer?.parsedFields?.flatDiscountAmount ??
+      offer?.discountAmount ??
+      offer?.parsedFields?.discountAmount ??
+      0
+    );
 
-  const directCap = Number(
-    offer?.maxDiscountAmount ??
-    offer?.parsedFields?.maxDiscountAmount ??
-    0
-  );
+    const directPct = Number(
+      offer?.discountPercent ??
+      offer?.parsedFields?.discountPercent ??
+      0
+    );
 
-  const conciseDiscountText = String(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
-  ).toLowerCase();
+    const directCap = Number(
+      offer?.maxDiscountAmount ??
+      offer?.parsedFields?.maxDiscountAmount ??
+      0
+    );
 
-  const hasVisiblePct =
-    /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(conciseDiscountText) ||
-    /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(conciseDiscountText) ||
-    /\b\d{1,2}\s*%\s*off\b/i.test(conciseDiscountText);
+    const conciseDiscountText = String(
+      `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
+    ).toLowerCase();
 
-  const hasComputableDiscountBeforeCalc =
-    hasRealTierDiscount ||
-    (Number.isFinite(directFlat) && directFlat > 0) ||
-    (Number.isFinite(directPct) && directPct > 0) ||
-    hasVisiblePct;
+    const hasVisiblePct =
+      /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(conciseDiscountText) ||
+      /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(conciseDiscountText) ||
+      /\b\d{1,2}\s*%\s*off\b/i.test(conciseDiscountText);
 
-  if (Number.isFinite(directCap) && directCap > 0 && !hasComputableDiscountBeforeCalc) {
+    const hasComputableDiscountBeforeCalc =
+      hasRealTierDiscount ||
+      (Number.isFinite(directFlat) && directFlat > 0) ||
+      (Number.isFinite(directPct) && directPct > 0) ||
+      hasVisiblePct;
+
+    __directDiscount = { hasComputableDiscountBeforeCalc, directCap };
+
+    if (__directDiscountMemo) {
+      __directDiscountMemo.set(offer, __directDiscount);
+    }
+  }
+
+  if (Number.isFinite(__directDiscount.directCap) && __directDiscount.directCap > 0 && !__directDiscount.hasComputableDiscountBeforeCalc) {
     return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
   }
 
-  // Final deterministic-discount guard before price calculation.
-  // maxDiscountAmount is only a cap. It must not become the discount by itself.
-  const finalGuardTiers =
-    offer?.discountTiers ||
-    offer?.parsedFields?.discountTiers ||
-    [];
-
-  const finalGuardHasTierDiscount =
-    Array.isArray(finalGuardTiers) &&
-    finalGuardTiers.some((t) => {
-      const tierFlat = Number(t?.flatDiscountAmount || t?.discountAmount || 0);
-      const tierPct = Number(t?.discountPercent || 0);
-      return tierFlat > 0 || tierPct > 0;
-    });
-
-  const finalGuardFlat = Number(
-    offer?.flatDiscountAmount ??
-    offer?.parsedFields?.flatDiscountAmount ??
-    offer?.discountAmount ??
-    offer?.parsedFields?.discountAmount ??
-    0
-  );
-
-  const finalGuardPct = Number(
-    offer?.discountPercent ??
-    offer?.parsedFields?.discountPercent ??
-    0
-  );
-
-  const finalGuardCap = Number(
-    offer?.maxDiscountAmount ??
-    offer?.parsedFields?.maxDiscountAmount ??
-    0
-  );
-
-  const finalGuardText = String(
-    `${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.parsedFields?.rawDiscount || ""}`
-  ).toLowerCase();
-
-  const finalGuardHasVisiblePct =
-    /(?:flat\s*)?\d{1,2}\s*%\s*(?:instant\s*)?(?:discount|off)/i.test(finalGuardText) ||
-    /(?:instant\s*)?(?:discount|off)[^%]{0,40}\d{1,2}\s*%/i.test(finalGuardText) ||
-    /\b\d{1,2}\s*%\s*off\b/i.test(finalGuardText);
-
-  const finalGuardHasComputableDiscount =
-    finalGuardHasTierDiscount ||
-    (Number.isFinite(finalGuardFlat) && finalGuardFlat > 0) ||
-    (Number.isFinite(finalGuardPct) && finalGuardPct > 0) ||
-    finalGuardHasVisiblePct;
-
-  if (Number.isFinite(finalGuardCap) && finalGuardCap > 0 && !finalGuardHasComputableDiscount) {
-    return { ok: false, reasons: ["CAP_ONLY_NOT_DETERMINISTIC"] };
-  }
+  // The original code repeated the identical check above a second time
+  // here ("final guard before price calculation") - confirmed by direct
+  // comparison it was a byte-for-byte duplicate (same fields, same
+  // fallbacks, same regexes, same guard condition), with nothing
+  // offer-relevant computed in between that could change the answer.
+  // Removed rather than re-run (2026-08-14) - see __directDiscount above.
 
   const discounted = computeDiscountedPrice(
   offer,
@@ -7107,8 +7095,13 @@ app.post("/compare-selected-trip", async (req, res) => {
 
     const bundleBase = Math.round((outboundBase + returnBase) * 100) / 100;
 
-    const col = await getOffersCollection();
-    const offers = await col.find({}, { projection: { _id: 0 } }).toArray();
+    // 2026-08-14: was querying Mongo directly on every call - every other
+    // endpoint (/search, /reprice-flights, /payment-suggestions) already
+    // goes through this same 60s-TTL cache via getOffersForSearch(), which
+    // runs the identical query (col.find({}, {projection:{_id:0}})) - this
+    // endpoint had just never been wired to it. Same data, same freshness
+    // guarantee already trusted everywhere else, just cached.
+    const offers = await getOffersForSearch(meta);
     meta.offersLoaded = offers.length;
 
     // See expandEmiPaymentMethods - a tenure-less EMI selection expands into
@@ -7502,6 +7495,13 @@ app.post("/search", async (req, res) => {
     // "non-applied but relevant" offers scan (see nonAppliedRelevantByKey
     // usage in applyOffersToFlight, 2026-08-14).
     nonAppliedRelevantByKey: new Map(),
+    // Per-offer memos of two distinct (confirmed NOT identical - see
+    // evaluateOfferForFlight, 2026-08-14) offer-only discount-structure
+    // checks - offer.discountTiers/flatDiscountAmount/etc never change
+    // within a request, so these are safe to compute once per offer
+    // instead of once per (flight, portal, offer) call.
+    offerDiscountStructureMemo: new Map(),
+    offerDirectDiscountMemo: new Map(),
     perfEligibilityMemo: body.__perfEligibilityMemo !== false
   };
   meta.perfEligibilityMemo = offerPricingRequestCache.perfEligibilityMemo;
@@ -8165,6 +8165,8 @@ app.post("/reprice-flights", async (req, res) => {
       pricingCandidatesByKey: new Map(),
       frontEligibilityMemo: new Map(),
       nonAppliedRelevantByKey: new Map(),
+      offerDiscountStructureMemo: new Map(),
+      offerDirectDiscountMemo: new Map(),
       perfEligibilityMemo: true
     };
 
@@ -9836,6 +9838,8 @@ async function computePaymentSuggestionsCore(v, cfg) {
     pricingCandidatesByKey: new Map(),
     frontEligibilityMemo: new Map(),
     nonAppliedRelevantByKey: new Map(),
+    offerDiscountStructureMemo: new Map(),
+    offerDirectDiscountMemo: new Map(),
     perfEligibilityMemo: true
   };
     const ctx = {
