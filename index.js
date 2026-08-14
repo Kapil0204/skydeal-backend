@@ -5457,8 +5457,34 @@ for (const offer of offersToEvaluate) {
       // ADD THIS BLOCK
 
 const nonAppliedStart = Date.now();
-const nonAppliedButRelevantOffers = offers
-  .filter((offer) => {
+
+// The first 6 checks below (everything except the final "already included"
+// exclusion) never reference this flight - only portal/evaluationBookingDate/
+// selectedPaymentMethods, which are constant across every flight in one
+// request. Previously re-scanned all `offers` from scratch per flight (up
+// to 80x per portal per search - measured 9.2s of a 17s /search call on
+// 2026-08-14). Cached per-request the same way the static candidate filter
+// just above already caches its own flight-independent pass; only the
+// final per-flight "already included" step runs fresh every time. Verified
+// byte-identical output to the original single-pass filter (same predicate,
+// same offers order, same .slice(0,5) applied to the same final sequence -
+// splitting a filter into a cached prefix + fresh suffix over an unchanged
+// array cannot change which elements pass or their order).
+const nonAppliedRelevantCache = requestCache?.nonAppliedRelevantByKey || null;
+const nonAppliedRelevantKey = JSON.stringify({
+  portal,
+  evaluationBookingDate: evaluationBookingDate ? evaluationBookingDate.toISOString().slice(0, 10) : null,
+  selectedPaymentMethods
+});
+
+let nonAppliedRelevantPool;
+let nonAppliedRelevantWasCacheHit = false;
+
+if (nonAppliedRelevantCache && nonAppliedRelevantCache.has(nonAppliedRelevantKey)) {
+  nonAppliedRelevantPool = nonAppliedRelevantCache.get(nonAppliedRelevantKey);
+  nonAppliedRelevantWasCacheHit = true;
+} else {
+  nonAppliedRelevantPool = offers.filter((offer) => {
     if (!isFlightOffer(offer)) return false;
     if (isOfferExpired(offer, evaluationBookingDate || undefined)) return false;
     if (!offerAppliesToPortal(offer, portal)) return false;
@@ -5473,6 +5499,16 @@ const nonAppliedButRelevantOffers = offers
     // intelligence already covers that upstream, so drop the noise here.
     if (offerRequiresDifferentBank(offer, selectedPaymentMethods)) return false;
 
+    return true;
+  });
+
+  if (nonAppliedRelevantCache) {
+    nonAppliedRelevantCache.set(nonAppliedRelevantKey, nonAppliedRelevantPool);
+  }
+}
+
+const nonAppliedButRelevantOffers = nonAppliedRelevantPool
+  .filter((offer) => {
     // skip already included
     const code =
       offer?.couponCode ||
@@ -5496,7 +5532,10 @@ const nonAppliedButRelevantOffers = offers
 
 if (pricingTiming) {
   pricingTiming.nonAppliedRelevantMs = (pricingTiming.nonAppliedRelevantMs || 0) + (Date.now() - nonAppliedStart);
-  pricingTiming.nonAppliedRelevantScans = (pricingTiming.nonAppliedRelevantScans || 0) + offers.length;
+  pricingTiming.nonAppliedRelevantScans = (pricingTiming.nonAppliedRelevantScans || 0) +
+    (nonAppliedRelevantWasCacheHit ? nonAppliedRelevantPool.length : offers.length);
+  pricingTiming.nonAppliedRelevantCacheHits = (pricingTiming.nonAppliedRelevantCacheHits || 0) + (nonAppliedRelevantWasCacheHit ? 1 : 0);
+  pricingTiming.nonAppliedRelevantCacheMisses = (pricingTiming.nonAppliedRelevantCacheMisses || 0) + (nonAppliedRelevantWasCacheHit ? 0 : 1);
 }
 
 const matchedPaymentLabel =
@@ -7459,6 +7498,10 @@ app.post("/search", async (req, res) => {
     // (2026-07-08/09) — enabled by default. Kill switch: a request can send
     // __perfEligibilityMemo: false to instantly disable it without a redeploy.
     frontEligibilityMemo: new Map(),
+    // Per-request memo of the flight-independent part of the
+    // "non-applied but relevant" offers scan (see nonAppliedRelevantByKey
+    // usage in applyOffersToFlight, 2026-08-14).
+    nonAppliedRelevantByKey: new Map(),
     perfEligibilityMemo: body.__perfEligibilityMemo !== false
   };
   meta.perfEligibilityMemo = offerPricingRequestCache.perfEligibilityMemo;
@@ -7968,7 +8011,7 @@ async function repriceFlightsForPaymentMethods(flights, selectedPaymentMethods, 
       ctx.cabin,
       ctx.tripType,
       ctx.isDomestic,
-      null,
+      ctx.pricingTiming || null,
       ctx.requestCache,
       ctx.genericDisplayContext,
       // Phase 3: only set when ctx carries a hypothetical booking-date
@@ -8099,14 +8142,29 @@ app.post("/reprice-flights", async (req, res) => {
     return res.status(400).json({ error: v.errors.join("; ") });
   }
 
+  // Diagnostic-only timing, additive to the response (2026-08-14) - mirrors
+  // /search's meta.timings so this previously-uninstrumented endpoint (known
+  // live-measured at 18.5s-47s, see PROJECT_STATE.md) can actually be
+  // broken down instead of guessed at. Frontend does not read/depend on
+  // this field today - purely for QC/debugging.
+  const repriceStartedAt = Date.now();
+  const pricingTiming = {};
+
   try {
+    const offersStart = Date.now();
     const offers = await getOffersForSearch({});
+    pricingTiming.offersLoadMs = Date.now() - offersStart;
+
+    const genericStart = Date.now();
     const genericDisplayContext = await getGenericDisplayContextForSearch({});
+    pricingTiming.genericDisplayContextMs = Date.now() - genericStart;
+
     const isDomestic = isDomesticRoute(v.from, v.to);
     const requestCache = {
       infoOffersByKey: new Map(),
       pricingCandidatesByKey: new Map(),
       frontEligibilityMemo: new Map(),
+      nonAppliedRelevantByKey: new Map(),
       perfEligibilityMemo: true
     };
 
@@ -8117,7 +8175,8 @@ app.post("/reprice-flights", async (req, res) => {
       cabin: v.travelClass,
       tripType: v.tripType,
       isDomestic,
-      requestCache
+      requestCache,
+      pricingTiming
     };
 
     // See expandEmiPaymentMethods - the client sends its raw selection
@@ -8127,14 +8186,22 @@ app.post("/reprice-flights", async (req, res) => {
     // pricing after a toggle-only update (no fresh /search).
     const selectedPaymentMethods = expandEmiPaymentMethods(v.selectedPaymentMethods, offers);
 
+    const outboundStart = Date.now();
     const outboundFlights = await repriceFlightsForPaymentMethods(v.outboundFlights, selectedPaymentMethods, ctx);
+    pricingTiming.repriceOutboundMs = Date.now() - outboundStart;
+
+    const returnStart = Date.now();
     const returnFlights = v.tripType === "round-trip"
       ? await repriceFlightsForPaymentMethods(v.returnFlights, selectedPaymentMethods, ctx)
       : [];
+    pricingTiming.repriceReturnMs = Date.now() - returnStart;
 
-    return res.json({ outboundFlights, returnFlights });
+    pricingTiming.totalMs = Date.now() - repriceStartedAt;
+
+    return res.json({ outboundFlights, returnFlights, meta: { timings: pricingTiming } });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Reprice failed" });
+    pricingTiming.totalMs = Date.now() - repriceStartedAt;
+    return res.status(500).json({ error: e?.message || "Reprice failed", meta: { timings: pricingTiming } });
   }
 });
 
@@ -9768,6 +9835,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
     infoOffersByKey: new Map(),
     pricingCandidatesByKey: new Map(),
     frontEligibilityMemo: new Map(),
+    nonAppliedRelevantByKey: new Map(),
     perfEligibilityMemo: true
   };
     const ctx = {
