@@ -4561,7 +4561,15 @@ function evaluateOfferForFlight({
   if (tripType === "one-way" && offerRequiresRoundTrip(offer)) {
     return { ok: false, reasons: ["ROUND_TRIP_ONLY"] };
   }
-  const passengerRestriction = getPassengerRestrictionResult(offer, passengers, infants);
+  // Offer-only (minTxn) / offer+request-constant (passenger restriction,
+  // since passengers/infants never change within one requestCache's
+  // lifetime) - memoized per offer, 2026-08-14.
+  const __passengerRestrictionMemo = requestCache?.passengerRestrictionMemo || null;
+  let passengerRestriction = __passengerRestrictionMemo ? __passengerRestrictionMemo.get(offer) : undefined;
+  if (passengerRestriction === undefined) {
+    passengerRestriction = getPassengerRestrictionResult(offer, passengers, infants);
+    if (__passengerRestrictionMemo) __passengerRestrictionMemo.set(offer, passengerRestriction);
+  }
   if (!passengerRestriction.ok) {
     return {
       ok: false,
@@ -4572,6 +4580,9 @@ function evaluateOfferForFlight({
 const hasSelectedPM = Array.isArray(selectedPaymentMethods) && selectedPaymentMethods.length > 0;
 
 // ✅ FIX: only block payment-type offers, not portal/airline offers
+// Computed once and reused for both checks below (2026-08-14) - previously
+// called twice in a row with identical arguments (offer,
+// selectedPaymentMethods, flightAirlineName don't change between them).
 const offerKindCheck = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
 
 if (
@@ -4582,7 +4593,7 @@ if (
 ) {
   return { ok: false, reasons: ["PAYMENT_REQUIRED_NOT_SELECTED"] };
 }
-  const kindInfo = getOfferKindForFlight(offer, selectedPaymentMethods, flightAirlineName);
+  const kindInfo = offerKindCheck;
   if (!kindInfo.kind) {
     return { ok: false, reasons: [kindInfo.reason || "NOT_ELIGIBLE"] };
   }
@@ -4596,7 +4607,12 @@ if (
     };
   }
 
-  const minTxn = getMinTxnValue(offer);
+  const __minTxnMemo = requestCache?.minTxnMemo || null;
+  let minTxn = __minTxnMemo ? __minTxnMemo.get(offer) : undefined;
+  if (minTxn === undefined) {
+    minTxn = getMinTxnValue(offer);
+    if (__minTxnMemo) __minTxnMemo.set(offer, minTxn);
+  }
   const totalAmount = Number(eligibilityAmount ?? baseAmount);
   const pax = Math.max(1, Number(passengers) || 1);
   const perPassengerAmount = totalAmount / pax;
@@ -7507,6 +7523,13 @@ app.post("/search", async (req, res) => {
     // instead of once per (flight, portal, offer) call.
     offerDiscountStructureMemo: new Map(),
     offerDirectDiscountMemo: new Map(),
+    // Per-offer memos, offer-only (minTxnMemo) or offer+request-constant
+    // passengers/infants (passengerRestrictionMemo - safe to key by offer
+    // alone since passengers/infants never change within one requestCache's
+    // lifetime, unlike evaluationBookingDate which does during timing-
+    // insights simulation - see evaluateOfferForFlight, 2026-08-14).
+    minTxnMemo: new Map(),
+    passengerRestrictionMemo: new Map(),
     perfEligibilityMemo: body.__perfEligibilityMemo !== false
   };
   meta.perfEligibilityMemo = offerPricingRequestCache.perfEligibilityMemo;
@@ -8172,6 +8195,8 @@ app.post("/reprice-flights", async (req, res) => {
       nonAppliedRelevantByKey: new Map(),
       offerDiscountStructureMemo: new Map(),
       offerDirectDiscountMemo: new Map(),
+      minTxnMemo: new Map(),
+      passengerRestrictionMemo: new Map(),
       perfEligibilityMemo: true
     };
 
@@ -9845,6 +9870,8 @@ async function computePaymentSuggestionsCore(v, cfg) {
     nonAppliedRelevantByKey: new Map(),
     offerDiscountStructureMemo: new Map(),
     offerDirectDiscountMemo: new Map(),
+    minTxnMemo: new Map(),
+    passengerRestrictionMemo: new Map(),
     perfEligibilityMemo: true
   };
     const ctx = {
