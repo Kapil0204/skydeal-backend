@@ -7296,6 +7296,35 @@ async function getOffersForSearch(meta = {}) {
   return offers;
 }
 
+// Neither generic_checkout_* collection has any index beyond the default
+// _id (confirmed via repo-wide grep - no createIndex call existed anywhere
+// before this), so the equality-filter queries below were doing full
+// collection scans every 60s cache-miss window (~1.9s cold, per live
+// timing 2026-08-14). createIndex is idempotent - a no-op if a matching
+// index already exists - so this is safe to call repeatedly; the module-
+// level flag just avoids paying even that no-op cost on every cache-miss.
+// Fails open: if index creation errors for any reason (permissions,
+// concurrent DDL, etc), the query below still runs and returns identical
+// results, just without the speed benefit - never a correctness risk.
+let _genericDisplayIndexesEnsured = false;
+async function ensureGenericDisplayIndexes(db) {
+  if (_genericDisplayIndexesEnsured) return;
+  _genericDisplayIndexesEnsured = true;
+  try {
+    await Promise.all([
+      db.collection("generic_checkout_coupon_rule_candidates").createIndex(
+        { status: 1, shouldUploadToActiveOfferRules: 1, pricingReadiness: 1 },
+        { name: "status_uploadFlag_readiness" }
+      ),
+      db.collection("generic_checkout_display_offer_candidates").createIndex(
+        { status: 1, shouldApplyToLivePricing: 1, shouldUploadToActiveOfferRules: 1, pricingReadiness: 1 },
+        { name: "status_livePricingFlag_uploadFlag_readiness" }
+      )
+    ]);
+  } catch (err) {
+    console.error("ensureGenericDisplayIndexes failed (queries still work, just unindexed):", err?.message || err);
+  }
+}
 
 async function getGenericDisplayContextForSearch(meta = {}) {
   // Only loaded when includeGenericDisplayOffers=true is sent in /search.
@@ -7317,6 +7346,7 @@ async function getGenericDisplayContextForSearch(meta = {}) {
   await getOffersCollection();
 
   const db = _mongoClient.db(MONGODB_DB);
+  await ensureGenericDisplayIndexes(db);
 
   const [verifiedGenericCoupons, conservativeDisplayOffers] = await Promise.all([
     db.collection("generic_checkout_coupon_rule_candidates")
