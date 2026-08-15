@@ -506,7 +506,7 @@ async function maybeRetryForMissingAirIndiaNonStop(parsedData, activeUrl, tried)
   const startedAt = Date.now();
 
   try {
-    const res = await fetch(activeUrl, { signal: controller.signal });
+    const res = await flightApiFetch(activeUrl, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (!res.ok) {
@@ -556,6 +556,55 @@ function buildFlightApiCacheKey({ from, to, date, adults, children, infants, cab
     String(cabin || "Economy").trim(),
     String(currency || "INR").trim().toUpperCase()
   ].join("|");
+}
+
+// FlightAPI's current paid tier caps concurrent requests at 5 (confirmed by
+// founder, 2026-08-14). A single one-way search can already fan out to up
+// to 6 parallel metro-airport-group calls (METRO_AIRPORT_GROUPS), and a
+// round-trip search doubles that to up to 12 (outbound + return legs fetch
+// in parallel, each with its own up-to-6-pair fan-out) - both routinely
+// exceed the tier's limit. Exceeding it risks 429s/throttling that our own
+// shouldRetryFlightApiFailure logic then eats as a full extra round-trip
+// plus backoff delay, which is a very plausible explanation for the wide
+// latency variance seen in live testing (14s-48s for what should be one
+// FlightAPI call). This queues every actual HTTP call to FlightAPI - the
+// primary per-pair fetch below AND maybeRetryForMissingAirIndiaNonStop's
+// own fetch, since both hit the same account - to at most
+// FLIGHTAPI_MAX_CONCURRENCY in flight at once, starting the next queued
+// call the instant a slot frees, rather than firing them all at once and
+// letting FlightAPI's own throttling do the (slower, retry-costing)
+// queuing for us. Does not change what's requested, parsed, cached, or
+// returned - purely gates *when* each already-existing fetch call starts.
+const FLIGHTAPI_MAX_CONCURRENCY = Number(process.env.FLIGHTAPI_MAX_CONCURRENCY || 5);
+let _flightApiInFlight = 0;
+const _flightApiWaitQueue = [];
+
+function acquireFlightApiSlot() {
+  if (_flightApiInFlight < FLIGHTAPI_MAX_CONCURRENCY) {
+    _flightApiInFlight++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    _flightApiWaitQueue.push(() => {
+      _flightApiInFlight++;
+      resolve();
+    });
+  });
+}
+
+function releaseFlightApiSlot() {
+  _flightApiInFlight--;
+  const next = _flightApiWaitQueue.shift();
+  if (next) next();
+}
+
+async function flightApiFetch(url, options) {
+  await acquireFlightApiSlot();
+  try {
+    return await fetch(url, options);
+  } finally {
+    releaseFlightApiSlot();
+  }
 }
 
 async function fetchOneWayTrip({
@@ -638,7 +687,7 @@ async function fetchOneWayTrip({
 
     try {
       const activeUrl = fallbackUrl && attempt > 1 ? fallbackUrl : url;
-      const res = await fetch(activeUrl, { signal: controller.signal });
+      const res = await flightApiFetch(activeUrl, { signal: controller.signal });
       clearTimeout(timeout);
 
       const text = await res.text();
