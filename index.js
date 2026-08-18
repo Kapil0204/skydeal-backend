@@ -1623,6 +1623,27 @@ function normalizeText(s) {
     .replace(/[^\w\s]/g, "");
 }
 
+// Bank-alias map (2026-08-17 founder catch): a real search with ICICI +
+// RBL Bank credit cards selected showed "Your ICICI gets you the best
+// price" on an offer whose title literally says "...with RBL Bank Credit
+// Cards" (code IXRBL) - confirmed via /debug/payment-match-trace that the
+// stored offer document is correct (bankCanonical: "RBL_BANK", genuinely
+// RBL-only) and the pricing was correct (real RBL discount applied) - only
+// the DISPLAY label was wrong. Root cause: this map previously covered
+// only 9 of the ~22 banks in the frontend's own selectable catalog
+// (normalizePmNameForUI, script.js) - hdfc/au/axis/federal/icici/sbi/dbs/
+// hsbc/pnb. For any of the other ~13 (rbl included), the offer's stored
+// short form ("RBL") and the frontend's long form ("RBL Bank") normalized
+// to two DIFFERENT strings ("rbl" vs "rbl bank") since there was no map
+// entry to bridge them - so getMatchedSelectedPaymentLabel() silently
+// failed to find the real match and fell through to
+// paymentLabelFromSelection()'s fallback, which blindly labels whichever
+// payment method was selected FIRST, with no check that it's the one that
+// actually won. That fallback is only ever correct by accident once more
+// than one method is selected - the real fix is closing the map gap so
+// the real match succeeds and the fallback is never reached for a
+// legitimately-matching bank. Expanded to cover every bank in the
+// frontend's catalog, so the two normalizers agree.
 function normalizeBankName(raw) {
   const s0 = String(raw || "").trim();
   const s = normalizeText(s0.replace(/_/g, " "));
@@ -1658,6 +1679,38 @@ function normalizeBankName(raw) {
     ["punjab national bank", "punjab national bank"],
     ["au small bank", "au small finance bank"],
     ["au small finance bank", "au small finance bank"],
+    // --- added 2026-08-17, closing the gap described above ---
+    ["kotak", "kotak bank"],
+    ["kotak bank", "kotak bank"],
+    ["kotak mahindra bank", "kotak bank"],
+    ["yes", "yes bank"],
+    ["yes bank", "yes bank"],
+    ["rbl", "rbl bank"],
+    ["rbl bank", "rbl bank"],
+    ["idfc", "idfc first bank"],
+    ["idfc first", "idfc first bank"],
+    ["idfc first bank", "idfc first bank"],
+    ["bob", "bank of baroda"],
+    ["bank of baroda", "bank of baroda"],
+    ["bobcard", "bank of baroda"],
+    ["amex", "american express"],
+    ["american express", "american express"],
+    ["one", "onecard"],
+    ["onecard", "onecard"],
+    ["one card", "onecard"],
+    ["central bank of india", "central bank of india"],
+    ["canara", "canara bank"],
+    ["canara bank", "canara bank"],
+    // normalizeText strips "&", so "J&K Bank" arrives here as "jk bank"
+    ["jk bank", "jk bank"],
+    ["j and k bank", "jk bank"],
+    ["bank of india", "bank of india"],
+    ["standard chartered", "standard chartered bank"],
+    ["standard chartered bank", "standard chartered bank"],
+    ["stanchart", "standard chartered bank"],
+    ["scb", "standard chartered bank"],
+    ["indusind", "indusind bank"],
+    ["indusind bank", "indusind bank"],
   ]);
 
   return map.get(cleaned) || cleaned;
