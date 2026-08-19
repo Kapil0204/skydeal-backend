@@ -3,8 +3,22 @@ import express from "express";
 import cors from "cors";
 import { MongoClient } from "mongodb";
 
+// Locked-door-with-a-key gate (2026-08-19, launch checklist item 3): the
+// old version was a bare on/off flag, meaning ANYONE who found a /debug/*
+// URL while ENABLE_DEBUG_ENDPOINTS was true (it was, all session) could
+// pull raw Mongo offer data with zero auth. A key check alone would have
+// been enough, but the flag is kept as a second, redeploy-only kill switch
+// on top of it - flipping it off in the Render dashboard still shuts
+// every /debug/* route instantly regardless of who has the key. Fails
+// CLOSED if DEBUG_KEY is ever unset, so a missing/misconfigured secret can
+// never accidentally leave the door open. Always 404, never 401/403, so an
+// unauthorized request can't be used to confirm these routes even exist.
 function requireDebugEnabled(req, res) {
-  if (process.env.ENABLE_DEBUG_ENDPOINTS === "true") return true;
+  const enabled = process.env.ENABLE_DEBUG_ENDPOINTS === "true";
+  const requiredKey = process.env.DEBUG_KEY;
+  const providedKey = req.get("x-debug-key") || req.query.debugKey;
+
+  if (enabled && requiredKey && providedKey === requiredKey) return true;
 
   res.status(404).json({
     error: "Not found"
