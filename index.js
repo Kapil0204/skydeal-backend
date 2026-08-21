@@ -9657,6 +9657,16 @@ function resolvePrimaryDecodeMessage({
     const portal = tier1Deal.portal || "the portal";
     const tier1Pct = computeDiscountPercent(tier1Deal.basePrice, tier1Deal.actualDiscount);
     const discountPhrase = formatDiscountPercentPhrase(tier1Deal);
+    // A round trip's two legs can win via different offers/portals (see
+    // the candidateDeals comment above) - tier1Deal here is only ONE of
+    // them, so its finalPrice/basePrice is a single flight's price, not
+    // the trip total. Showing that as "the best price" with a ₹ figure
+    // read as a round-trip total that it wasn't - the number shown
+    // matched the outbound leg's own card exactly (Kapil feedback,
+    // 2026-08-20). Suppress the absolute-price claim for round trips and
+    // point at the one place that DOES compute a real combined total:
+    // the selected-trip comparison, once both flights are picked.
+    const isRoundTrip = tripType === "round-trip";
 
     message = {
       tier: 1,
@@ -9669,13 +9679,18 @@ function resolvePrimaryDecodeMessage({
       // 2026-08-10). Just state the plain fact this tag is actually for.
       tag: tier1Urgent ? (tier1EndsToday ? "Ends today" : "Ends soon") : "Live today",
       tagVariant: tier1Urgent ? "urgent" : "live",
-      heading: `Your ${bankLabel} gets you the best price`,
+      heading: isRoundTrip
+        ? `Select both flights to unlock your best round-trip price with ${bankLabel}`
+        : `Your ${bankLabel} gets you the best price`,
       // The actual price transition, for the decode card's own price
       // hero - only ever set when both numbers are real (an applied
-      // Tier 1 deal always has them), never a guess.
-      priceNow: Number.isFinite(tier1Deal.finalPrice) ? tier1Deal.finalPrice : null,
-      priceWas: Number.isFinite(tier1Deal.basePrice) ? tier1Deal.basePrice : null,
-      message: `${discountPhrase} on ${portal}.`,
+      // Tier 1 deal always has them), never a guess. null for round trips
+      // - see isRoundTrip comment above.
+      priceNow: (!isRoundTrip && Number.isFinite(tier1Deal.finalPrice)) ? tier1Deal.finalPrice : null,
+      priceWas: (!isRoundTrip && Number.isFinite(tier1Deal.basePrice)) ? tier1Deal.basePrice : null,
+      message: isRoundTrip
+        ? "We'll show your true final price once you've picked a departure and return flight."
+        : `${discountPhrase} on ${portal}.`,
       warning: tier1UrgentWarning,
       tip: null,
       cta: null,
@@ -9684,7 +9699,9 @@ function resolvePrimaryDecodeMessage({
       mirror: null,
       // Condensed one-line version for the sticky banner shown once the
       // full card scrolls out of view - same underlying fact, just short
-      // enough for a single line.
+      // enough for a single line. Left as-is for round trips too (Kapil
+      // confirmed this line already reads fine - it states a discount
+      // percent/portal fact, not an absolute trip total).
       sticky: tier1Urgent
         ? `${discountPhrase} with ${bankLabel} — ${tier1EndsToday ? "ends today" : "ends soon"}`
         : `${discountPhrase} with your ${bankLabel} on ${portal}`
