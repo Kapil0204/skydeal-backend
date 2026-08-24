@@ -3759,7 +3759,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
         if (
           o.corporateOnly === true &&
-          s.isCorporate === false
+          s.isCorporate !== true
         ) {
           continue;
         }
@@ -3822,7 +3822,7 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
 
         if (
           o.corporateOnly === true &&
-          s.isCorporate === false
+          s.isCorporate !== true
         ) {
           continue;
         }
@@ -3893,7 +3893,17 @@ function getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) {
   const sel = selectedPaymentMethods.map((x) => {
     const t = normalizePaymentType(x?.type || x?.name || "", x?.raw || "");
     const nm = normalizeBankName(x?.name || x?.bank || x?.raw || "");
-    return { type: t, name: nm, rawName: x?.name || x?.bank || x?.raw || "" };
+    return {
+      type: t,
+      name: nm,
+      rawName: x?.name || x?.bank || x?.raw || "",
+      // Carried through as-is (never inferred) so callers can label the
+      // matched instrument by what the user actually told us about their
+      // own card (e.g. "ICICI Emeralde Credit Card"), not just the bank.
+      network: x?.network || null,
+      cardFamily: x?.cardFamily || null,
+      isCorporate: x?.isCorporate ?? null
+    };
   });
 
   for (const pm of offerPMs) {
@@ -3901,7 +3911,13 @@ function getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) {
     const name = normalizeBankName(pm.bank || pm.name || "");
     const match = sel.find((s) => s.type === t && (!s.name || s.name === name));
     if (match) {
-      return { name: match.rawName, type: PAYMENT_TYPE_DISPLAY_LABEL[match.type] || match.type };
+      return {
+        name: match.rawName,
+        type: PAYMENT_TYPE_DISPLAY_LABEL[match.type] || match.type,
+        network: match.network,
+        cardFamily: match.cardFamily,
+        isCorporate: match.isCorporate
+      };
     }
   }
 
@@ -8562,9 +8578,75 @@ function expandEmiPaymentMethods(selectedPaymentMethodsRaw, offers) {
   return out;
 }
 
+// Real, distinct (network, cardFamily, isCorporate) COMBINATIONS actually
+// seen together on LIVE offers, grouped by bank+type - read straight off
+// each offer's own normalized PM entries (normalizeOfferPM, the same
+// function offerMatchesSelectedPayment itself uses), never a hardcoded
+// bank or variant name. Tracking the combination (not each dimension as
+// an independent union) matters: a real offer can require network AND
+// card-family AT ONCE (live-verified 2026-08-24 - PNB's "Luxura Visa"
+// offer needs both simultaneously; a candidate carrying only one of the
+// two would never actually satisfy it, even though each dimension is
+// individually real). Built in a SINGLE pass over offers (keyed by
+// `${typeNorm}|${bankCanonical}`) rather than once per bank, so this stays
+// O(offers) regardless of how many distinct banks the catalog has -
+// re-scanning the whole offer list per-bank previously risked reproducing
+// the exact kind of latency regression this codebase has already spent a
+// dedicated round fixing (SkyDeal latency QC pass, 2026-08-14).
+function buildLiveOfferVariantsIndex(offers) {
+  const index = new Map();
+
+  for (const offer of offers) {
+    const offerPMs = extractOfferPaymentMethodsNoInference(offer);
+    if (!Array.isArray(offerPMs) || offerPMs.length === 0) continue;
+
+    for (const pm of offerPMs) {
+      const norm = normalizeOfferPM(pm, offer);
+      if (!norm.typeNorm || !norm.bankCanonical) continue;
+
+      const networks = Array.isArray(norm.allowedNetworks) && norm.allowedNetworks.length > 0
+        ? norm.allowedNetworks
+        : [null];
+      const cardFamilies = Array.isArray(norm.allowedCardFamilies) && norm.allowedCardFamilies.length > 0
+        ? norm.allowedCardFamilies
+        : [null];
+      const corporateValues = norm.corporateOnly === true ? [true] : [null];
+
+      // A fully unrestricted PM entry needs no variant candidate at all -
+      // the bare bank+type candidate already covers it.
+      if (networks[0] === null && cardFamilies[0] === null && corporateValues[0] === null) continue;
+
+      const key = `${norm.typeNorm}|${norm.bankCanonical}`;
+      let combos = index.get(key);
+      if (!combos) {
+        combos = new Map();
+        index.set(key, combos);
+      }
+
+      for (const network of networks) {
+        for (const cardFamily of cardFamilies) {
+          for (const isCorporate of corporateValues) {
+            if (network === null && cardFamily === null && isCorporate === null) continue;
+            const comboKey = `${network || ""}|${cardFamily || ""}|${isCorporate || ""}`;
+            if (!combos.has(comboKey)) combos.set(comboKey, { network, cardFamily, isCorporate });
+          }
+        }
+      }
+    }
+  }
+
+  return index;
+}
+
+function lookupLiveOfferVariants(variantsIndex, bankCanon, typeNorm) {
+  const combos = variantsIndex.get(`${typeNorm}|${bankCanon}`);
+  return combos ? Array.from(combos.values()) : [];
+}
+
 async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg) {
   const catalog = await computePaymentOptionsFromOffers(offers);
   const selectedSet = new Set((selectedPaymentMethods || []).map(selectedPmKey));
+  const variantsIndex = buildLiveOfferVariantsIndex(offers);
   const candidates = [];
 
   const CANONICAL_TYPES = ["Credit Card", "Debit Card", "Net Banking", "UPI", "Wallet"];
@@ -8572,6 +8654,7 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
   for (const uiType of CANONICAL_TYPES) {
     const banks = catalog.options?.[uiType] || [];
     const counts = catalog.offerCounts?.[uiType] || {};
+    const typeNorm = normalizeMethodCanonicalAlias(uiType);
 
     for (const bank of banks) {
       if (SUGGESTION_EXCLUDED_PROVIDERS.has(String(bank).toLowerCase().trim())) {
@@ -8593,19 +8676,46 @@ async function buildCandidatePaymentMethods(selectedPaymentMethods, offers, cfg)
       if (count <= 0) continue;
 
       const key = `${uiType.toLowerCase()}|${String(bank).toLowerCase()}`;
-      if (selectedSet.has(key)) continue;
+      const alreadySelected = selectedSet.has(key);
 
-      candidates.push({
-        type: uiType,
-        name: bank,
-        provider: uiType === "UPI" ? bank : null,
-        network: null,
-        cardFamily: null,
-        cardVariant: null,
-        isCorporate: null,
-        tenureMonths: null,
-        _priority: count
-      });
+      if (!alreadySelected) {
+        candidates.push({
+          type: uiType,
+          name: bank,
+          provider: uiType === "UPI" ? bank : null,
+          network: null,
+          cardFamily: null,
+          cardVariant: null,
+          isCorporate: null,
+          tenureMonths: null,
+          _priority: count
+        });
+      }
+
+      // Variant candidates - only meaningful for Credit/Debit Card, where
+      // network/card-family/corporate restrictions actually occur. Tested
+      // BOTH when not-yet-selected (e.g. the only live SBI Debit Card
+      // offer is Visa-only, so the bare candidate above would otherwise
+      // never clear minAbsoluteSavingInr) and when already selected (e.g.
+      // ICICI Credit Card is selected plain, but an Emeralde-only offer
+      // would unlock more) - _refinesSelected tells the caller which case
+      // this is, since the two need different framing ("add" vs "confirm
+      // this detail"), never a different eligibility check.
+      if ((typeNorm === "CREDIT_CARD" || typeNorm === "DEBIT_CARD") && bank) {
+        const bankCanon = bankCanonicalFromAny(bank);
+        if (bankCanon) {
+          const variants = lookupLiveOfferVariants(variantsIndex, bankCanon, typeNorm);
+
+          for (const combo of variants) {
+            candidates.push({
+              type: uiType, name: bank, provider: null,
+              network: combo.network, cardFamily: combo.cardFamily, cardVariant: combo.cardFamily,
+              isCorporate: combo.isCorporate === true ? true : null,
+              tenureMonths: null, _priority: count, _refinesSelected: alreadySelected
+            });
+          }
+        }
+      }
     }
   }
 
@@ -8677,21 +8787,74 @@ function formatBankTypeLabel(name, type) {
   return `${shortName} ${type}`;
 }
 
+function humanizeVariantWord(code) {
+  return String(code || "")
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function networkDisplayLabel(network) {
+  if (network === "AMERICAN_EXPRESS") return "Amex";
+  if (network === "MASTERCARD") return "Mastercard";
+  if (network === "RUPAY") return "RuPay";
+  if (network === "VISA") return "Visa";
+  return humanizeVariantWord(network);
+}
+
 // Always names the exact instrument (bank + type), not just the bank - a
 // user with a bank selected as more than one variant (e.g. "ICICI Bank" as
 // both Credit Card and EMI) can't tell which one a message is about
 // otherwise (confirmed live 2026-08-08: copy said "ICICI Bank" for both).
+//
+// Also names the network/card-family/corporate qualifier when the
+// candidate or selected method carries one (e.g. "SBI Visa Debit Card",
+// "ICICI Emeralde Credit Card", "Corporate HDFC Credit Card") - generic:
+// reads whatever value is actually on the object, never a hardcoded bank
+// or variant name, so it covers any bank the live catalog contains.
 function paymentMethodShortLabel(pm) {
   if (pm.type === "UPI") return pm.provider || pm.name || "UPI";
   if (!pm.name) return pm.type || "this option";
   if (!pm.type) return stripTrailingBankWord(pm.name);
-  return formatBankTypeLabel(pm.name, pm.type);
+
+  const shortName = stripTrailingBankWord(pm.name);
+  const qualifiers = [];
+
+  if (pm.cardFamily) {
+    const variantWord = humanizeVariantWord(pm.cardFamily);
+    // Avoid "SBI Sbi Elite" when the family code already repeats the bank
+    // name (some CARD_FAMILY_RULES codes are bank-scoped, e.g. "SBI_ELITE").
+    qualifiers.push(
+      variantWord.toLowerCase().startsWith(shortName.toLowerCase())
+        ? variantWord.slice(shortName.length).trim()
+        : variantWord
+    );
+  } else if (pm.network) {
+    qualifiers.push(networkDisplayLabel(pm.network));
+  }
+
+  if (pm.isCorporate === true) qualifiers.unshift("Corporate");
+
+  const qualifiedName = qualifiers.filter(Boolean).length
+    ? `${shortName} ${qualifiers.filter(Boolean).join(" ")}`.trim()
+    : shortName;
+
+  if (String(pm.type).toUpperCase() === "EMI") return `${qualifiedName} Credit Card EMI`;
+  return `${qualifiedName} ${pm.type}`;
 }
 
 // Stable, machine-readable reason per suggestion (Phase 2) - a display
-// concern only, never used for eligibility/pricing.
+// concern only, never used for eligibility/pricing. Network/variant
+// reasons are checked first since they're the more specific "why" when a
+// candidate differs from an already-selected same-bank+type method only
+// by that one dimension - never keyed to a specific bank/variant name.
 function reasonCodeFor(candidate, tier) {
   if (tier === 1) {
+    if (candidate.network) return "SAME_METHOD_NETWORK_SPECIFIC";
+    if (candidate.cardFamily) return "SAME_METHOD_VARIANT_SPECIFIC";
+    if (candidate.isCorporate === true) return "SAME_METHOD_CORPORATE_SPECIFIC";
     if (candidate.type === "EMI") return "SAME_BANK_EMI_BETTER";
     if (candidate.type === "Debit Card") return "SAME_BANK_DEBIT_BETTER";
     if (candidate.type === "Net Banking") return "SAME_BANK_NETBANKING_BETTER";
@@ -9507,7 +9670,17 @@ function resolveTier1Match(bestDeal, selectedPaymentMethods, offers) {
   const offer = findOfferSourceDoc(bestDeal, offers);
   const matched = offer ? getMatchedSelectedPaymentMethod(offer, selectedPaymentMethods) : null;
   if (matched?.name) {
-    return { name: matched.name, type: matched.type, label: formatBankTypeLabel(matched.name, matched.type) };
+    return {
+      name: matched.name,
+      type: matched.type,
+      label: paymentMethodShortLabel({
+        name: matched.name,
+        type: matched.type,
+        network: matched.network,
+        cardFamily: matched.cardFamily,
+        isCorporate: matched.isCorporate
+      })
+    };
   }
 
   const rawLabel = bestDeal?.paymentLabel || "";
@@ -9989,6 +10162,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
     return {
       currentBestPrice: 0,
       suggestions: [],
+      preferSelectedSuggestions: [],
       summary: { selectedPaymentMethodCount, matchedOfferCount: 0, isOptimised: true },
       timingInsights: [],
       meta: { truncated: false }
@@ -10144,11 +10318,18 @@ async function computePaymentSuggestionsCore(v, cfg) {
     mark("screeningLoopMs");
 
     // When the same bank surfaces more than once (e.g. multiple valid EMI
-    // tenures), keep only the single highest-screening-score suggestion
-    // for it before spending a refine pass on it.
+    // tenures, or a network/card-family-specific variant of an otherwise
+    // bare candidate), keep only the single highest-screening-score
+    // suggestion for it before spending a refine pass on it. Keying on
+    // type+name ALONE used to silently collapse a real network/variant-
+    // specific candidate (e.g. "SBI Debit Card, Visa only") into whatever
+    // bare same-bank candidate screened first, discarding exactly the
+    // distinction buildCandidatePaymentMethods now goes out of its way to
+    // synthesize - the key must include the same dimensions candidateKey()
+    // already uses for Pass 1's own dedup.
     const bestScreenedByKey = new Map();
     for (const r of screened) {
-      const key = `${r.candidate.type}|${r.candidate.name}`.toLowerCase();
+      const key = candidateKey(r.candidate);
       const existing = bestScreenedByKey.get(key);
       if (!existing || r._screeningScore > existing._screeningScore) bestScreenedByKey.set(key, r);
     }
@@ -10270,11 +10451,80 @@ async function computePaymentSuggestionsCore(v, cfg) {
         affectedReturnFlights: r.affectedReturnFlights,
         relevanceTier: r.relevanceTier,
         reasonCode,
+        // True when this candidate only refines an ALREADY-selected same
+        // bank+type method (a different network/card-variant/corporate
+        // flag), not a genuinely new bank/type - lets the frontend ask
+        // "confirm this detail?" (Yes/No) instead of "add this method?"
+        // (Add/Not for me), generically, for any bank.
+        refinesSelected: r.candidate._refinesSelected === true,
         heading: copy.heading,
         message: copy.message,
         primaryActionLabel: copy.primaryActionLabel
       };
     });
+
+    // "Already selected, second-best-eligible" reasoning (2026-08-24) -
+    // buildCandidatePaymentMethods only ever suggests methods NOT already
+    // selected, so when the user has picked 2+ real methods and only one
+    // wins per flight, the other(s) silently vanish even though they're
+    // genuinely eligible for their own (smaller) discount. This surfaces
+    // those as a DISTINCT type, kept OUT of `suggestions` (which feeds
+    // resolvePrimaryDecodeMessage's tier1/tier2 hierarchy below) so it can
+    // never be mistaken for an "add a new method" suggestion there -
+    // frontend renders it as an additional "use X instead" option
+    // alongside whatever the primary decode message already says. Never
+    // invented: every number here comes from the same
+    // repriceFlightsForPaymentMethods engine every other suggestion uses.
+    let preferSelectedSuggestions = [];
+    try {
+      const uniqueSelected = [];
+      const seenSelKeys = new Set();
+      for (const pm of selectedPaymentMethods) {
+        const k = selectedPmKey(pm);
+        if (seenSelKeys.has(k)) continue;
+        seenSelKeys.add(k);
+        uniqueSelected.push(pm);
+      }
+
+      if (uniqueSelected.length > 1) {
+        const cheapestFlight = [...v.outboundFlights].sort(
+          (a, b) => bestFinalPriceOf(a) - bestFinalPriceOf(b)
+        )[0];
+        const baseFare = Number(cheapestFlight?.price);
+
+        if (cheapestFlight && Number.isFinite(baseFare) && baseFare > 0) {
+          const perMethod = [];
+          for (const pm of uniqueSelected) {
+            const [repriced] = await repriceFlightsForPaymentMethods([cheapestFlight], [pm], ctx);
+            const alonePrice = finalPriceFromRepriced(repriced, cheapestFlight);
+            const trueDiscount = Math.round(baseFare - alonePrice);
+            perMethod.push({ pm, alonePrice, trueDiscount });
+          }
+
+          const withRealDiscount = perMethod
+            .filter((m) => Number.isFinite(m.trueDiscount) && m.trueDiscount > 0)
+            .sort((a, b) => a.alonePrice - b.alonePrice);
+
+          if (withRealDiscount.length > 1) {
+            const winner = withRealDiscount[0];
+            preferSelectedSuggestions = withRealDiscount.slice(1).map((runnerUp) => ({
+              type: "PREFER_SELECTED_METHOD",
+              paymentMethod: runnerUp.pm,
+              relevanceTier: 1,
+              category: "already_selected",
+              additionalSaving: runnerUp.trueDiscount,
+              newBestPrice: null,
+              heading: `Your ${paymentMethodShortLabel(runnerUp.pm)} saves ₹${runnerUp.trueDiscount}`,
+              message: `${paymentMethodShortLabel(winner.pm)} is currently giving you the best price - this is what your ${paymentMethodShortLabel(runnerUp.pm)} would give instead.`,
+              primaryActionLabel: `Use ${paymentMethodShortLabel(runnerUp.pm)} instead`
+            }));
+          }
+        }
+      }
+    } catch (preferErr) {
+      console.error("[SkyDeal] prefer-selected-method reasoning failed", preferErr);
+      preferSelectedSuggestions = [];
+    }
 
     // Phase 3 timing insights - reuses the same offers/ctx/currentBestPrice
     // already computed above; wrapped defensively so a timing-specific
@@ -10330,6 +10580,7 @@ async function computePaymentSuggestionsCore(v, cfg) {
   return {
     currentBestPrice,
     suggestions,
+    preferSelectedSuggestions,
     summary: { selectedPaymentMethodCount, matchedOfferCount, isOptimised },
     timingInsights,
     primaryDecodeMessage,
