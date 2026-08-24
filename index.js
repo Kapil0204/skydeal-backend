@@ -10054,8 +10054,13 @@ function resolvePrimaryDecodeMessage({
     // offer was displaying as "save 6%").
     const genericBaseDealForTier2Alone = genericDealApplied ? candidateDeals.find((d) => d?.applied) : null;
     const { label, pct } = tier2PercentAndLabel(tier2, genericBaseDealForTier2Alone?.basePrice);
-    const tier2MethodNames = [...new Set(selectedPaymentMethods.map((m) => m.name).filter(Boolean))];
-    const tier2MethodLabel = tier2MethodNames.length ? tier2MethodNames.join(" or ") : "your selected method";
+    // Bank+type (via paymentMethodShortLabel), not just the bank name -
+    // "No HDFC Bank offer right now" reads as "HDFC has nothing," when
+    // what's actually true is narrower: HDFC's EMI variant (named right
+    // below) does have one. "No HDFC Credit Card offer right now" states
+    // the real scope of what's missing (Kapil feedback, 2026-08-24).
+    const tier2MethodLabels = [...new Set(selectedPaymentMethods.map((m) => paymentMethodShortLabel(m)).filter(Boolean))];
+    const tier2MethodLabel = tier2MethodLabels.length ? tier2MethodLabels.join(" or ") : "your selected method";
     // QC-caught (Kapil, 2026-08-12): this branch never checked
     // genericDealApplied at all, unlike its Tier 3/Tier 4 siblings - the
     // "we've found a site discount" reassurance silently never showed
