@@ -4211,6 +4211,30 @@ function offerScopeMatchesTrip(offer, isDomestic, cabin) {
   return true;
 }
 
+// International search is disabled frontend-side (2026-08-25 - offer/pricing
+// logic isn't verified for international routes yet), so anywhere that
+// counts/lists offers without a specific search's route context (e.g. the
+// payment-methods picker's "N offers" badges) should also exclude offers
+// that only apply internationally - otherwise those badges promise offers
+// a user can never actually reach. Deliberately narrower than
+// offerScopeMatchesTrip above (route scope only, no cabin/vertical checks)
+// since callers here have no cabin context to filter on.
+function offerIsInternationalOnly(offer) {
+  const title = String(offer?.title || "");
+  const rawDiscount = String(offer?.rawDiscount || offer?.parsedFields?.rawDiscount || "");
+  const termsRaw = String(
+    offer?.terms?.raw || offer?.terms || offer?.parsedFields?.terms?.raw || ""
+  );
+  const blob = normalizeText(`${title} ${rawDiscount} ${termsRaw}`);
+
+  const mentionsDomesticFlights =
+    /\bdomestic\s+flight(s)?\b/.test(blob) || (/\bdomestic\b/.test(blob) && /\bflight(s)?\b/.test(blob));
+  const mentionsInternationalFlights =
+    /\binternational\s+flight(s)?\b/.test(blob) || (/\binternational\b/.test(blob) && /\bflight(s)?\b/.test(blob));
+
+  return mentionsInternationalFlights && !mentionsDomesticFlights;
+}
+
 const MANUAL_MMT_CABIN_SCOPE_OVERRIDES = {
   // Manually verified on MakeMyTrip checkout, May 2026.
   // Important: MMT sometimes restricts flight coupons to Economy even when source offer text does not mention cabin/class.
@@ -6070,6 +6094,10 @@ async function computePaymentOptionsFromOffers(preloadedOffers = null) {
 
   offers.forEach((offer, offerIdx) => {
     if (isOfferExpired(offer)) return; // offers with no stated validity are treated as ongoing, not skipped
+    // International search is disabled (2026-08-25) - don't count/list
+    // international-only offers here, since a user can never actually
+    // reach them. See offerIsInternationalOnly() for the route-scope check.
+    if (offerIsInternationalOnly(offer)) return;
 
     const pms = extractOfferPaymentMethods(offer); // includes inference if needed
     for (const pm of pms) {
