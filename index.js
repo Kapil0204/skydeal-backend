@@ -7602,6 +7602,15 @@ function buildConservativeDisplayOfferPortalDisplay({ candidate, portalBase, pas
     rawDiscount = Number(offer.flatDiscountPerAdult || 0) * passengers;
   } else if (offer.discountType === "flat_total") {
     rawDiscount = Number(offer.flatDiscountAmount || 0);
+  } else if (offer.discountType === "percent_capped") {
+    // Unlike flat_total/flat_per_adult (a conservative floor picked from
+    // limited checkout observations), a percent+cap discount can be
+    // computed exactly at request time from the real fare - no
+    // observation-based guessing needed (added 2026-09-08 for EMTFIRST).
+    const pct = Number(offer.discountPercent || 0);
+    const cap = Number(offer.maxDiscountAmount || 0);
+    rawDiscount = Math.round((portalBase || 0) * (pct / 100));
+    if (cap > 0) rawDiscount = Math.min(rawDiscount, cap);
   }
 
   const discountAmount = Math.min(
@@ -7620,7 +7629,7 @@ function buildConservativeDisplayOfferPortalDisplay({ candidate, portalBase, pas
     title: `${candidate?.couponCode || "Checkout coupon"} checkout offer`,
     rawDiscount: `${candidate?.couponCode || "Checkout offer"} checkout offer`,
     appliedDiscountText: `Offer applied: ₹${discountAmount}`,
-    paymentLabel: "No payment restriction",
+    paymentLabel: candidate?.restrictionLabel || "No payment restriction",
     offerTypeLabel: "Checkout offer",
     channelLabel: "Portal checkout",
     explain: `Checkout offer ${candidate?.couponCode || ""} reduced ₹${portalBase} → ₹${finalPrice}`,
