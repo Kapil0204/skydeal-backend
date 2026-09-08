@@ -7596,6 +7596,16 @@ function buildVerifiedGenericCouponPortalDisplay({ candidate, portalBase, passen
 
 function buildConservativeDisplayOfferPortalDisplay({ candidate, portalBase, passengers }) {
   const offer = candidate?.proposedDisplayOffer || {};
+
+  // 2026-09-08: added for EMTVEMTONIX, whose published tiers each carry a
+  // real minimum booking amount (e.g. Rs.500 off needs a Rs.3,500+ fare).
+  // Without this gate, a fare below the threshold would still show the
+  // discount, over-promising a saving that wouldn't actually apply at
+  // checkout. Every existing candidate has no minTransactionValue set, so
+  // this is a no-op for them.
+  const minTxn = Number(offer.minTransactionValue || 0);
+  if (minTxn > 0 && (portalBase || 0) < minTxn) return null;
+
   let rawDiscount = 0;
 
   if (offer.discountType === "flat_per_adult") {
