@@ -1637,6 +1637,61 @@ function normalizeText(s) {
     .replace(/[^\w\s]/g, "");
 }
 
+// Confirmed live 2026-09-13: Air India's SBICEMI offer became permanently
+// unmatchable (PAYMENT_MISMATCH for every real selection) because its T&C
+// contains "...shall not be valid on Corporate, Paytm, Cashback card and
+// Rupay Credit Card transactions done via UPI." -- a UPI-specific
+// EXCLUSION clause. extractOfferNetworkRestrictions/
+// extractOfferProviderRestrictions/extractOfferCardFamilyRestrictions all
+// scanned the WHOLE raw terms blob for a bare "rupay"/"paytm"/"cashback"
+// keyword with no negation-awareness (their only negation handling was a
+// few hardcoded adjacent phrases like "not valid on rupay", which this
+// sentence doesn't match because of the intervening list items), so the
+// exclusion got read as an allowance/requirement instead -- silently
+// rejecting every plain EMI/credit-card selection with no network
+// specified. Root-caused as one shared failure mode across all three
+// functions, not a one-off phrase to special-case: split the source text
+// into sentences first, and route each sentence to "positive" or
+// "negated" based on whether it contains a negation cue BEFORE any
+// keyword is ever scanned, so a real exclusion sentence's keywords never
+// leak into the "allowed" side no matter how the list around them is
+// phrased.
+const NEGATION_SENTENCE_MARKERS = /\bnot valid\b|\bnot applicable\b|\bnot eligible\b|\bnot permitted\b|\bnot allowed\b|\bnot be valid\b|\bnot be applicable\b|\bnot be eligible\b|\bnot be permitted\b|\bnot be allowed\b|\bexcluding\b|\bexcludes?\b|\bexcept\b|\bshall not\b|\bwill not\b|\bcannot be\b|\bcan not be\b|\bineligible\b/i;
+
+function splitIntoSentences(text) {
+  return String(text || "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Returns { positiveBlob, negativeBlob } -- both normalizeText()'d and
+// ready for a plain keyword regex test. Sentences with no negation cue go
+// into positiveBlob (safe to treat a keyword hit there as an allowance);
+// sentences that DO contain a negation cue go into negativeBlob (a keyword
+// hit there means a real exclusion, regardless of exactly how the negation
+// is phrased or how many list items sit between the cue and the keyword).
+function splitRestrictionBlobByNegation(...parts) {
+  const combined = parts.filter(Boolean).join(". ");
+  const sentences = splitIntoSentences(combined);
+
+  const positive = [];
+  const negative = [];
+
+  for (const sentence of sentences) {
+    if (NEGATION_SENTENCE_MARKERS.test(sentence)) {
+      negative.push(sentence);
+    } else {
+      positive.push(sentence);
+    }
+  }
+
+  return {
+    positiveBlob: normalizeText(positive.join(" ")),
+    negativeBlob: normalizeText(negative.join(" "))
+  };
+}
+
 // Bank-alias map (2026-08-17 founder catch): a real search with ICICI +
 // RBL Bank credit cards selected showed "Your ICICI gets you the best
 // price" on an offer whose title literally says "...with RBL Bank Credit
@@ -3399,22 +3454,29 @@ function extractAllowedEmiTenuresFromOffer(offer, pm = null) {
 }
 
 function extractOfferNetworkRestrictions(offer, pm = null) {
-  const blob = normalizeText(
-    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  const { positiveBlob, negativeBlob } = splitRestrictionBlobByNegation(
+    pm?.raw, pm?.conditions, offer?.title, offer?.rawDiscount,
+    offer?.offerSummary, offer?.rawText, offer?.terms?.raw || offer?.terms
   );
 
   const allowed = new Set();
   const excluded = new Set();
 
-  if (/\bvisa\b/.test(blob)) allowed.add("VISA");
-  if (/\bmastercard\b|\bmaster card\b/.test(blob)) allowed.add("MASTERCARD");
-  if (/\brupay\b/.test(blob)) allowed.add("RUPAY");
-  if (/\bamerican express\b|\bamex\b/.test(blob)) allowed.add("AMERICAN_EXPRESS");
+  if (/\bvisa\b/.test(positiveBlob)) allowed.add("VISA");
+  if (/\bmastercard\b|\bmaster card\b/.test(positiveBlob)) allowed.add("MASTERCARD");
+  if (/\brupay\b/.test(positiveBlob)) allowed.add("RUPAY");
+  if (/\bamerican express\b|\bamex\b/.test(positiveBlob)) allowed.add("AMERICAN_EXPRESS");
 
-  if (/\bnot valid on visa\b|\bexcluding visa\b/.test(blob)) excluded.add("VISA");
-  if (/\bnot valid on mastercard\b|\bexcluding mastercard\b|\bexcluding master card\b/.test(blob)) excluded.add("MASTERCARD");
-  if (/\bnot valid on rupay\b|\bexcluding rupay\b/.test(blob)) excluded.add("RUPAY");
-  if (/\bnot valid on american express\b|\bnot valid on amex\b|\bexcluding amex\b/.test(blob)) excluded.add("AMERICAN_EXPRESS");
+  if (/\bvisa\b/.test(negativeBlob)) excluded.add("VISA");
+  if (/\bmastercard\b|\bmaster card\b/.test(negativeBlob)) excluded.add("MASTERCARD");
+  if (/\brupay\b/.test(negativeBlob)) excluded.add("RUPAY");
+  if (/\bamerican express\b|\bamex\b/.test(negativeBlob)) excluded.add("AMERICAN_EXPRESS");
+
+  // A network mentioned in both a positive and a negated sentence (e.g. a
+  // page that lists Visa/Mastercard as eligible elsewhere but separately
+  // excludes RuPay-via-UPI) should stay excluded, not cancel out to
+  // allowed -- exclusion is the more specific, more conservative signal.
+  for (const code of excluded) allowed.delete(code);
 
   return {
     allowed: Array.from(allowed),
@@ -3423,20 +3485,33 @@ function extractOfferNetworkRestrictions(offer, pm = null) {
 }
 
 function extractOfferProviderRestrictions(offer, pm = null) {
-  const blob = normalizeText(
-    `${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`
+  const { positiveBlob, negativeBlob } = splitRestrictionBlobByNegation(
+    pm?.raw, pm?.conditions, offer?.title, offer?.rawDiscount,
+    offer?.offerSummary, offer?.rawText, offer?.terms?.raw || offer?.terms
   );
 
   const allowed = new Set();
+  const excluded = new Set();
 
-  if (/\bcred\b/.test(blob)) allowed.add("CRED");
-  if (/\bgoogle pay\b|\bgpay\b/.test(blob)) allowed.add("GOOGLE_PAY");
-  if (/\bphonepe\b/.test(blob)) allowed.add("PHONEPE");
-  if (/\bpaytm\b/.test(blob)) allowed.add("PAYTM");
-  if (/\bbhim\b/.test(blob)) allowed.add("BHIM");
-  if (/\bamazon pay\b/.test(blob)) allowed.add("AMAZON_PAY");
-  if (/\bmobikwik\b/.test(blob)) allowed.add("MOBIKWIK");
-  if (/\bfreecharge\b/.test(blob)) allowed.add("FREECHARGE");
+  if (/\bcred\b/.test(positiveBlob)) allowed.add("CRED");
+  if (/\bgoogle pay\b|\bgpay\b/.test(positiveBlob)) allowed.add("GOOGLE_PAY");
+  if (/\bphonepe\b/.test(positiveBlob)) allowed.add("PHONEPE");
+  if (/\bpaytm\b/.test(positiveBlob)) allowed.add("PAYTM");
+  if (/\bbhim\b/.test(positiveBlob)) allowed.add("BHIM");
+  if (/\bamazon pay\b/.test(positiveBlob)) allowed.add("AMAZON_PAY");
+  if (/\bmobikwik\b/.test(positiveBlob)) allowed.add("MOBIKWIK");
+  if (/\bfreecharge\b/.test(positiveBlob)) allowed.add("FREECHARGE");
+
+  if (/\bcred\b/.test(negativeBlob)) excluded.add("CRED");
+  if (/\bgoogle pay\b|\bgpay\b/.test(negativeBlob)) excluded.add("GOOGLE_PAY");
+  if (/\bphonepe\b/.test(negativeBlob)) excluded.add("PHONEPE");
+  if (/\bpaytm\b/.test(negativeBlob)) excluded.add("PAYTM");
+  if (/\bbhim\b/.test(negativeBlob)) excluded.add("BHIM");
+  if (/\bamazon pay\b/.test(negativeBlob)) excluded.add("AMAZON_PAY");
+  if (/\bmobikwik\b/.test(negativeBlob)) excluded.add("MOBIKWIK");
+  if (/\bfreecharge\b/.test(negativeBlob)) excluded.add("FREECHARGE");
+
+  for (const code of excluded) allowed.delete(code);
 
   return Array.from(allowed);
 }
@@ -3446,15 +3521,20 @@ function extractOfferCardFamilyRestrictions(offer, pm = null) {
   // present (cleaner and more reliable than mining title/rawDiscount text) -
   // folding them into the blob lets bank-scoped generic-tier rules (e.g.
   // IDFC_SELECT) match even when the offer's freeform text never states
-  // the bank name right next to the tier word.
+  // the bank name right next to the tier word. Kept in the positive blob
+  // unconditionally -- these are short structured fields, never a negated
+  // sentence.
   //
   // Note: a bare "select cards" phrase (e.g. "Applicable to select AU Small
   // Finance Bank credit cards") means "eligible cards", not IDFC's "Select"
   // product - IDFC_SELECT's rule requires "idfc" in the same blob, so this
   // kind of unrelated-bank boilerplate can't false-positive it.
-  const blob = `${pm?.bank || ""} ${pm?.cardVariant || ""} ${pm?.raw || ""} ${pm?.conditions || ""} ${offer?.title || ""} ${offer?.rawDiscount || ""} ${offer?.offerSummary || ""} ${offer?.rawText || ""} ${offer?.terms?.raw || offer?.terms || ""}`;
+  const { positiveBlob } = splitRestrictionBlobByNegation(
+    pm?.bank, pm?.cardVariant, pm?.raw, pm?.conditions, offer?.title,
+    offer?.rawDiscount, offer?.offerSummary, offer?.rawText, offer?.terms?.raw || offer?.terms
+  );
 
-  return canonicalizeAllCardFamilies(blob);
+  return canonicalizeAllCardFamilies(positiveBlob);
 }
 
 function extractOfferCorporateRestriction(offer, pm = null) {
