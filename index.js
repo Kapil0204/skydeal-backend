@@ -3886,7 +3886,14 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        continue;
+        // Bank-agnostic offer (e.g. Air India's VISAFLY - Visa network,
+        // any bank) that already cleared every network/family/corporate
+        // check above should match, the same way the UPI branch above
+        // already treats "no bank restriction" as a pass, not a reject.
+        // Found 2026-09-14: this branch always fell through to a bare
+        // `continue` here, so a real network-only offer could never match
+        // ANY selection no matter how correctly everything else lined up.
+        return true;
       }
 
            // Credit / Debit / NetBanking / Wallet
@@ -3949,7 +3956,14 @@ function offerMatchesSelectedPayment(offer, selectedPaymentMethods = []) {
           continue;
         }
 
-        continue;
+        // Bank-agnostic offer (e.g. Air India's VISAFLY - Visa network,
+        // any bank) that already cleared every network/family/corporate
+        // check above should match, the same way the UPI branch above
+        // already treats "no bank restriction" as a pass, not a reject.
+        // Found 2026-09-14: this branch always fell through to a bare
+        // `continue` here, so a real network-only offer could never match
+        // ANY selection no matter how correctly everything else lined up.
+        return true;
       }
     }
   }
@@ -7210,6 +7224,9 @@ app.get("/debug/payment-match-trace", async (req, res) => {
     const bank = String(req.query.bank || "").trim();
     const type = String(req.query.type || "").trim();
     const tenureMonths = Number(req.query.tenureMonths || req.query.emiTenureMonths || 0);
+    const network = String(req.query.network || "").trim();
+    const provider = String(req.query.provider || "").trim();
+    const cardFamily = String(req.query.cardFamily || "").trim();
 
     if (!portal || !q || !bank || !type) {
       return res.status(400).json({
@@ -7220,7 +7237,10 @@ app.get("/debug/payment-match-trace", async (req, res) => {
     const selectedPaymentMethods = [{
       type,
       name: bank,
-      ...(Number.isFinite(tenureMonths) && tenureMonths > 0 ? { tenureMonths } : {})
+      ...(Number.isFinite(tenureMonths) && tenureMonths > 0 ? { tenureMonths } : {}),
+      ...(network ? { network } : {}),
+      ...(provider ? { provider } : {}),
+      ...(cardFamily ? { cardFamily } : {})
     }];
 
     await getOffersCollection();
