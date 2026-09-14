@@ -1658,6 +1658,23 @@ function normalizeText(s) {
 // phrased.
 const NEGATION_SENTENCE_MARKERS = /\bnot valid\b|\bnot applicable\b|\bnot eligible\b|\bnot permitted\b|\bnot allowed\b|\bnot be valid\b|\bnot be applicable\b|\bnot be eligible\b|\bnot be permitted\b|\bnot be allowed\b|\bexcluding\b|\bexcludes?\b|\bexcept\b|\bshall not\b|\bwill not\b|\bcannot be\b|\bcan not be\b|\bineligible\b/i;
 
+// Boilerplate liability/indemnity disclaimers ("Air India and VISA will not
+// be liable...", "...shall not be liable for any indirect...") share the
+// exact "shall not"/"will not" phrasing NEGATION_SENTENCE_MARKERS looks for,
+// but say nothing about payment eligibility - they just happen to name a
+// co-branded network/bank/provider partner in passing. Found 2026-09-14 via
+// VISAFLY (Air India): its own network requirement is Visa, but "Air India
+// and VISA will not be liable..." was misread as an exclusion, so
+// bankCanonical/typeEqual matched fine yet the offer could never apply to
+// anyone since its one required network came back excluded, not allowed.
+// Every portal's offer text carries this same liability-boilerplate shape
+// (grep across mongo_ready confirmed "liable"/"liability" present in all 7),
+// so this isn't Air-India-specific. A sentence matching both markers is
+// dropped from consideration entirely (neither positive nor negative) -
+// it's not a genuine eligibility statement either way, so it shouldn't feed
+// a keyword hit on either side.
+const LIABILITY_DISCLAIMER_MARKER = /\bliable\b|\bliability\b/i;
+
 function splitIntoSentences(text) {
   return String(text || "")
     .split(/(?<=[.!?])\s+|\n+/)
@@ -1679,7 +1696,11 @@ function splitRestrictionBlobByNegation(...parts) {
   const negative = [];
 
   for (const sentence of sentences) {
-    if (NEGATION_SENTENCE_MARKERS.test(sentence)) {
+    const isNegation = NEGATION_SENTENCE_MARKERS.test(sentence);
+    if (isNegation && LIABILITY_DISCLAIMER_MARKER.test(sentence)) {
+      continue;
+    }
+    if (isNegation) {
       negative.push(sentence);
     } else {
       positive.push(sentence);
