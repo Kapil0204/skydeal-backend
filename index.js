@@ -50,7 +50,7 @@ app.use(express.json({ limit: "2mb" }));
 // --------------------
 // Config
 // --------------------
-const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip", "Ixigo", "Adani One"];
+const OTAS = ["Goibibo", "MakeMyTrip", "Yatra", "EaseMyTrip", "Cleartrip", "Ixigo", "Adani One", "Air India"];
 
 // Single source of truth for "/search's page size" and "how many pages
 // ever get fetched" - every other cap/margin that depends on "max flights
