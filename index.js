@@ -3175,6 +3175,12 @@ function bankCanonicalFromAny(raw) {
 if (/\bCANARA\b/.test(s)) return "CANARA_BANK";
 if (/\bDBS\b/.test(s)) return "DBS";
 if (/\bCENTRAL BANK\b|\bCENTRAL BANK OF INDIA\b/.test(s)) return "CENTRAL_BANK_OF_INDIA";
+  // "J&K" (offer-side, e.g. EaseMyTrip's EMTJKMC eligiblePaymentMethods.bank)
+  // and "J&K Bank" (selection-side, the frontend's picker label) both reach
+  // this function - without an explicit rule they cleaned to two different
+  // fallback strings ("J_K" vs "J_K_BANK"), so the offer never matched any
+  // real selection (found 2026-09-14 via /debug/payment-match-trace).
+  if (/\bJ\s*&\s*K\b|\bJAMMU\b.*\bKASHMIR\b|\bJK\s*BANK\b/.test(s)) return "JK_BANK";
 
   const cleaned = s.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return normalizeBankCanonicalAlias(cleaned) || cleaned || null;
@@ -3595,6 +3601,16 @@ function normalizeBankCanonicalAlias(value) {
   if (s === "DBS" || s === "DBS_BANK") return "DBS_BANK";
   if (s === "HSBC" || s === "HSBC_BANK") return "HSBC_BANK";
   if (s === "IDFC" || s === "IDFC_BANK") return "IDFC_FIRST_BANK";
+  if (
+    s === "J_K" ||
+    s === "JK" ||
+    s === "J_K_BANK" ||
+    s === "JK_BANK" ||
+    s === "JAMMU_AND_KASHMIR_BANK" ||
+    s === "JAMMU_KASHMIR_BANK"
+  ) {
+    return "JK_BANK";
+  }
   if (
     s === "PNB" ||
     s === "PNB_BANK" ||
